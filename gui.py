@@ -197,6 +197,27 @@ def build_ui():
             # ── Right: Control panel ─────────────────────────────────────────
             with gr.Column(scale=1):
 
+                # ── MISSION BRIEFING — top, prominent ────────────────────────
+                gr.Markdown("### 📋 Mission Briefing")
+                briefing_input = gr.Textbox(
+                    placeholder=(
+                        "Type your mission briefing here before engaging...\n\n"
+                        "Example: Princess Leia has been captured and is held in "
+                        "the Death Star. R2-D2 may know her exact location — find "
+                        "him first. Darth Vader is planning something evil and may "
+                        "have taken her. You cannot engage in combat — seek the "
+                        "help of Luke Skywalker. Good luck."
+                    ),
+                    label="",
+                    lines=5
+                )
+
+                with gr.Row():
+                    engage_btn    = gr.Button("🚀 ENGAGE",    variant="primary", scale=2)
+                    disengage_btn = gr.Button("🛑 DISENGAGE", variant="stop",    scale=1)
+
+                gr.HTML("<hr style='margin:8px 0; border-color:#333'>")
+
                 # Status bar
                 status_box = gr.Textbox(
                     value=_status_text,
@@ -214,18 +235,6 @@ def build_ui():
                     lines=4,
                     elem_classes=["eric-says"]
                 )
-
-                # Mission briefing
-                gr.Markdown("### 📋 Mission Briefing")
-                briefing_input = gr.Textbox(
-                    placeholder="Enter mission briefing before engaging...\n\nExample: Princess Leia has been captured. R2-D2 may know her location. Darth Vader is involved. Seek Luke Skywalker's help. You cannot engage in combat.",
-                    label="",
-                    lines=4
-                )
-
-                with gr.Row():
-                    engage_btn    = gr.Button("🚀 ENGAGE",    variant="primary")
-                    disengage_btn = gr.Button("🛑 DISENGAGE", variant="stop")
 
                 # Character interaction
                 gr.Markdown("### 💬 Character Interaction")
