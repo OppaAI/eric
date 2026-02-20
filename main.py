@@ -40,7 +40,7 @@ from pathlib import Path
 from datetime import datetime
 
 from dotenv import load_dotenv
-load_dotenv(dotenv_path=Path.home() / "AGi/.env")
+load_dotenv(dotenv_path=Path.home() / "AGi/ERIC/.env")
 
 from telegram import Update
 from telegram.ext import (
