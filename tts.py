@@ -1,6 +1,6 @@
 """
 E.R.I.C. — Text to Speech
-Piper streaming (CPU, zero VRAM) with gTTS fallback
+Piper streaming TTS (CPU, zero VRAM) with gTTS fallback
 """
 
 import threading
@@ -17,6 +17,7 @@ _piper_available = False
 
 
 def init_tts() -> bool:
+    """Initialize Piper TTS. Returns True if successful."""
     global _tts_stream, _piper_available
     try:
         from RealtimeTTS import TextToAudioStream, PiperEngine, PiperVoice
@@ -29,16 +30,22 @@ def init_tts() -> bool:
         )
         _tts_stream      = TextToAudioStream(engine)
         _piper_available = True
-        log.info("✅ TTS: Piper streaming (CPU)")
+        log.info("✅ TTS: Piper streaming (CPU, zero VRAM)")
         return True
     except Exception as e:
         log.warning(f"⚠️  Piper unavailable ({e}) — using gTTS fallback")
         _piper_available = False
+        # Init pygame for gTTS
+        try:
+            import pygame
+            pygame.mixer.init()
+        except Exception:
+            pass
         return False
 
 
 def speak(text: str):
-    """Non-blocking speak — runs in background thread."""
+    """Non-blocking speak — fires in background thread."""
     threading.Thread(target=_speak_blocking, args=(text,), daemon=True).start()
 
 
@@ -51,37 +58,36 @@ def _speak_blocking(text: str):
                 _tts_stream.play()
                 return
             except Exception as e:
-                log.warning(f"Piper error: {e}")
+                log.warning(f"Piper speak error: {e}")
         _gtts_speak(text)
 
 
-def speak_streaming(token_generator) -> str:
+def speak_streaming(token_gen) -> str:
     """
-    Feed a token generator directly into Piper TTS.
+    Feed a token generator directly into Piper.
     Starts speaking as first tokens arrive — minimal latency.
     Returns full collected text.
     Falls back to blocking speak if Piper unavailable.
     """
-    full_text = []
+    full = []
 
     if _piper_available and _tts_stream:
         def _gen():
-            for chunk in token_generator:
-                full_text.append(chunk)
+            for chunk in token_gen:
+                full.append(chunk)
                 yield chunk
-
         with _tts_lock:
             try:
                 _tts_stream.feed(_gen())
                 _tts_stream.play()
-                return "".join(full_text)
+                return "".join(full)
             except Exception as e:
                 log.warning(f"Streaming TTS error: {e}")
 
-    # Fallback — collect all tokens then speak
-    for chunk in token_generator:
-        full_text.append(chunk)
-    text = "".join(full_text)
+    # Fallback
+    for chunk in token_gen:
+        full.append(chunk)
+    text = "".join(full)
     _speak_blocking(text)
     return text
 
