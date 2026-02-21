@@ -149,7 +149,7 @@ def resume_after_interaction():
 def handle_character_response(character: str, said: str) -> str:
     """
     User typed as a character. Eric reasons about it and responds.
-    Adds to conversation history for ongoing context.
+    If off-topic, Eric politely takes his leave and resumes mission.
     """
     global conversation_history
 
@@ -164,20 +164,39 @@ def handle_character_response(character: str, said: str) -> str:
         for e in conversation_history[-5:]
     )
 
+    # Count how many exchanges with this character
+    exchanges = sum(1 for e in conversation_history if e["character"] == character)
+
     response = ask_cosmos(
         f"I am talking to {character}. They just said: \"{said}\"\n\n"
         f"Information gathered so far:\n{history_text}\n\n"
-        "Based on my mission briefing and what I've been told:\n"
-        "1) What does this mean for my mission?\n"
-        "2) What do I say back?\n"
-        "3) What do I do next?\n\n"
-        "Respond in 2-3 sentences as Eric speaking naturally. Be decisive.",
-        max_tokens=200
+        f"This is exchange #{exchanges} with {character}.\n\n"
+        "Evaluate this response:\n"
+        "1) Is what they said relevant to my mission?\n"
+        "2) Have I already gotten all useful information from them?\n"
+        "3) Are they going off-topic or being overly chatty?\n\n"
+        "If they are off-topic OR this is exchange #3 or more with no new mission info:\n"
+        "  → Politely apologize, thank them, say you must continue your mission, say goodbye.\n"
+        "  → End your response with exactly: [MOVE_ON]\n\n"
+        "If they have useful mission information:\n"
+        "  → Respond naturally, ask a focused follow-up if needed.\n\n"
+        "Respond in 2 sentences as Eric. Be warm but decisive.",
+        max_tokens=150
     )
 
-    eric_say(response)
-    _ui("log", f"[{character}]: {said}\n[Eric]: {response}")
-    return response
+    # Check if Eric decided to move on
+    should_move_on = "[MOVE_ON]" in response
+    clean_response = response.replace("[MOVE_ON]", "").strip()
+
+    eric_say(clean_response)
+    _ui("log", f"[{character}]: {said}\n[Eric]: {clean_response}")
+
+    if should_move_on:
+        log.info(f"💨 Eric politely left conversation with {character}")
+        _ui("log", f"💨 Eric moved on from {character}")
+        resume_after_interaction()
+
+    return clean_response
 
 
 # ─── Mission Loop ─────────────────────────────────────────────────────────────
