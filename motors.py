@@ -36,12 +36,32 @@ class Motors:
         cmd = json.dumps({"T": 1, "L": round(left, 3), "R": round(right, 3)}) + "\n"
         if not self._ser:
             log.info(f"[MOTOR SIM] {cmd.strip()}")
-            return
-        with self._lock:
-            try:
-                self._ser.write(cmd.encode("utf-8"))
-            except Exception as e:
-                log.error(f"Motor error: {e}")
+        else:
+            with self._lock:
+                try:
+                    self._ser.write(cmd.encode("utf-8"))
+                except Exception as e:
+                    log.error(f"Motor error: {e}")
+
+        # Update telemetry state for GUI display
+        try:
+            from gui import _motor_state
+            _motor_state["left"]  = round(left, 3)
+            _motor_state["right"] = round(right, 3)
+            if left == 0 and right == 0:
+                _motor_state["direction"] = "stopped"
+            elif left > 0 and right > 0:
+                _motor_state["direction"] = "forward"
+            elif left < 0 and right < 0:
+                _motor_state["direction"] = "backward"
+            elif left < 0 and right > 0:
+                _motor_state["direction"] = "left"
+            elif left > 0 and right < 0:
+                _motor_state["direction"] = "right"
+            else:
+                _motor_state["direction"] = "spinning"
+        except ImportError:
+            pass
 
     def oled(self, line: int, text: str):
         """Write text to ESP32 OLED display (max 16 chars per line)."""
