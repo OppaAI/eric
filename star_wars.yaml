@@ -1,0 +1,29 @@
+name: "Operation Find Leia"
+description: "Find Princess Leia who has been captured and is held in the Death Star"
+author: "OppaAI"
+
+briefing: |
+  Princess Leia has been captured and is held somewhere called the Death Star.
+  Before she was taken, she left a message with R2-D2 who may know her exact location.
+  Darth Vader is behind this — he is planning something evil and has taken Leia for his purpose.
+  You cannot engage in combat under any circumstances — you have no arms.
+  Seek out Luke Skywalker because the Force is with him and he can help rescue Leia.
+  Talk to anyone you encounter — if they don't know anything, thank them and move on.
+  Good luck, and hope we can rescue the princess in time.
+
+characters:
+  - name: "R2-D2"
+    hint: "Beeps dramatically, then reveals Leia's location"
+  - name: "C-3PO"
+    hint: "Anxious, quotes odds, well-meaning but unhelpful"
+  - name: "Stormtrooper"
+    hint: "Clueless, can't see well in the helmet"
+  - name: "Darth Vader"
+    hint: "Dramatic, wants you to join the dark side"
+  - name: "Luke Skywalker"
+    hint: "Confident, will help rescue Leia"
+
+terrain:
+  - "Pebble path (slow down)"
+  - "Smooth pavement (normal speed)"
+  - "Grass (slow down)"

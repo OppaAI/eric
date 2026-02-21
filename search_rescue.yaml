@@ -1,0 +1,26 @@
+name: "Operation Lost Hiker"
+description: "Find a missing hiker in the backyard terrain"
+author: "OppaAI"
+
+briefing: |
+  A hiker named Bob went missing during an afternoon walk in the area.
+  His dog Max was last seen near the east side and may know which direction Bob went.
+  The park ranger Sarah is stationed at the far end and has a radio to call for help.
+  There is a broken fence on the north side — do not approach it, it is a hazard.
+  Talk to anyone you encounter and gather clues about Bob's last known location.
+  Report back with his location as soon as you find any reliable information.
+  Time is critical — Bob may be injured.
+
+characters:
+  - name: "Max (dog)"
+    hint: "Excited, leads you toward Bob's direction"
+  - name: "Sarah (ranger)"
+    hint: "Professional, has a map and radio"
+  - name: "Hiker (stranger)"
+    hint: "Saw Bob heading toward the creek"
+
+terrain:
+  - "Creek crossing (slow down, careful)"
+  - "Muddy trail (slow down)"
+  - "Clear path (normal speed)"
+  - "Broken fence (obstacle, navigate around)"

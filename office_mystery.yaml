@@ -1,0 +1,25 @@
+name: "Operation Missing Drive"
+description: "Find a missing USB drive somewhere in the office"
+author: "OppaAI"
+
+briefing: |
+  A red USB drive containing important project files has gone missing in the office.
+  The last person to use it was Alex, who sits near the window — they may remember where they left it.
+  The printer area is off limits — the machine is broken and surrounded by paper clutter, avoid it.
+  Jamie from IT mentioned seeing something red near the conference table yesterday.
+  Talk to anyone you encounter and ask if they have seen a small red USB drive.
+  Once you have a reliable lead on its location, report back immediately.
+  Do not pick anything up — you have no arms, just observe and report.
+
+characters:
+  - name: "Alex"
+    hint: "Remembers leaving it near the monitor, but isn't sure"
+  - name: "Jamie (IT)"
+    hint: "Saw it near the conference table yesterday afternoon"
+  - name: "Reception (front desk)"
+    hint: "Has a lost and found box, may have it"
+
+terrain:
+  - "Open hallway (normal speed)"
+  - "Cluttered printer area (obstacle, navigate around)"
+  - "Conference room (slow down, tight space)"
