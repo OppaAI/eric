@@ -8,7 +8,7 @@ import threading
 import logging
 from pathlib import Path
 
-from config import SCAN_INTERVAL, MOTOR_SPEED_SLOW, MISSIONS_DIR
+from config import SCAN_INTERVAL, MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR
 from motors import motors
 from cosmos import ask_cosmos, scan_scene, set_mission_briefing, get_mission_briefing
 from tts import speak
@@ -18,15 +18,21 @@ log = logging.getLogger("eric.mission")
 
 class State:
     IDLE         = "idle"
-    SEARCHING    = "searching"
-    INTERACTING  = "interacting"
+    SEARCHING    = "searching"    # moving forward, scanning
+    INTERACTING  = "interacting"  # stopped, talking to character
+    LOST         = "lost"         # nothing found, executing search pattern
     COMPLETE     = "complete"
 
 
 # ─── Mission State ────────────────────────────────────────────────────────────
 mission_state        = State.IDLE
 mission_active       = False
-conversation_history = []   # what characters told Eric during the mission
+conversation_history = []
+
+# Search pattern tracking
+_empty_scans      = 0          # consecutive scans with nothing found
+_search_phase     = 0          # which phase of search pattern we're in
+EMPTY_SCAN_LIMIT  = 4          # scans before triggering search pattern
 
 _ui_callbacks = {"eric_says": None, "status": None, "log": None}
 
@@ -45,7 +51,6 @@ def _ui(key: str, text: str):
 
 
 def eric_say(text: str):
-    """Update UI and speak simultaneously."""
     _ui("eric_says", text)
     speak(text)
 
@@ -53,59 +58,48 @@ def eric_say(text: str):
 # ─── Mission File Loading ─────────────────────────────────────────────────────
 
 def list_missions() -> list[str]:
-    """Return list of available mission names (yaml filenames without extension)."""
     if not MISSIONS_DIR.exists():
         return []
     return [f.stem for f in sorted(MISSIONS_DIR.glob("*.yaml"))]
 
 
 def load_mission_file(name: str) -> dict | None:
-    """Load a mission YAML file by stem name. Returns dict or None."""
     try:
         import yaml
         path = MISSIONS_DIR / f"{name}.yaml"
         if not path.exists():
-            log.warning(f"Mission file not found: {path}")
             return None
         with open(path) as f:
-            data = yaml.safe_load(f)
-        log.info(f"📂 Loaded mission: {data.get('name', name)}")
-        return data
+            return yaml.safe_load(f)
     except Exception as e:
         log.error(f"Failed to load mission {name}: {e}")
         return None
 
 
 def get_briefing_from_file(name: str) -> str | None:
-    """Convenience: load mission file and return the briefing text."""
     data = load_mission_file(name)
-    if data:
-        return data.get("briefing", "").strip()
-    return None
+    return data.get("briefing", "").strip() if data else None
 
 
 # ─── Mission Control ──────────────────────────────────────────────────────────
 
 def start_mission(briefing: str) -> str:
-    """
-    Start mission with a briefing string.
-    Briefing can be typed manually or loaded from a YAML file.
-    """
     global mission_active, mission_state, conversation_history
+    global _empty_scans, _search_phase
 
     if mission_active:
         return "⚠️ Mission already active. Disengage first."
-
     if not briefing.strip():
         return "⚠️ No mission briefing provided."
 
     conversation_history = []
+    _empty_scans         = 0
+    _search_phase        = 0
     set_mission_briefing(briefing)
 
-    # Eric acknowledges and states first action
     ack = ask_cosmos(
         f"You just received this mission briefing:\n\"{briefing}\"\n\n"
-        "Acknowledge it in 2-3 sentences. State your immediate first action. "
+        "Acknowledge in 2-3 sentences. State your immediate first action. "
         "Be concise and mission-focused.",
         max_tokens=150
     )
@@ -122,7 +116,6 @@ def start_mission(briefing: str) -> str:
 
 
 def stop_mission():
-    """Stop mission immediately."""
     global mission_active, mission_state
     mission_active = False
     mission_state  = State.IDLE
@@ -134,9 +127,11 @@ def stop_mission():
 
 
 def resume_after_interaction():
-    """Resume movement after a character interaction."""
-    global mission_state
+    global mission_state, _empty_scans, _search_phase
     if mission_active:
+        # Reset search counters — we found someone, restart search fresh
+        _empty_scans  = 0
+        _search_phase = 0
         mission_state = State.SEARCHING
         motors.forward()
         motors.oled(0, "ERIC ACTIVE")
@@ -144,13 +139,57 @@ def resume_after_interaction():
         _ui("status", f"🟢 {State.SEARCHING.upper()}")
 
 
+# ─── Search Pattern ───────────────────────────────────────────────────────────
+
+def _execute_search_pattern():
+    """
+    Systematic search when nothing found after EMPTY_SCAN_LIMIT scans.
+    Cycles through: turn right → forward → turn left → forward → turn back → forward
+    Each phase gives a new vantage point before Cosmos scans again.
+    """
+    global _search_phase, _empty_scans
+
+    patterns = [
+        ("Scanning right...",    lambda: (motors.right(), time.sleep(1.2), motors.stop())),
+        ("Scanning forward...",  lambda: (motors.forward(), time.sleep(1.5), motors.stop())),
+        ("Scanning left...",     lambda: (motors.left(), time.sleep(1.2), motors.stop())),
+        ("Scanning forward...",  lambda: (motors.forward(), time.sleep(1.5), motors.stop())),
+        ("Turning back...",      lambda: (motors.right(), time.sleep(2.4), motors.stop())),
+        ("Scanning forward...",  lambda: (motors.forward(), time.sleep(2.0), motors.stop())),
+    ]
+
+    phase        = _search_phase % len(patterns)
+    label, action = patterns[phase]
+
+    log.info(f"🔍 Search pattern phase {phase}: {label}")
+    _ui("log", f"🔍 {label}")
+    motors.oled(1, label[:16])
+    action()
+
+    _search_phase += 1
+    _empty_scans   = 0  # reset after each search move — give Cosmos fresh chance
+
+    # After full cycle (6 phases), ask Cosmos what to do
+    if _search_phase % len(patterns) == 0:
+        _ask_cosmos_what_to_do()
+
+
+def _ask_cosmos_what_to_do():
+    """After exhausting search pattern, ask Cosmos for reasoning on next step."""
+    response = ask_cosmos(
+        "I have searched my current area systematically and cannot find my target. "
+        "Based on my mission briefing, what should I do next? "
+        "Should I continue forward, backtrack, or try a different direction? "
+        "Respond in 2 sentences — be decisive.",
+        max_tokens=100
+    )
+    eric_say(response)
+    _ui("log", f"🧠 Eric decides: {response}")
+
+
 # ─── Character Interaction ────────────────────────────────────────────────────
 
 def handle_character_response(character: str, said: str) -> str:
-    """
-    User typed as a character. Eric reasons about it and responds.
-    If off-topic, Eric politely takes his leave and resumes mission.
-    """
     global conversation_history
 
     conversation_history.append({
@@ -164,27 +203,24 @@ def handle_character_response(character: str, said: str) -> str:
         for e in conversation_history[-5:]
     )
 
-    # Count how many exchanges with this character
     exchanges = sum(1 for e in conversation_history if e["character"] == character)
 
     response = ask_cosmos(
         f"I am talking to {character}. They just said: \"{said}\"\n\n"
         f"Information gathered so far:\n{history_text}\n\n"
         f"This is exchange #{exchanges} with {character}.\n\n"
-        "Evaluate this response:\n"
-        "1) Is what they said relevant to my mission?\n"
-        "2) Have I already gotten all useful information from them?\n"
+        "Evaluate:\n"
+        "1) Is this relevant to my mission?\n"
+        "2) Have I gotten all useful info from them?\n"
         "3) Are they going off-topic or being overly chatty?\n\n"
-        "If they are off-topic OR this is exchange #3 or more with no new mission info:\n"
-        "  → Politely apologize, thank them, say you must continue your mission, say goodbye.\n"
-        "  → End your response with exactly: [MOVE_ON]\n\n"
-        "If they have useful mission information:\n"
-        "  → Respond naturally, ask a focused follow-up if needed.\n\n"
-        "Respond in 2 sentences as Eric. Be warm but decisive.",
+        "If off-topic OR exchange #3+ with no new mission info:\n"
+        "  → Politely apologize, thank them, say you must continue. End with: [MOVE_ON]\n\n"
+        "If useful info:\n"
+        "  → Respond naturally, ask focused follow-up if needed.\n\n"
+        "2 sentences max. Be warm but decisive.",
         max_tokens=150
     )
 
-    # Check if Eric decided to move on
     should_move_on = "[MOVE_ON]" in response
     clean_response = response.replace("[MOVE_ON]", "").strip()
 
@@ -192,7 +228,7 @@ def handle_character_response(character: str, said: str) -> str:
     _ui("log", f"[{character}]: {said}\n[Eric]: {clean_response}")
 
     if should_move_on:
-        log.info(f"💨 Eric politely left conversation with {character}")
+        log.info(f"💨 Eric politely left {character}")
         _ui("log", f"💨 Eric moved on from {character}")
         resume_after_interaction()
 
@@ -225,7 +261,7 @@ def _mission_loop():
 
 
 def _process_scan(scan: dict):
-    global mission_state
+    global mission_state, _empty_scans
 
     obj      = scan.get("object", "unknown")
     obj_name = scan.get("object_name")
@@ -250,6 +286,8 @@ def _process_scan(scan: dict):
 
     # Person or robot in path — stop and interact
     if in_path and obj in ["person", "robot"]:
+        _empty_scans  = 0   # found something — reset counter
+        _search_phase = 0
         motors.stop()
         mission_state = State.INTERACTING
         display_name  = obj_name or obj
@@ -259,7 +297,7 @@ def _process_scan(scan: dict):
 
         greeting = ask_cosmos(
             f"You see {display_name} directly ahead. "
-            "Greet them briefly and ask if they have any information relevant to your mission. "
+            "Greet them and ask if they have information relevant to your mission. "
             "1-2 sentences only.",
             max_tokens=80
         )
@@ -267,7 +305,29 @@ def _process_scan(scan: dict):
         _ui("status", f"💬 TALKING — {display_name}")
         return
 
-    # Navigation
+    # Nothing useful found in this scan
+    if obj in ["clear", "unknown"]:
+        _empty_scans += 1
+        log.info(f"🔍 Empty scan {_empty_scans}/{EMPTY_SCAN_LIMIT}")
+        _ui("log",  f"🔍 Nothing found ({_empty_scans}/{EMPTY_SCAN_LIMIT})")
+
+        if _empty_scans >= EMPTY_SCAN_LIMIT:
+            # Trigger search pattern
+            mission_state = State.LOST
+            _ui("status", "🔍 SEARCHING — executing search pattern")
+            motors.oled(1, "Searching...")
+
+            if _empty_scans == EMPTY_SCAN_LIMIT:
+                # First time hitting limit — announce it
+                eric_say(
+                    "I can't find my target in this area. "
+                    "Executing systematic search pattern."
+                )
+
+            _execute_search_pattern()
+            return
+
+    # Normal navigation
     if action == "navigate_around":
         motors.left(MOTOR_SPEED_SLOW)
         time.sleep(0.8)
@@ -280,4 +340,6 @@ def _process_scan(scan: dict):
         motors.forward()
 
     mission_state = State.SEARCHING
+    motors.oled(0, "ERIC ACTIVE")
+    motors.oled(1, "Searching...")
     _ui("status", f"🟢 {State.SEARCHING.upper()}")
