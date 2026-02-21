@@ -9,10 +9,6 @@ from dotenv import load_dotenv
 
 load_dotenv(dotenv_path=Path(__file__).parent / ".env")
 
-# ─── Telegram ─────────────────────────────────────────────────────────────────
-TELEGRAM_BOT_TOKEN = os.getenv("ERIC_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
-
 # ─── Cosmos (vLLM) ────────────────────────────────────────────────────────────
 VLLM_URL     = os.getenv("VLLM_URL", "http://localhost:8000/v1/chat/completions")
 COSMOS_MODEL = os.getenv("COSMOS_MODEL", "embedl/Cosmos-Reason2-2B-W4A16")
@@ -27,8 +23,8 @@ MOTOR_SPEED_FAST   = 0.50   # m/s
 # ─── Camera ───────────────────────────────────────────────────────────────────
 CAMERA_WEBCAM  = int(os.getenv("CAMERA_WEBCAM",  "0"))
 CAMERA_PANTILT = int(os.getenv("CAMERA_PANTILT", "1"))
-CAMERA_WIDTH   = 320
-CAMERA_HEIGHT  = 240
+CAMERA_WIDTH   = 640
+CAMERA_HEIGHT  = 480
 SCAN_INTERVAL  = 3.0   # seconds between Cosmos scans during mission
 
 # ─── TTS (Piper) ──────────────────────────────────────────────────────────────
