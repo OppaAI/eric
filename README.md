@@ -1,8 +1,8 @@
-# E.R.I.C. — Edge Robotics Innovation by Cosmos
+# ERIC — Edge Robotics Innovation by Cosmos
 
 **NVIDIA Cosmos Cookoff 2026 Entry**
 
-E.R.I.C. is a search and rescue ground robot powered by NVIDIA Cosmos Reason 2, running fully at the edge on a ~$750 CAD Jetson Orin Nano Super 8GB. No cloud. No server. Just a tracked robot reasoning about the physical world in real time.
+ERIC is a search and rescue ground robot powered by NVIDIA Cosmos Reason 2, running fully at the edge on a ~$750 CAD Jetson Orin Nano Super 8GB. No cloud. No server. Just a tracked robot reasoning about the physical world in real time.
 
 ## Demo
 
@@ -20,7 +20,7 @@ Eric navigates a backyard Star Wars Lego scene, talks to characters, gathers inf
 | Camera 2 | Pan-tilt camera |
 | TTS | Piper (CPU, zero VRAM) |
 | Total | ~$750 CAD |
-| Location | Kelowna BC, Canada |
+| Location | Vancover BC, Canada |
 
 ## Stack
 
