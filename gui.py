@@ -209,29 +209,20 @@ def action_status():
     )
 
 
-def action_fwd():   motors.forward(); return "▶️ Forward"
-def action_stop():  motors.stop();    return "⏹️ Stop"
-def action_left():  motors.left();    return "◀️ Left"
-def action_right(): motors.right();   return "▶️ Right"
-
-
 # ─── Build UI ─────────────────────────────────────────────────────────────────
 def build_ui():
     with gr.Blocks(
         title="E.R.I.C. — Edge Robotics Innovation by Cosmos",
-        theme=gr.themes.Base(primary_hue="green"),
-        css="""
-            body { background:#111; }
-            .title { font-size:1.4em; font-weight:bold; color:#76b900; }
-            .sub   { color:#888; font-size:0.85em; margin-bottom:12px; }
-            .says  { border-left:3px solid #76b900; padding-left:8px; font-size:1.05em; }
-            footer { display:none !important; }
-        """
     ) as demo:
 
         gr.HTML('<div class="title">🤖 E.R.I.C. — Edge Robotics Innovation by Cosmos</div>')
         gr.HTML('<div class="sub">NVIDIA Cosmos Cookoff 2026 · Jetson Orin Nano Super 8GB · Kelowna BC · ~$750 CAD</div>')
         gr.HTML("""<style>
+            body { background:#111; }
+            .title { font-size:1.4em; font-weight:bold; color:#76b900; }
+            .sub   { color:#888; font-size:0.85em; margin-bottom:12px; }
+            .says  { border-left:3px solid #76b900; padding-left:8px; font-size:1.05em; }
+            footer { display:none !important; }
             #estop { background:#cc0000 !important; color:white !important;
                      font-size:1.2em !important; font-weight:bold !important;
                      height:52px !important; border:2px solid #ff4444 !important;
@@ -249,7 +240,6 @@ def build_ui():
                 gr.Markdown("### 📷 Webcam — Navigation")
                 webcam_img  = gr.Image(streaming=True, height=240, label="Webcam")
 
-                # ── Motor telemetry display ───────────────────────────────────
                 gr.HTML("<hr style='border-color:#333;margin:6px 0'>")
                 gr.Markdown("### 🚗 Motor Telemetry")
                 motor_display = gr.HTML(value=_motor_telemetry_html("stopped", 0.0, 0.0))
@@ -257,7 +247,6 @@ def build_ui():
             # ── RIGHT: Control panel ─────────────────────────────────────────
             with gr.Column(scale=1):
 
-                # ── Mission selection + briefing (TOP) ───────────────────────
                 gr.Markdown("### 📋 Mission")
                 with gr.Row():
                     mission_dd = gr.Dropdown(
@@ -283,13 +272,11 @@ def build_ui():
 
                 gr.HTML("<hr style='border-color:#333;margin:6px 0'>")
 
-                # Status + Eric says
-                status_box    = gr.Textbox(value=_status,    label="Status",     interactive=False, max_lines=1)
+                status_box    = gr.Textbox(value=_status,    label="Status",      interactive=False, max_lines=1)
                 eric_says_box = gr.Textbox(value=_eric_says, label="🔊 Eric Says", interactive=False, lines=4, elem_classes=["says"])
 
                 gr.HTML("<hr style='border-color:#333;margin:6px 0'>")
 
-                # ── Character interaction ─────────────────────────────────────
                 gr.Markdown("### 💬 Character Interaction")
                 gr.Markdown("*When Eric stops — type as the character below*")
                 with gr.Row():
@@ -298,7 +285,6 @@ def build_ui():
                 char_btn   = gr.Button("📨 Send as Character", variant="secondary")
                 char_reply = gr.Textbox(label="Eric responds", interactive=False, lines=3)
 
-                # ── Manual controls ───────────────────────────────────────────
                 with gr.Accordion("🕹️ Manual Controls", open=True):
                     speed_slider = gr.Slider(
                         minimum=0.05, maximum=0.50, value=0.25, step=0.05,
@@ -306,36 +292,33 @@ def build_ui():
                         info="Slow=0.05 · Normal=0.25 · Fast=0.50"
                     )
                     with gr.Row():
-                        btn_left     = gr.Button("◀️ Left",     scale=1)
-                        btn_fwd      = gr.Button("▶️ Forward",  scale=2, variant="primary")
-                        btn_right    = gr.Button("▶️ Right",    scale=1)
+                        btn_left   = gr.Button("◀️ Left",    scale=1)
+                        btn_fwd    = gr.Button("▲ Forward",  scale=2, variant="primary")
+                        btn_right  = gr.Button("▶️ Right",   scale=1)
                     with gr.Row():
-                        btn_back     = gr.Button("⏪ Backward",  scale=1)
-                        btn_stop     = gr.Button("⏹️ STOP",     scale=2, variant="stop")
-                        btn_spin_l   = gr.Button("🔄 Spin L",   scale=1)
+                        btn_back   = gr.Button("▼ Backward", scale=1)
+                        btn_stop   = gr.Button("⏹️ STOP",    scale=2, variant="stop")
+                        btn_spin_l = gr.Button("🔄 Spin L",  scale=1)
                     motor_status = gr.Textbox(
                         label="Motor Status", interactive=False,
                         max_lines=1, value="Stopped"
                     )
 
-                # ── Utilities ─────────────────────────────────────────────────
                 with gr.Accordion("🛠️ Utilities", open=False):
                     with gr.Row():
                         gr.Button("🎤 Introduce").click(action_introduce, outputs=gr.Textbox(label="Output", lines=5, interactive=False))
                         gr.Button("👀 Look").click(action_look, outputs=gr.Textbox(label="Output", lines=5, interactive=False))
                         gr.Button("📊 Status").click(action_status, outputs=gr.Textbox(label="Output", lines=5, interactive=False))
 
-                # ── Mission log ───────────────────────────────────────────────
                 with gr.Accordion("📜 Mission Log", open=False):
                     log_box = gr.Textbox(label="", lines=10, interactive=False)
 
         # ── Event wiring ──────────────────────────────────────────────────────
-        mission_dd.change(on_mission_select,  inputs=mission_dd, outputs=briefing_box)
+        mission_dd.change(on_mission_select, inputs=mission_dd, outputs=briefing_box)
         refresh_btn.click(lambda: gr.update(choices=load_mission_choices()), outputs=mission_dd)
 
-        # Emergency stop — kills mission AND motors instantly
         estop_btn.click(
-            lambda: (stop_mission(), "🚨 EMERGENCY STOP — All systems halted")[1],
+            lambda: (stop_mission(), motors.stop(), "🚨 EMERGENCY STOP — All systems halted")[2],
             outputs=eric_says_box
         )
 
@@ -343,21 +326,20 @@ def build_ui():
         disengage_btn.click(action_disengage, outputs=[eric_says_box, status_box])
         char_btn.click(action_char_reply, inputs=[char_name, char_says], outputs=[char_reply, char_says])
 
-        # Manual motor controls with speed
-        btn_fwd.click(   lambda s: (motors.forward(s),  f"▶️ Forward  {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
-        btn_back.click(  lambda s: (motors.backward(s), f"⏪ Backward {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
-        btn_left.click(  lambda s: (motors.left(s),     f"◀️ Left     {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
-        btn_right.click( lambda s: (motors.right(s),    f"▶️ Right    {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
-        btn_stop.click(  lambda:   (motors.stop(),      "⏹️ Stopped")[1],                                  outputs=motor_status)
-        btn_spin_l.click(lambda s: (motors._send(-s, s), f"🔄 Spinning left {s} m/s")[1], inputs=speed_slider, outputs=motor_status)
+        btn_fwd.click(   lambda s: (motors.forward(s),           f"▲ Forward  {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
+        btn_back.click(  lambda s: (motors.backward(s),          f"▼ Backward {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
+        btn_left.click(  lambda s: (motors.left(s),              f"◀️ Left     {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
+        btn_right.click( lambda s: (motors.right(s),             f"▶️ Right    {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
+        btn_stop.click(  lambda:   (motors.stop(),               "⏹️ Stopped")[1],                                  outputs=motor_status)
+        btn_spin_l.click(lambda s: (motors._send(-s, s),         f"🔄 Spin L  {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
 
-        # Live updates every second
-        demo.load(get_webcam,           outputs=webcam_img,      every=1)
-        demo.load(get_pantilt,          outputs=pantilt_img,     every=1)
-        demo.load(get_eric,             outputs=eric_says_box,   every=1)
-        demo.load(get_status,           outputs=status_box,      every=1)
-        demo.load(get_log,              outputs=log_box,         every=2)
-        demo.load(get_motor_telemetry,  outputs=motor_display,   every=0.5)
+        # ── Live updates using gr.Timer (Gradio 6.0+) ─────────────────────────
+        gr.Timer(1.0).tick(get_webcam,          outputs=webcam_img)
+        gr.Timer(1.0).tick(get_pantilt,         outputs=pantilt_img)
+        gr.Timer(1.0).tick(get_eric,            outputs=eric_says_box)
+        gr.Timer(1.0).tick(get_status,          outputs=status_box)
+        gr.Timer(2.0).tick(get_log,             outputs=log_box)
+        gr.Timer(0.5).tick(get_motor_telemetry, outputs=motor_display)
 
     return demo
 
@@ -366,5 +348,17 @@ def launch():
     init_tts()
     demo = build_ui()
     log.info(f"🌐 Gradio UI → http://{GRADIO_HOST}:{GRADIO_PORT}")
-    demo.launch(server_name=GRADIO_HOST, server_port=GRADIO_PORT,
-                show_error=True, quiet=False)
+    demo.launch(
+        server_name=GRADIO_HOST,
+        server_port=GRADIO_PORT,
+        theme=gr.themes.Base(primary_hue="green"),
+        css="""
+            body { background:#111; }
+            .title { font-size:1.4em; font-weight:bold; color:#76b900; }
+            .sub   { color:#888; font-size:0.85em; margin-bottom:12px; }
+            .says  { border-left:3px solid #76b900; padding-left:8px; font-size:1.05em; }
+            footer { display:none !important; }
+        """,
+        show_error=True,
+        quiet=False
+    )

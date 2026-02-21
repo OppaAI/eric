@@ -2,12 +2,16 @@
 E.R.I.C. — Motor Control
 Waveshare UGV via serial UART to ESP32
 Command format: {"T":1,"L":speed,"R":speed}  speed in m/s
-"""
 
+Fixes for JetPack 6.2 UART issues:
+- rtscts=False, xonxoff=False to disable flow control
+- Byte-by-byte transmission with 1ms delay to prevent buffer corruption
+- Motor directions corrected (negative = forward on UGV Beast)
+"""
 import json
+import time
 import threading
 import logging
-
 from config import SERIAL_PORT, SERIAL_BAUD, MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MOTOR_SPEED_FAST
 
 log = logging.getLogger("eric.motors")
@@ -27,7 +31,14 @@ class Motors:
     def _connect(self):
         try:
             import serial
-            self._ser = serial.Serial(SERIAL_PORT, SERIAL_BAUD, timeout=1)
+            self._ser = serial.Serial(
+                SERIAL_PORT, SERIAL_BAUD,
+                timeout=1,
+                rtscts=False,
+                xonxoff=False
+            )
+            self._ser.reset_input_buffer()
+            self._ser.reset_output_buffer()
             log.info(f"✅ Motors: {SERIAL_PORT} @ {SERIAL_BAUD}")
         except Exception as e:
             log.warning(f"⚠️  Motors unavailable ({e}) — simulation mode")
@@ -39,7 +50,9 @@ class Motors:
         else:
             with self._lock:
                 try:
-                    self._ser.write(cmd.encode("utf-8"))
+                    for byte in cmd.encode("utf-8"):
+                        self._ser.write(bytes([byte]))
+                        time.sleep(0.001)
                 except Exception as e:
                     log.error(f"Motor error: {e}")
 
@@ -50,13 +63,13 @@ class Motors:
             _motor_state["right"] = round(right, 3)
             if left == 0 and right == 0:
                 _motor_state["direction"] = "stopped"
-            elif left > 0 and right > 0:
-                _motor_state["direction"] = "forward"
             elif left < 0 and right < 0:
+                _motor_state["direction"] = "forward"
+            elif left > 0 and right > 0:
                 _motor_state["direction"] = "backward"
-            elif left < 0 and right > 0:
-                _motor_state["direction"] = "left"
             elif left > 0 and right < 0:
+                _motor_state["direction"] = "left"
+            elif left < 0 and right > 0:
                 _motor_state["direction"] = "right"
             else:
                 _motor_state["direction"] = "spinning"
@@ -71,14 +84,31 @@ class Motors:
             return
         with self._lock:
             try:
-                self._ser.write(cmd.encode("utf-8"))
+                for byte in cmd.encode("utf-8"):
+                    self._ser.write(bytes([byte]))
+                    time.sleep(0.001)
             except Exception as e:
                 log.error(f"OLED error: {e}")
 
-    def forward(self, speed=MOTOR_SPEED_NORMAL): self._send(speed, speed)
-    def backward(self, speed=MOTOR_SPEED_NORMAL): self._send(-speed, -speed)
-    def left(self, speed=MOTOR_SPEED_SLOW):       self._send(-speed, speed)
-    def right(self, speed=MOTOR_SPEED_SLOW):      self._send(speed, -speed)
+    def lights(self, base: int = 255, head: int = 255):
+        """Control LED lights. Values 0-255."""
+        cmd = json.dumps({"T": 132, "IO4": base, "IO5": head}) + "\n"
+        if not self._ser:
+            log.info(f"[LIGHTS SIM] base={base} head={head}")
+            return
+        with self._lock:
+            try:
+                for byte in cmd.encode("utf-8"):
+                    self._ser.write(bytes([byte]))
+                    time.sleep(0.001)
+            except Exception as e:
+                log.error(f"Lights error: {e}")
+
+    # NOTE: negative speed = forward on UGV Beast hardware
+    def forward(self, speed=MOTOR_SPEED_NORMAL):  self._send(-speed, -speed)
+    def backward(self, speed=MOTOR_SPEED_NORMAL): self._send(speed, speed)
+    def left(self, speed=MOTOR_SPEED_SLOW):       self._send(speed, -speed)
+    def right(self, speed=MOTOR_SPEED_SLOW):      self._send(-speed, speed)
     def stop(self):                                self._send(0.0, 0.0)
     def slow(self):                                self.forward(MOTOR_SPEED_SLOW)
     def fast(self):                                self.forward(MOTOR_SPEED_FAST)

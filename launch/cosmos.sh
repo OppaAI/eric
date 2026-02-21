@@ -15,12 +15,11 @@ docker run -d \
   --name=vllm-server \
   -v $HOME/.cache/huggingface:/root/.cache/huggingface \
   -e HF_HOME=/root/.cache/huggingface \
-  ghcr.io/nvidia-ai-iot/vllm:0.14.0-r36.4-tegra-aarch64-cu126-22.04 \
+  ghcr.io/nvidia-ai-iot/vllm:latest-jetson-orin \
   vllm serve "embedl/Cosmos-Reason2-2B-W4A16" \
   --max-model-len 2048 \
-  --gpu-memory-utilization 0.75 \
-  --enforce-eager \
-  --max-num-seqs 2 \
+  --gpu-memory-utilization 0.68 \
+  --max-num-seqs 1 \
   --mm-processor-kwargs '{"max_pixels":256000}'
 
 echo "⏳ Cosmos loading (~3 minutes)..."
