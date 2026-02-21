@@ -1,0 +1,35 @@
+name: "Fetch My Slippers"
+description: "Find and locate the owner's slippers somewhere in the room"
+author: "OppaAI"
+
+briefing: |
+  Your mission is to find a pair of slippers somewhere in this room.
+  Slippers are large, soft, flat footwear — they look like shoes but wider and fluffier.
+  They are usually on the floor and may be anywhere — under furniture, near the door,
+  beside the couch, or in a corner.
+
+  Search the entire room systematically. Do a 360 degree scan first, then explore.
+  Slippers are big objects — if you see something flat and soft on the floor, that is likely them.
+  When you find them, stop in front of them, announce their location clearly, and signal mission complete.
+
+  You cannot pick them up — just locate them and report exactly where they are
+  so your owner can come get them.
+
+  Search tips:
+  - Look at floor level in all directions
+  - Check near the entrance, beside furniture, and in open floor areas
+  - They are often in pairs, side by side
+  - Common colors: brown, grey, blue, black, or patterned
+
+characters: []
+
+terrain:
+  - "Carpet or rug (slow down, careful)"
+  - "Smooth floor tiles (normal speed)"
+  - "Under furniture (do not go under, just look)"
+
+notes: |
+  Place slippers somewhere visible on the floor before starting.
+  They should be in the open or slightly hidden but not under furniture.
+  The 360 scan should pick them up — if not, ERIC will sweep the room.
+  Mission complete when ERIC stops in front of them and announces location.

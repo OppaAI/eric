@@ -1,28 +1,20 @@
 """
 ERIC — Mission Logic
-Loads missions from YAML files, runs autonomous search and rescue loop
-
-Improvements:
-- Dual camera scanning (webcam + pan-tilt)
-- 10s video feed at 640x480 for better detection
-- Wall and obstacle avoidance
-- Small obstacle detection (slippers, shoes, cables)
-- Pan-tilt centering on detected faces
-- Autofocus on target when found
-- Mission complete detection and announcement
+360-degree body rotation scan, dual camera, wall avoidance, mission complete
 """
 
 import time
 import threading
 import logging
-from pathlib import Path
+import json
+import requests
 
-from config import SCAN_INTERVAL, MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR
+from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR, VLLM_URL, COSMOS_MODEL
 from motors import motors
 from cosmos import (
-    ask_cosmos, scan_scene_dual, set_mission_briefing, get_mission_briefing,
-    center_on_person, pantilt, pantilt_center, autofocus_trigger,
-    CAMERA_WEBCAM, CAMERA_PANTILT
+    ask_cosmos, set_mission_briefing,
+    capture_frame, center_on_person, pantilt, pantilt_center,
+    autofocus_trigger, autofocus_enable, CAMERA_WEBCAM, CAMERA_PANTILT
 )
 from tts import speak
 
@@ -32,22 +24,22 @@ log = logging.getLogger("eric.mission")
 class State:
     IDLE         = "idle"
     SEARCHING    = "searching"
+    SCANNING_360 = "scanning_360"
     INTERACTING  = "interacting"
     AVOIDING     = "avoiding"
     COMPLETE     = "complete"
-    LOST         = "lost"
 
 
-# ─── Mission State ────────────────────────────────────────────────────────────
 mission_state        = State.IDLE
 mission_active       = False
 conversation_history = []
 
-_empty_scans      = 0
-_search_phase     = 0
-_avoid_attempts   = 0
-EMPTY_SCAN_LIMIT  = 3        # fewer scans before search pattern (video takes longer)
-MAX_AVOID_ATTEMPTS = 4       # max consecutive avoidance moves before stopping to reassess
+_empty_scans       = 0
+_avoid_attempts    = 0
+_scans_since_360   = 0
+EMPTY_SCAN_LIMIT   = 2
+SCANS_BEFORE_360   = 4
+MAX_AVOID_ATTEMPTS = 4
 
 _ui_callbacks = {"eric_says": None, "status": None, "log": None}
 
@@ -56,29 +48,64 @@ def register_ui_callbacks(**cbs):
     _ui_callbacks.update(cbs)
 
 
-def _ui(key: str, text: str):
+def _ui(key, text):
     cb = _ui_callbacks.get(key)
     if cb:
-        try:
-            cb(text)
-        except Exception:
-            pass
+        try: cb(text)
+        except Exception: pass
 
 
-def eric_say(text: str):
+def eric_say(text):
     _ui("eric_says", text)
     speak(text)
 
 
+def _cosmos_frames(frames, prompt, max_tokens=250, temp=0.3):
+    from cosmos import _system_prompt as sys_prompt
+    content = [
+        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}}
+        for f in frames
+    ]
+    content.append({"type": "text", "text": prompt})
+    payload = {
+        "model": COSMOS_MODEL,
+        "messages": [
+            {"role": "system", "content": sys_prompt},
+            {"role": "user",   "content": content}
+        ],
+        "max_tokens": max_tokens,
+        "temperature": temp,
+        "repetition_penalty": 1.15,
+    }
+    r = requests.post(VLLM_URL, json=payload, timeout=120)
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"].strip()
+
+
+def _parse_json(response, fallback):
+    try:
+        clean = response.replace("```json", "").replace("```", "").strip()
+        s = clean.find("{")
+        e = clean.rfind("}") + 1
+        if s >= 0 and e > s:
+            result = json.loads(clean[s:e])
+            for k, v in fallback.items():
+                result.setdefault(k, v)
+            return result
+    except Exception:
+        log.warning(f"JSON parse failed: {response[:100]}")
+    return fallback
+
+
 # ─── Mission File Loading ─────────────────────────────────────────────────────
 
-def list_missions() -> list[str]:
+def list_missions():
     if not MISSIONS_DIR.exists():
         return []
     return [f.stem for f in sorted(MISSIONS_DIR.glob("*.yaml"))]
 
 
-def load_mission_file(name: str) -> dict | None:
+def load_mission_file(name):
     try:
         import yaml
         path = MISSIONS_DIR / f"{name}.yaml"
@@ -91,53 +118,47 @@ def load_mission_file(name: str) -> dict | None:
         return None
 
 
-def get_briefing_from_file(name: str) -> str | None:
+def get_briefing_from_file(name):
     data = load_mission_file(name)
     return data.get("briefing", "").strip() if data else None
 
 
 # ─── Mission Control ──────────────────────────────────────────────────────────
 
-def start_mission(briefing: str) -> str:
+def start_mission(briefing):
     global mission_active, mission_state, conversation_history
-    global _empty_scans, _search_phase, _avoid_attempts
+    global _empty_scans, _avoid_attempts, _scans_since_360
 
     if mission_active:
-        return "⚠️ Mission already active. Disengage first."
+        return "Mission already active. Disengage first."
     if not briefing.strip():
-        return "⚠️ No mission briefing provided."
+        return "No mission briefing provided."
 
     conversation_history = []
-    _empty_scans         = 0
-    _search_phase        = 0
-    _avoid_attempts      = 0
+    _empty_scans = _avoid_attempts = _scans_since_360 = 0
     set_mission_briefing(briefing)
 
-    # Enable autofocus on both cameras at start
     try:
-        from cosmos import autofocus_enable
         autofocus_enable(CAMERA_WEBCAM)
         autofocus_enable(CAMERA_PANTILT)
     except Exception:
         pass
 
-    # Center pan-tilt
     pantilt_center()
 
     ack = ask_cosmos(
-        f"You just received this mission briefing:\n\"{briefing}\"\n\n"
-        "Acknowledge in 2-3 sentences. State your immediate first action. "
-        "Be concise and mission-focused.",
+        f"Mission briefing:\n\"{briefing}\"\n\n"
+        "Acknowledge in 2-3 sentences. State your first action. Be concise.",
         max_tokens=150
     )
     eric_say(ack)
 
     mission_active = True
     mission_state  = State.SEARCHING
-    _ui("status", f"🟢 {State.SEARCHING.upper()}")
+    _ui("status", "SEARCHING")
     motors.oled(0, "ERIC ACTIVE")
     motors.oled(1, "Searching...")
-    motors.lights(base=128, head=255)  # lights on for better camera visibility
+    motors.lights(base=128, head=255)
 
     threading.Thread(target=_mission_loop, daemon=True).start()
     return ack
@@ -153,239 +174,269 @@ def stop_mission():
     motors.oled(0, "ERIC STOPPED")
     motors.oled(1, "")
     eric_say("Mission disengaged. All systems halted.")
-    _ui("status", "🔴 IDLE")
+    _ui("status", "IDLE")
 
 
 def resume_after_interaction():
-    global mission_state, _empty_scans, _search_phase, _avoid_attempts
+    global mission_state, _empty_scans, _avoid_attempts, _scans_since_360
     if mission_active:
-        _empty_scans    = 0
-        _search_phase   = 0
-        _avoid_attempts = 0
-        mission_state   = State.SEARCHING
+        _empty_scans = _avoid_attempts = _scans_since_360 = 0
+        mission_state = State.SEARCHING
         pantilt_center()
-        motors.forward()
+        motors.forward(MOTOR_SPEED_SLOW)
         motors.oled(0, "ERIC ACTIVE")
         motors.oled(1, "Searching...")
-        _ui("status", f"🟢 {State.SEARCHING.upper()}")
+        _ui("status", "SEARCHING")
 
 
-# ─── Wall / Obstacle Avoidance ────────────────────────────────────────────────
+# ─── 360° Scan ────────────────────────────────────────────────────────────────
 
-def _avoid_obstacle(wall_ahead: bool, small_obstacle: bool):
-    """
-    Execute avoidance maneuver based on obstacle type.
-    wall_ahead: large wall or furniture blocking path
-    small_obstacle: small item on floor (slippers, shoes)
-    """
+SCAN_360_PROMPT = """
+These images are from a full 360-degree scan of my surroundings.
+I captured at 0, 90, 180, 270 degrees body rotation.
+At each position: pan-tilt tilted up (far/mid) and down (floor/near).
+Both webcam and pan-tilt camera used at each stop. Total: up to 16 images.
+
+Analyze ALL images carefully for my mission target:
+- Slippers are large soft footwear on the floor — look carefully at floor-level frames
+- Report target_visible=true even if partially visible or uncertain
+- Report which direction the target is from my current facing
+
+Respond ONLY with valid JSON, no markdown:
+{
+  "object": "person|robot|slipper|shoe|obstacle|wall|clear|unknown",
+  "object_name": "description or null",
+  "terrain": "carpet|tiles|clear",
+  "distance": "close|medium|far",
+  "in_my_path": false,
+  "wall_ahead": false,
+  "small_obstacle": false,
+  "target_visible": false,
+  "target_direction": "front|right|back|left|unknown",
+  "clearest_direction": "front|right|back|left",
+  "action": "forward|slow|turn_right|turn_left|turn_back|navigate_around|stop",
+  "speak": null,
+  "physical_reasoning": "1 sentence",
+  "mission_complete": false
+}
+"""
+
+QUICK_SCAN_PROMPT = """
+Live camera frames from my webcam and pan-tilt camera while moving.
+Fast obstacle and target check only.
+
+Respond ONLY with valid JSON:
+{
+  "object": "person|robot|slipper|shoe|obstacle|wall|clear|unknown",
+  "object_name": null,
+  "terrain": "carpet|tiles|clear",
+  "distance": "close|medium|far",
+  "in_my_path": false,
+  "wall_ahead": false,
+  "small_obstacle": false,
+  "target_visible": false,
+  "target_direction": "front",
+  "action": "forward|slow|navigate_around|stop",
+  "speak": null,
+  "physical_reasoning": "1 sentence",
+  "mission_complete": false
+}
+"""
+
+_SCAN_FALLBACK = {
+    "object": "unknown", "object_name": None, "terrain": "clear",
+    "distance": "far", "in_my_path": False, "wall_ahead": False,
+    "small_obstacle": False, "target_visible": False,
+    "target_direction": "unknown", "clearest_direction": "front",
+    "action": "forward", "speak": None,
+    "physical_reasoning": "", "mission_complete": False
+}
+
+
+def _scan_360():
+    global mission_state
+    mission_state = State.SCANNING_360
+    _ui("status", "360 SCANNING")
+    motors.oled(0, "360 Scan")
+    log.info("Starting 360 scan")
+
+    motors.stop()
+    time.sleep(0.4)
+    all_frames = []
+
+    for pos in range(4):
+        deg = pos * 90
+        _ui("log", f"Scanning {deg}...")
+        motors.oled(1, f"Scan {deg}deg")
+
+        for tilt, label in [(-20, "up"), (15, "floor")]:
+            pantilt(0, tilt, speed=40)
+            time.sleep(0.8)
+            f1 = capture_frame(CAMERA_WEBCAM,  640, 480)
+            f2 = capture_frame(CAMERA_PANTILT, 640, 480)
+            if f1: all_frames.append(f1)
+            if f2: all_frames.append(f2)
+
+        pantilt_center()
+        time.sleep(0.3)
+
+        if pos < 3:
+            motors.right(MOTOR_SPEED_SLOW)
+            time.sleep(1.5)   # tune for true 90deg on your floor
+            motors.stop()
+            time.sleep(0.4)
+
+    log.info(f"360 scan done — {len(all_frames)} frames -> Cosmos")
+    _ui("log", f"360 done — {len(all_frames)} frames -> Cosmos")
+    motors.oled(1, "Analyzing...")
+
+    try:
+        response = _cosmos_frames(all_frames, SCAN_360_PROMPT, max_tokens=300, temp=0.2)
+        log.info(f"360 result: {response[:200]}")
+        return _parse_json(response, dict(_SCAN_FALLBACK))
+    except Exception as e:
+        log.error(f"360 Cosmos error: {e}")
+        return dict(_SCAN_FALLBACK)
+
+
+def _quick_scan():
+    pantilt(0, 12, speed=80)
+    time.sleep(0.3)
+    f1 = capture_frame(CAMERA_WEBCAM,  640, 480)
+    f2 = capture_frame(CAMERA_PANTILT, 640, 480)
+    pantilt_center()
+
+    frames = [f for f in [f1, f2] if f]
+    if not frames:
+        return dict(_SCAN_FALLBACK)
+
+    try:
+        response = _cosmos_frames(frames, QUICK_SCAN_PROMPT, max_tokens=200, temp=0.3)
+        return _parse_json(response, dict(_SCAN_FALLBACK))
+    except Exception as e:
+        log.error(f"Quick scan error: {e}")
+        return dict(_SCAN_FALLBACK)
+
+
+def _face_direction(direction):
+    if direction == "right":
+        motors.right(MOTOR_SPEED_SLOW); time.sleep(1.5); motors.stop()
+    elif direction == "back":
+        motors.right(MOTOR_SPEED_SLOW); time.sleep(3.0); motors.stop()
+    elif direction == "left":
+        motors.left(MOTOR_SPEED_SLOW);  time.sleep(1.5); motors.stop()
+    time.sleep(0.3)
+
+
+# ─── Obstacle Avoidance ───────────────────────────────────────────────────────
+
+def _avoid_obstacle(wall_ahead, small_obstacle):
     global _avoid_attempts, mission_state
-
     _avoid_attempts += 1
     mission_state = State.AVOIDING
-    _ui("status", "⚠️ AVOIDING OBSTACLE")
+    _ui("status", "AVOIDING")
 
     if wall_ahead:
-        log.info(f"🧱 Wall detected — avoidance attempt {_avoid_attempts}")
-        _ui("log", f"🧱 Wall ahead — avoiding (attempt {_avoid_attempts})")
-        motors.oled(1, "Wall! Turning...")
-
-        motors.stop()
-        time.sleep(0.3)
-
-        # Back up first
-        motors.backward(MOTOR_SPEED_SLOW)
-        time.sleep(1.0)
-        motors.stop()
-        time.sleep(0.2)
-
-        # Alternate left/right turns to find clear path
+        _ui("log", f"Wall — attempt {_avoid_attempts}")
+        motors.oled(1, "Wall! Back up...")
+        motors.stop(); time.sleep(0.3)
+        motors.backward(MOTOR_SPEED_SLOW); time.sleep(1.2)
+        motors.stop(); time.sleep(0.2)
         if _avoid_attempts % 2 == 1:
-            motors.right(MOTOR_SPEED_SLOW)
-            time.sleep(1.5)
+            motors.right(MOTOR_SPEED_SLOW); time.sleep(1.5)
         else:
-            motors.left(MOTOR_SPEED_SLOW)
-            time.sleep(1.5)
-        motors.stop()
-        time.sleep(0.3)
-
+            motors.left(MOTOR_SPEED_SLOW);  time.sleep(1.5)
+        motors.stop(); time.sleep(0.3)
         if _avoid_attempts >= MAX_AVOID_ATTEMPTS:
-            # Stuck — ask Cosmos what to do
             _avoid_attempts = 0
-            eric_say("I appear to be stuck. Reassessing the environment.")
-            _ui("log", "🔄 Too many avoidance attempts — reassessing")
+            eric_say("I keep hitting obstacles. Let me do a full scan.")
+            return True  # trigger 360
 
     elif small_obstacle:
-        log.info("👟 Small obstacle on floor — carefully navigating around")
-        _ui("log", "👟 Small obstacle — navigating around")
-        motors.oled(1, "Obstacle!")
+        _ui("log", "Small obstacle — stepping around")
+        motors.oled(1, "Step around...")
+        motors.stop(); time.sleep(0.2)
+        motors.right(MOTOR_SPEED_SLOW); time.sleep(0.9)
+        motors.stop(); time.sleep(0.2)
+        motors.forward(MOTOR_SPEED_SLOW); time.sleep(1.0)
+        motors.stop(); time.sleep(0.2)
+        motors.left(MOTOR_SPEED_SLOW);  time.sleep(0.9)
+        motors.stop()
 
-        motors.stop()
-        time.sleep(0.2)
-        motors.right(MOTOR_SPEED_SLOW)
-        time.sleep(0.8)
-        motors.stop()
-        time.sleep(0.2)
-        motors.forward(MOTOR_SPEED_SLOW)
-        time.sleep(0.8)
-        motors.stop()
-        time.sleep(0.2)
-        motors.left(MOTOR_SPEED_SLOW)
-        time.sleep(0.8)
-        motors.stop()
+    return False
 
 
 # ─── Mission Complete ─────────────────────────────────────────────────────────
 
-def _handle_mission_complete(obj_name: str):
-    """Called when Cosmos determines the mission target has been found."""
+def _handle_mission_complete(obj_name):
     global mission_active, mission_state
-
-    log.info(f"🎯 MISSION COMPLETE — Found: {obj_name}")
+    log.info(f"MISSION COMPLETE — {obj_name}")
     mission_state = State.COMPLETE
-
     motors.stop()
     motors.oled(0, "MISSION DONE!")
-    motors.oled(1, obj_name[:16] if obj_name else "Target found!")
-    _ui("status", "🎯 MISSION COMPLETE")
+    motors.oled(1, (obj_name or "Target")[:16])
+    _ui("status", "MISSION COMPLETE")
 
-    # Flash lights to celebrate
-    for _ in range(3):
-        motors.lights(255, 255)
-        time.sleep(0.3)
-        motors.lights(0, 0)
-        time.sleep(0.3)
+    for _ in range(5):
+        motors.lights(255, 255); time.sleep(0.25)
+        motors.lights(0, 0);    time.sleep(0.25)
     motors.lights(128, 255)
 
-    # Center pan-tilt on target and trigger autofocus
-    log.info("🎯 Centering camera on target...")
-    pantilt(0, -10)   # Tilt slightly down for ground-level targets
-    time.sleep(0.5)
-    autofocus_trigger(CAMERA_PANTILT)
-    time.sleep(1.0)
-
-    # Try to center on face if it's a person
+    pantilt(0, 10); time.sleep(0.5)
+    autofocus_trigger(CAMERA_PANTILT); time.sleep(1.5)
     center_on_person()
 
     announcement = ask_cosmos(
-        f"You have found your mission target: {obj_name or 'the target'}! "
-        "The mission is complete. "
-        "Make a triumphant but warm announcement in 2-3 sentences. "
-        "Describe that you found them and that you're signaling for help.",
+        f"You found: {obj_name or 'the target'}. Mission complete. "
+        "Warm triumphant 2-3 sentence announcement.",
         max_tokens=120
     )
     eric_say(announcement)
     _ui("eric_says", announcement)
-    _ui("log", f"🎯 MISSION COMPLETE: {announcement}")
+    _ui("log", f"COMPLETE: {announcement}")
 
     mission_active = False
-    _ui("status", "🎯 MISSION COMPLETE — Awaiting next orders")
+    _ui("status", "MISSION COMPLETE")
     motors.oled(0, "TARGET FOUND!")
     motors.oled(1, "Mission done!")
 
 
-# ─── Search Pattern ───────────────────────────────────────────────────────────
-
-def _execute_search_pattern():
-    """Systematic search when nothing found."""
-    global _search_phase, _empty_scans
-
-    patterns = [
-        ("Scanning right...",   lambda: (motors.stop(), pantilt(45, 0), time.sleep(2), pantilt_center())),
-        ("Moving forward...",   lambda: (motors.forward(), time.sleep(2.0), motors.stop())),
-        ("Scanning left...",    lambda: (motors.stop(), pantilt(-45, 0), time.sleep(2), pantilt_center())),
-        ("Turning right...",    lambda: (motors.right(), time.sleep(1.2), motors.stop())),
-        ("Moving forward...",   lambda: (motors.forward(), time.sleep(2.0), motors.stop())),
-        ("Turning left...",     lambda: (motors.left(), time.sleep(2.4), motors.stop())),
-        ("Moving forward...",   lambda: (motors.forward(), time.sleep(2.0), motors.stop())),
-    ]
-
-    phase         = _search_phase % len(patterns)
-    label, action = patterns[phase]
-
-    log.info(f"🔍 Search pattern phase {phase}: {label}")
-    _ui("log",  f"🔍 {label}")
-    motors.oled(1, label[:16])
-
-    try:
-        action()
-    except Exception as e:
-        log.error(f"Search pattern error: {e}")
-        motors.stop()
-
-    _search_phase += 1
-    _empty_scans   = 0
-
-    if _search_phase % len(patterns) == 0:
-        _ask_cosmos_what_to_do()
-
-
-def _ask_cosmos_what_to_do():
-    response = ask_cosmos(
-        "I have searched my current area systematically and cannot find my target. "
-        "Based on my mission briefing, what should I do next? "
-        "Should I continue forward, backtrack, or try a different direction? "
-        "Respond in 2 sentences — be decisive.",
-        max_tokens=100
-    )
-    eric_say(response)
-    _ui("log", f"🧠 Eric decides: {response}")
-
-
 # ─── Character Interaction ────────────────────────────────────────────────────
 
-def handle_character_response(character: str, said: str) -> str:
+def handle_character_response(character, said):
     global conversation_history
-
-    conversation_history.append({
-        "character": character,
-        "said":      said,
-        "time":      time.time()
-    })
-
-    history_text = "\n".join(
-        f"- {e['character']} told me: {e['said']}"
-        for e in conversation_history[-5:]
-    )
-
-    exchanges = sum(1 for e in conversation_history if e["character"] == character)
+    conversation_history.append({"character": character, "said": said, "time": time.time()})
+    history = "\n".join(f"- {e['character']}: {e['said']}" for e in conversation_history[-5:])
+    n = sum(1 for e in conversation_history if e["character"] == character)
 
     response = ask_cosmos(
-        f"I am talking to {character}. They just said: \"{said}\"\n\n"
-        f"Information gathered so far:\n{history_text}\n\n"
-        f"This is exchange #{exchanges} with {character}.\n\n"
-        "Evaluate:\n"
-        "1) Is this relevant to my mission?\n"
-        "2) Have I gotten all useful info from them?\n"
-        "3) Are they going off-topic or being overly chatty?\n\n"
-        "If off-topic OR exchange #3+ with no new mission info:\n"
-        "  → Politely apologize, thank them, say you must continue. End with: [MOVE_ON]\n\n"
-        "If useful info:\n"
-        "  → Respond naturally, ask focused follow-up if needed.\n\n"
-        "2 sentences max. Be warm but decisive.",
+        f"Talking to {character}. They said: \"{said}\"\n"
+        f"Info gathered:\n{history}\nExchange #{n}.\n\n"
+        "If off-topic or exchange 3+ with no new info: thank them, end with [MOVE_ON]\n"
+        "Otherwise: respond and ask follow-up. 2 sentences max.",
         max_tokens=150
     )
 
-    should_move_on = "[MOVE_ON]" in response
-    clean_response = response.replace("[MOVE_ON]", "").strip()
-
-    eric_say(clean_response)
-    _ui("log", f"[{character}]: {said}\n[Eric]: {clean_response}")
-
-    if should_move_on:
-        log.info(f"💨 Eric politely left {character}")
-        _ui("log", f"💨 Eric moved on from {character}")
+    move_on = "[MOVE_ON]" in response
+    clean   = response.replace("[MOVE_ON]", "").strip()
+    eric_say(clean)
+    _ui("log", f"[{character}]: {said}\n[Eric]: {clean}")
+    if move_on:
         resume_after_interaction()
-
-    return clean_response
+    return clean
 
 
 # ─── Mission Loop ─────────────────────────────────────────────────────────────
 
 def _mission_loop():
-    global mission_active, mission_state
+    global mission_active, mission_state, _empty_scans, _scans_since_360, _avoid_attempts
 
-    # Start moving immediately
-    motors.forward(MOTOR_SPEED_SLOW)
+    eric_say("Starting initial 360 degree scan of the area.")
+    scan = _scan_360()
+    _process_scan(scan, from_360=True)
+
+    if mission_active and mission_state == State.SEARCHING:
+        motors.forward(MOTOR_SPEED_SLOW)
 
     while mission_active:
         try:
@@ -393,14 +444,27 @@ def _mission_loop():
                 time.sleep(0.5)
                 continue
 
-            # Dual camera scan with 10s video
-            _ui("log", "👁️ Scanning with both cameras...")
-            motors.oled(1, "Scanning...")
-            scan = scan_scene_dual(use_video=True, video_duration=10.0)
-            _process_scan(scan)
+            _scans_since_360 += 1
+            do_360 = _empty_scans >= EMPTY_SCAN_LIMIT or _scans_since_360 >= SCANS_BEFORE_360
 
-            # Small delay between scans (video already takes ~10s)
-            time.sleep(1.0)
+            if do_360:
+                motors.stop(); time.sleep(0.3)
+                if _empty_scans >= EMPTY_SCAN_LIMIT:
+                    eric_say("Nothing found. Performing a full 360 scan.")
+                else:
+                    _ui("log", "Periodic 360 scan...")
+                scan = _scan_360()
+                _scans_since_360 = _empty_scans = 0
+                _process_scan(scan, from_360=True)
+                if mission_active and mission_state == State.SEARCHING:
+                    motors.forward(MOTOR_SPEED_SLOW)
+            else:
+                _ui("log", "Quick scan...")
+                motors.oled(1, "Scanning...")
+                scan = _quick_scan()
+                _process_scan(scan, from_360=False)
+
+            time.sleep(0.5)
 
         except Exception as e:
             log.error(f"Mission loop error: {e}")
@@ -408,120 +472,117 @@ def _mission_loop():
 
     motors.stop()
     mission_state = State.IDLE
-    _ui("status", "🔴 IDLE")
+    _ui("status", "IDLE")
     log.info("Mission loop ended")
 
 
-def _process_scan(scan: dict):
-    global mission_state, _empty_scans, _avoid_attempts
+def _process_scan(scan, from_360=False):
+    global mission_state, _empty_scans, _avoid_attempts, _scans_since_360
 
-    obj         = scan.get("object", "unknown")
-    obj_name    = scan.get("object_name")
-    terrain     = scan.get("terrain", "clear")
-    in_path     = scan.get("in_my_path", False)
-    wall_ahead  = scan.get("wall_ahead", False)
-    small_obs   = scan.get("small_obstacle", False)
-    action      = scan.get("action", "forward")
-    speak_tx    = scan.get("speak")
-    reason      = scan.get("physical_reasoning", "")
-    distance    = scan.get("distance", "far")
-    complete    = scan.get("mission_complete", False)
+    obj            = scan.get("object", "unknown")
+    obj_name       = scan.get("object_name")
+    terrain        = scan.get("terrain", "clear")
+    in_path        = scan.get("in_my_path", False)
+    wall_ahead     = scan.get("wall_ahead", False)
+    small_obs      = scan.get("small_obstacle", False)
+    action         = scan.get("action", "forward")
+    speak_tx       = scan.get("speak")
+    reason         = scan.get("physical_reasoning", "")
+    distance       = scan.get("distance", "far")
+    complete       = scan.get("mission_complete", False)
+    target_visible = scan.get("target_visible", False)
+    target_dir     = scan.get("target_direction", "front")
+    clear_dir      = scan.get("clearest_direction", "front")
 
     if reason:
-        log.info(f"💭 {reason}")
-        _ui("log", f"💭 {reason}")
+        log.info(f"Cosmos: {reason}")
+        _ui("log", f"Cosmos: {reason}")
 
-    # ── Mission complete? ──────────────────────────────────────────────────────
     if complete:
+        if speak_tx: eric_say(speak_tx)
         _handle_mission_complete(obj_name)
         return
 
-    # ── Wall / obstacle avoidance (highest priority) ───────────────────────────
     if wall_ahead or (in_path and obj == "wall"):
-        if speak_tx:
-            eric_say(speak_tx)
-        _avoid_obstacle(wall_ahead=True, small_obstacle=False)
+        motors.stop()
+        if speak_tx: eric_say(speak_tx)
+        force_360 = _avoid_obstacle(wall_ahead=True, small_obstacle=False)
+        if force_360:
+            _scans_since_360 = SCANS_BEFORE_360
+        else:
+            motors.forward(MOTOR_SPEED_SLOW)
         mission_state = State.SEARCHING
         return
 
-    if small_obs:
+    if small_obs and not target_visible:
         _avoid_obstacle(wall_ahead=False, small_obstacle=True)
-        # Continue scanning after avoidance
+        motors.forward(MOTOR_SPEED_SLOW)
 
-    # Reset avoidance counter when path is clear
     if not wall_ahead and not small_obs:
         _avoid_attempts = 0
 
     if speak_tx:
         eric_say(speak_tx)
 
-    # ── Person or robot found ──────────────────────────────────────────────────
+    if target_visible and from_360:
+        _empty_scans = 0
+        _ui("log", f"Target spotted {target_dir}!")
+        motors.oled(1, f"Target {target_dir}!")
+        _ui("status", "TARGET SPOTTED")
+        _face_direction(target_dir)
+        motors.forward(MOTOR_SPEED_SLOW)
+        mission_state = State.SEARCHING
+        return
+
     if in_path and obj in ["person", "robot"]:
-        _empty_scans  = 0
-        _search_phase = 0
+        _empty_scans = 0
         motors.stop()
         mission_state = State.INTERACTING
-        display_name  = obj_name or obj
-
-        motors.oled(0, display_name[:16])
+        name = obj_name or obj
+        motors.oled(0, name[:16])
         motors.oled(1, "Centering...")
-        _ui("status", f"👤 FOUND — {display_name}")
-        _ui("log", f"👤 Found: {display_name} ({distance})")
+        _ui("status", f"FOUND — {name}")
 
-        # Center pan-tilt on face and autofocus
-        log.info(f"🎯 Found {display_name} — centering camera...")
-        centered = center_on_person()
-        if not centered:
-            # Fall back to fixed tilt toward face height
-            pantilt(0, -15)
-            time.sleep(0.5)
-        autofocus_trigger(CAMERA_PANTILT)
-        time.sleep(1.0)
+        if not center_on_person():
+            pantilt(0, -15); time.sleep(0.5)
+        autofocus_trigger(CAMERA_PANTILT); time.sleep(1.0)
 
         motors.oled(1, "Talking...")
         greeting = ask_cosmos(
-            f"You see {display_name} directly ahead. "
-            "Greet them and ask if they have information relevant to your mission. "
-            "1-2 sentences only.",
+            f"You see {name} ahead. Greet them and ask about your mission. 1-2 sentences.",
             max_tokens=80
         )
         eric_say(greeting)
-        _ui("status", f"💬 TALKING — {display_name}")
+        _ui("status", f"TALKING — {name}")
         return
 
-    # ── Nothing found ──────────────────────────────────────────────────────────
-    if obj in ["clear", "unknown"]:
+    if obj in ["clear", "unknown"] and not target_visible:
         _empty_scans += 1
-        log.info(f"🔍 Empty scan {_empty_scans}/{EMPTY_SCAN_LIMIT}")
-        _ui("log",  f"🔍 Nothing found ({_empty_scans}/{EMPTY_SCAN_LIMIT})")
+        _ui("log", f"Nothing found ({_empty_scans}/{EMPTY_SCAN_LIMIT})")
 
-        if _empty_scans >= EMPTY_SCAN_LIMIT:
-            mission_state = State.LOST
-            _ui("status", "🔍 SEARCHING — executing search pattern")
-            motors.oled(1, "Searching...")
+    if from_360 and clear_dir != "front":
+        _face_direction(clear_dir)
 
-            if _empty_scans == EMPTY_SCAN_LIMIT:
-                eric_say(
-                    "I can't find my target in this area. "
-                    "Executing systematic search pattern."
-                )
-
-            _execute_search_pattern()
-            return
-
-    # ── Normal navigation ──────────────────────────────────────────────────────
     if action == "navigate_around":
-        motors.left(MOTOR_SPEED_SLOW)
-        time.sleep(0.8)
-        motors.forward()
-    elif action == "slow" or terrain == "pebbles":
+        motors.left(MOTOR_SPEED_SLOW); time.sleep(0.8)
+        motors.forward(MOTOR_SPEED_SLOW)
+    elif action == "slow" or terrain == "carpet":
         motors.slow()
     elif action == "stop":
         motors.stop()
+    elif action == "turn_right":
+        motors.right(MOTOR_SPEED_SLOW); time.sleep(1.0); motors.stop()
+        motors.forward(MOTOR_SPEED_SLOW)
+    elif action == "turn_left":
+        motors.left(MOTOR_SPEED_SLOW);  time.sleep(1.0); motors.stop()
+        motors.forward(MOTOR_SPEED_SLOW)
+    elif action == "turn_back":
+        motors.right(MOTOR_SPEED_SLOW); time.sleep(3.0); motors.stop()
+        motors.forward(MOTOR_SPEED_SLOW)
     else:
-        motors.forward()
+        motors.forward(MOTOR_SPEED_SLOW)
 
     mission_state = State.SEARCHING
     motors.oled(0, "ERIC ACTIVE")
     motors.oled(1, "Searching...")
-    _ui("status", f"🟢 {State.SEARCHING.upper()}")
+    _ui("status", "SEARCHING")
