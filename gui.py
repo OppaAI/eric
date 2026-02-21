@@ -27,6 +27,92 @@ _status    = "🔴 IDLE"
 _log_text  = ""
 
 
+def _motor_telemetry_html(direction: str, left: float, right: float) -> str:
+    """Generate HTML motor telemetry display."""
+    color = {
+        "forward":  "#76b900",
+        "backward": "#ff6600",
+        "left":     "#00aaff",
+        "right":    "#00aaff",
+        "stopped":  "#666666",
+        "spinning": "#aa00ff",
+    }.get(direction, "#666666")
+
+    arrow = {
+        "forward":  "▲",
+        "backward": "▼",
+        "left":     "◀",
+        "right":    "▶",
+        "stopped":  "■",
+        "spinning": "↺",
+    }.get(direction, "■")
+
+    speed = max(abs(left), abs(right))
+
+    return f"""
+    <div style="
+        background:#1a1a1a;
+        border:1px solid {color};
+        border-radius:8px;
+        padding:12px;
+        font-family:monospace;
+    ">
+        <div style="display:flex;align-items:center;gap:16px">
+            <div style="
+                font-size:2.5em;
+                color:{color};
+                width:48px;
+                text-align:center;
+            ">{arrow}</div>
+            <div>
+                <div style="color:{color};font-size:1.1em;font-weight:bold;text-transform:uppercase">
+                    {direction}
+                </div>
+                <div style="color:#aaa;font-size:0.85em;margin-top:2px">
+                    Speed: <span style="color:#fff">{speed:.2f} m/s</span>
+                </div>
+                <div style="color:#aaa;font-size:0.85em">
+                    L: <span style="color:#fff">{left:+.2f}</span>
+                    &nbsp;|&nbsp;
+                    R: <span style="color:#fff">{right:+.2f}</span>
+                </div>
+            </div>
+            <div style="flex:1">
+                <div style="
+                    height:8px;
+                    background:#333;
+                    border-radius:4px;
+                    overflow:hidden;
+                ">
+                    <div style="
+                        height:100%;
+                        width:{int(speed / 0.50 * 100)}%;
+                        background:{color};
+                        border-radius:4px;
+                        transition:width 0.3s;
+                    "></div>
+                </div>
+                <div style="color:#555;font-size:0.75em;margin-top:2px">
+                    0.0 ──────────────── 0.5 m/s
+                </div>
+            </div>
+        </div>
+    </div>
+    """
+
+
+# Track current motor state for telemetry display
+_motor_state = {"direction": "stopped", "left": 0.0, "right": 0.0}
+
+
+def get_motor_telemetry():
+    return _motor_telemetry_html(
+        _motor_state["direction"],
+        _motor_state["left"],
+        _motor_state["right"]
+    )
+
+
 def _set_eric_says(t): global _eric_says; _eric_says = t
 def _set_status(t):    global _status;    _status    = t
 def _append_log(t):
@@ -155,6 +241,11 @@ def build_ui():
                 gr.Markdown("### 📷 Webcam — Navigation")
                 webcam_img  = gr.Image(streaming=True, height=240, label="Webcam")
 
+                # ── Motor telemetry display ───────────────────────────────────
+                gr.HTML("<hr style='border-color:#333;margin:6px 0'>")
+                gr.Markdown("### 🚗 Motor Telemetry")
+                motor_display = gr.HTML(value=_motor_telemetry_html("stopped", 0.0, 0.0))
+
             # ── RIGHT: Control panel ─────────────────────────────────────────
             with gr.Column(scale=1):
 
@@ -200,12 +291,24 @@ def build_ui():
                 char_reply = gr.Textbox(label="Eric responds", interactive=False, lines=3)
 
                 # ── Manual controls ───────────────────────────────────────────
-                with gr.Accordion("🕹️ Manual Controls", open=False):
+                with gr.Accordion("🕹️ Manual Controls", open=True):
+                    speed_slider = gr.Slider(
+                        minimum=0.05, maximum=0.50, value=0.25, step=0.05,
+                        label="Speed (m/s)",
+                        info="Slow=0.05 · Normal=0.25 · Fast=0.50"
+                    )
                     with gr.Row():
-                        gr.Button("◀️ Left").click(action_left,  outputs=status_box)
-                        gr.Button("▶️ Fwd").click(action_fwd,   outputs=status_box)
-                        gr.Button("▶️ Right").click(action_right, outputs=status_box)
-                    gr.Button("⏹️ Stop", variant="stop").click(action_stop, outputs=status_box)
+                        btn_left     = gr.Button("◀️ Left",     scale=1)
+                        btn_fwd      = gr.Button("▶️ Forward",  scale=2, variant="primary")
+                        btn_right    = gr.Button("▶️ Right",    scale=1)
+                    with gr.Row():
+                        btn_back     = gr.Button("⏪ Backward",  scale=1)
+                        btn_stop     = gr.Button("⏹️ STOP",     scale=2, variant="stop")
+                        btn_spin_l   = gr.Button("🔄 Spin L",   scale=1)
+                    motor_status = gr.Textbox(
+                        label="Motor Status", interactive=False,
+                        max_lines=1, value="Stopped"
+                    )
 
                 # ── Utilities ─────────────────────────────────────────────────
                 with gr.Accordion("🛠️ Utilities", open=False):
@@ -226,12 +329,21 @@ def build_ui():
         disengage_btn.click(action_disengage,                outputs=[eric_says_box, status_box])
         char_btn.click(action_char_reply, inputs=[char_name, char_says], outputs=[char_reply, char_says])
 
+        # Manual motor controls with speed
+        btn_fwd.click(   lambda s: (motors.forward(s),  f"▶️ Forward  {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
+        btn_back.click(  lambda s: (motors.backward(s), f"⏪ Backward {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
+        btn_left.click(  lambda s: (motors.left(s),     f"◀️ Left     {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
+        btn_right.click( lambda s: (motors.right(s),    f"▶️ Right    {s} m/s")[1],  inputs=speed_slider, outputs=motor_status)
+        btn_stop.click(  lambda:   (motors.stop(),      "⏹️ Stopped")[1],                                  outputs=motor_status)
+        btn_spin_l.click(lambda s: (motors._send(-s, s), f"🔄 Spinning left {s} m/s")[1], inputs=speed_slider, outputs=motor_status)
+
         # Live updates every second
-        demo.load(get_webcam,  outputs=webcam_img,    every=1)
-        demo.load(get_pantilt, outputs=pantilt_img,   every=1)
-        demo.load(get_eric,    outputs=eric_says_box, every=1)
-        demo.load(get_status,  outputs=status_box,    every=1)
-        demo.load(get_log,     outputs=log_box,       every=2)
+        demo.load(get_webcam,           outputs=webcam_img,      every=1)
+        demo.load(get_pantilt,          outputs=pantilt_img,     every=1)
+        demo.load(get_eric,             outputs=eric_says_box,   every=1)
+        demo.load(get_status,           outputs=status_box,      every=1)
+        demo.load(get_log,              outputs=log_box,         every=2)
+        demo.load(get_motor_telemetry,  outputs=motor_display,   every=0.5)
 
     return demo
 
