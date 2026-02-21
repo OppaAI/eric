@@ -1,13 +1,12 @@
 """
 E.R.I.C. — Cosmos Reason 2 Interface
-Handles all vLLM API calls with vision + reasoning
+Vision + physical reasoning via vLLM
 """
 
 import json
 import base64
 import logging
 import requests
-import cv2
 
 from config import (
     VLLM_URL, COSMOS_MODEL,
@@ -19,7 +18,7 @@ log = logging.getLogger("eric.cosmos")
 
 # ─── System Prompt ────────────────────────────────────────────────────────────
 
-BASE_SYSTEM_PROMPT = """
+_BASE_SYSTEM_PROMPT = """
 You are E.R.I.C. — Edge Robotics Innovation by Cosmos.
 You are a search and rescue tracked ground robot.
 The camera view is YOUR view — egocentric, first person.
@@ -28,63 +27,61 @@ Your hardware:
 - Tracked robot chassis (~30cm wide), built for outdoor terrain
 - NVIDIA Jetson Orin Nano Super 8GB
 - Cosmos Reason 2 (2B W4A16) via vLLM — your vision and reasoning
-- Two cameras: pan-tilt camera and webcam
+- Two cameras: pan-tilt and webcam
 - Total cost: ~$750 CAD, built by one person in Kelowna BC Canada
-- No cloud, fully local edge AI deployment
+- Fully local edge AI — no cloud, no server
 
-Your mission rules:
-- You have NO arms — cannot engage in combat under any circumstances
+Your rules:
+- You have NO arms — never engage in combat
 - Avoid all obstacles and persons in your path
-- Talk to people and robots to gather information about the rescue target
-- If someone doesn't know, thank them and move on to the next
-- Use all information gathered to plan and reason about next steps
-- Always prioritize safety — of yourself and others
-
-Your personality:
-- Mission-focused, decisive, warm
-- Speak in first person, concise
-- Proud of being accessible, affordable physical AI
+- Talk to people and robots to gather mission information
+- If someone doesn't know anything, thank them and move on
 - Reason carefully about the physical world from YOUR point of view
 
 Terrain reasoning (egocentric — what is directly ahead of YOU):
-- Pebbles/rough ground → slow down, proceed carefully
-- Smooth pavement → normal or faster speed
+- Pebbles/rough ground → slow down
+- Smooth pavement → normal speed
 - Obstacle in YOUR path → navigate around
 - Clear path → proceed forward
 
 Keep spoken responses under 3 sentences unless introducing yourself.
-You are speaking via TTS — be natural, not robotic.
+Speaking via TTS — be natural, not robotic.
 """
 
-# Set at mission briefing time — appended to base prompt
+_system_prompt    = _BASE_SYSTEM_PROMPT
 _mission_briefing = ""
-_system_prompt    = BASE_SYSTEM_PROMPT
 
 
 def set_mission_briefing(briefing: str):
-    """Set the mission briefing — called before /engage."""
-    global _mission_briefing, _system_prompt
-    _mission_briefing = briefing
-    _system_prompt    = BASE_SYSTEM_PROMPT + f"\n\n─── MISSION BRIEFING ───\n{briefing}\n────────────────────────\n"
-    log.info(f"📋 Mission briefing set: {briefing[:80]}...")
+    """Inject mission briefing into system prompt. Called before /engage."""
+    global _system_prompt, _mission_briefing
+    _mission_briefing = briefing.strip()
+    _system_prompt = (
+        _BASE_SYSTEM_PROMPT
+        + "\n\n═══ MISSION BRIEFING ═══\n"
+        + _mission_briefing
+        + "\n═══════════════════════\n"
+    )
+    log.info(f"📋 Mission briefing loaded: {_mission_briefing[:80]}...")
 
 
-def get_system_prompt() -> str:
-    return _system_prompt
+def get_mission_briefing() -> str:
+    return _mission_briefing
 
 
 # ─── Camera ───────────────────────────────────────────────────────────────────
 
 def capture_frame(device: int = CAMERA_WEBCAM) -> str | None:
-    """Capture frame from camera device, return base64 JPEG."""
+    """Capture frame, resize to CAMERA_WIDTH x CAMERA_HEIGHT, return base64 JPEG."""
     try:
+        import cv2
         cap = cv2.VideoCapture(device)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAMERA_WIDTH)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  CAMERA_WIDTH)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAMERA_HEIGHT)
         ret, frame = cap.read()
         cap.release()
         if not ret:
-            log.error(f"Camera {device} frame capture failed")
+            log.error(f"Camera {device}: frame capture failed")
             return None
         _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
         return base64.b64encode(buf).decode("utf-8")
@@ -94,10 +91,11 @@ def capture_frame(device: int = CAMERA_WEBCAM) -> str | None:
 
 
 def capture_frame_raw(device: int = CAMERA_WEBCAM):
-    """Capture raw frame for Gradio display."""
+    """Capture raw RGB frame for Gradio display (640x480)."""
     try:
+        import cv2
         cap = cv2.VideoCapture(device)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         ret, frame = cap.read()
         cap.release()
@@ -113,7 +111,7 @@ def capture_frame_raw(device: int = CAMERA_WEBCAM):
 def ask_cosmos(prompt: str, image_b64: str = None,
                max_tokens: int = 300, stream: bool = False):
     """
-    Query Cosmos via vLLM.
+    Query Cosmos Reason 2 via vLLM.
     stream=False → returns full text string
     stream=True  → returns generator of text chunks
     """
@@ -126,29 +124,27 @@ def ask_cosmos(prompt: str, image_b64: str = None,
     content.append({"type": "text", "text": prompt})
 
     payload = {
-        "model":       COSMOS_MODEL,
-        "messages":    [
+        "model":              COSMOS_MODEL,
+        "messages": [
             {"role": "system", "content": _system_prompt},
             {"role": "user",   "content": content}
         ],
-        "max_tokens":  max_tokens,
-        "temperature": 0.7,
+        "max_tokens":         max_tokens,
+        "temperature":        0.7,
         "repetition_penalty": 1.15,
-        "stream":      stream
+        "stream":             stream
     }
 
     try:
         if stream:
             return _stream_cosmos(payload)
-        else:
-            r = requests.post(VLLM_URL, json=payload, timeout=60)
-            r.raise_for_status()
-            text = r.json()["choices"][0]["message"]["content"].strip()
-            log.info(f"🧠 Cosmos: {text[:120]}")
-            return text
-
+        r = requests.post(VLLM_URL, json=payload, timeout=60)
+        r.raise_for_status()
+        text = r.json()["choices"][0]["message"]["content"].strip()
+        log.info(f"🧠 Cosmos: {text[:120]}")
+        return text
     except requests.exceptions.ConnectionError:
-        msg = "Cannot connect to Cosmos brain. Is vLLM running?"
+        msg = "Cannot connect to Cosmos. Is vLLM running? (bash launch/cosmos.sh)"
         log.error(msg)
         return msg
     except Exception as e:
@@ -157,10 +153,9 @@ def ask_cosmos(prompt: str, image_b64: str = None,
 
 
 def _stream_cosmos(payload: dict):
-    """Generator yielding text chunks from vLLM streaming response."""
+    """Generator yielding text chunks from vLLM SSE stream."""
     try:
-        with requests.post(VLLM_URL, json=payload,
-                           stream=True, timeout=60) as r:
+        with requests.post(VLLM_URL, json=payload, stream=True, timeout=60) as r:
             r.raise_for_status()
             for line in r.iter_lines():
                 if not line:
@@ -171,8 +166,7 @@ def _stream_cosmos(payload: dict):
                 if line == "[DONE]":
                     break
                 try:
-                    chunk = json.loads(line)
-                    delta = chunk["choices"][0]["delta"].get("content", "")
+                    delta = json.loads(line)["choices"][0]["delta"].get("content", "")
                     if delta:
                         yield delta
                 except Exception:
@@ -188,13 +182,13 @@ SCAN_PROMPT = """
 The camera view is MY view as a ground robot — egocentric, first person.
 I am on a search and rescue mission.
 
-Analyze the scene ahead of me. Think step by step:
-1) What objects or people do I see and where relative to me?
+Analyze the scene. Think step by step:
+1) What objects or people do I see and where are they relative to me?
 2) Is anything in MY direct path?
 3) What is the terrain like?
 4) What is the safest next action?
 
-Then respond ONLY with valid JSON, no other text:
+Respond ONLY with valid JSON — no markdown, no extra text:
 {
   "object": "person|robot|obstacle|vehicle|clear|unknown",
   "object_name": "specific name if identifiable, else null",
@@ -202,16 +196,9 @@ Then respond ONLY with valid JSON, no other text:
   "distance": "close|medium|far",
   "in_my_path": true or false,
   "action": "stop|forward|slow|navigate_around",
-  "speak": "what Eric says out loud right now (null if nothing)",
+  "speak": "what Eric says out loud right now, or null",
   "physical_reasoning": "1 sentence: what I see and why I chose this action"
 }
-
-Rules:
-- Any person or robot close and in path → stop and interact
-- Vehicle or large obstacle → navigate_around
-- Rough terrain ahead → slow
-- Clear path → forward
-- Only ONE JSON object, no markdown
 """
 
 
@@ -220,10 +207,10 @@ def scan_scene(device: int = CAMERA_WEBCAM) -> dict:
     image = capture_frame(device)
     if not image:
         return {"object": "unknown", "action": "forward",
-                "terrain": "clear", "in_my_path": False, "speak": None}
+                "terrain": "clear", "in_my_path": False,
+                "speak": None, "object_name": None}
 
-    response = ask_cosmos(SCAN_PROMPT, image_b64=image,
-                          max_tokens=200, stream=False)
+    response = ask_cosmos(SCAN_PROMPT, image_b64=image, max_tokens=200)
     try:
         clean = response.replace("```json", "").replace("```", "").strip()
         start = clean.find("{")
@@ -234,4 +221,5 @@ def scan_scene(device: int = CAMERA_WEBCAM) -> dict:
     except Exception:
         log.warning(f"Could not parse scene JSON: {response[:200]}")
         return {"object": "unknown", "action": "forward",
-                "terrain": "clear", "in_my_path": False, "speak": None}
+                "terrain": "clear", "in_my_path": False,
+                "speak": None, "object_name": None}
