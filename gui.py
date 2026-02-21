@@ -231,6 +231,14 @@ def build_ui():
 
         gr.HTML('<div class="title">🤖 E.R.I.C. — Edge Robotics Innovation by Cosmos</div>')
         gr.HTML('<div class="sub">NVIDIA Cosmos Cookoff 2026 · Jetson Orin Nano Super 8GB · Kelowna BC · ~$750 CAD</div>')
+        gr.HTML("""<style>
+            #estop { background:#cc0000 !important; color:white !important;
+                     font-size:1.2em !important; font-weight:bold !important;
+                     height:52px !important; border:2px solid #ff4444 !important;
+                     letter-spacing:2px; margin-bottom:8px; }
+            #estop:hover { background:#ff0000 !important; box-shadow:0 0 12px #ff0000 !important; }
+        </style>""")
+        estop_btn = gr.Button("🚨  EMERGENCY STOP  🚨", variant="stop", elem_id="estop")
 
         with gr.Row():
 
@@ -325,8 +333,14 @@ def build_ui():
         mission_dd.change(on_mission_select,  inputs=mission_dd, outputs=briefing_box)
         refresh_btn.click(lambda: gr.update(choices=load_mission_choices()), outputs=mission_dd)
 
+        # Emergency stop — kills mission AND motors instantly
+        estop_btn.click(
+            lambda: (stop_mission(), "🚨 EMERGENCY STOP — All systems halted")[1],
+            outputs=eric_says_box
+        )
+
         engage_btn.click(action_engage, inputs=briefing_box, outputs=[eric_says_box, status_box])
-        disengage_btn.click(action_disengage,                outputs=[eric_says_box, status_box])
+        disengage_btn.click(action_disengage, outputs=[eric_says_box, status_box])
         char_btn.click(action_char_reply, inputs=[char_name, char_says], outputs=[char_reply, char_says])
 
         # Manual motor controls with speed
