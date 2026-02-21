@@ -1,0 +1,131 @@
+# ═══════════════════════════════════════════════════════════════
+# E.R.I.C. Mission Template
+# ═══════════════════════════════════════════════════════════════
+#
+# HOW TO CREATE YOUR OWN MISSION:
+#
+# 1. Copy this file and rename it (e.g. my_mission.yaml)
+# 2. Drop it in the missions/ folder
+# 3. Click 🔄 refresh in the Gradio GUI — it appears in the dropdown
+# 4. Select it, hit ENGAGE, and Eric will follow your scenario
+#
+# TIPS:
+# - Eric IS the robot character in the briefing (first person)
+# - The briefing is injected into Cosmos's system prompt —
+#   the more detail you give, the better Eric reasons
+# - Characters are played by YOU in the GUI interaction box
+# - Eric cannot pick up objects or engage in combat (no arms)
+# - Keep terrain notes realistic to your actual space
+#
+# REQUIRED fields: name, briefing
+# OPTIONAL fields: everything else
+# ═══════════════════════════════════════════════════════════════
+
+# Short display name shown in the GUI dropdown
+name: "My Mission Name"
+
+# One line description (shown in README/logs)
+description: "What this mission is about"
+
+# Who created this mission
+author: "Your name"
+
+
+# ═══════════════════════════════════════════════════════════════
+# BRIEFING — The most important field
+# ═══════════════════════════════════════════════════════════════
+# This text is read by Cosmos before the mission starts.
+# Eric will use it to reason about EVERY decision during the mission.
+#
+# Good briefings include:
+#   - WHO Eric is looking for or what he must do
+#   - WHO might have useful information along the way
+#   - WHO or WHAT to avoid
+#   - Any special rules or constraints
+#   - Emotional context if relevant (makes responses richer)
+#
+# Use the | character to write multi-line text (keep indentation)
+# ═══════════════════════════════════════════════════════════════
+
+briefing: |
+  Write your full mission briefing here.
+  Eric will read this and use it for all reasoning during the mission.
+
+  Example of a good briefing:
+  "You are searching for Dr. Chen who went missing in the lab.
+  Her assistant Jamie may know where she was last seen.
+  The storage room is flooded — avoid it completely.
+  If you find any notes or clues, report them immediately.
+  You cannot move objects — observe and report only."
+
+  The more specific you are, the better Eric reasons.
+  You can write as many paragraphs as you need.
+
+
+# ═══════════════════════════════════════════════════════════════
+# CHARACTERS — People/robots Eric will encounter
+# ═══════════════════════════════════════════════════════════════
+# These are played by YOU in the Gradio character interaction box.
+# The hints tell Eric how to interpret their responses.
+# You don't have to list every character — just the main ones.
+# ═══════════════════════════════════════════════════════════════
+
+characters:
+  - name: "Character One"
+    hint: "How they behave and what they know"
+
+  - name: "Character Two"
+    hint: "How they behave and what they know"
+
+  # Add as many as you need:
+  # - name: "Character Three"
+  #   hint: "..."
+
+
+# ═══════════════════════════════════════════════════════════════
+# MISSION STAGES — Optional step-by-step goals
+# ═══════════════════════════════════════════════════════════════
+# These are informational — Eric reasons from the briefing,
+# not from these stages directly. But they help you as the
+# game master know what to set up and when to play each character.
+# ═══════════════════════════════════════════════════════════════
+
+mission_stages:
+  - stage: 1
+    goal: "First thing Eric should do"
+
+  - stage: 2
+    goal: "Second goal"
+
+  - stage: 3
+    goal: "Final objective"
+
+
+# ═══════════════════════════════════════════════════════════════
+# TERRAIN — What surfaces Eric will encounter
+# ═══════════════════════════════════════════════════════════════
+# Cosmos uses these to decide speed and caution level.
+# Describe what is actually in your physical space.
+# ═══════════════════════════════════════════════════════════════
+
+terrain:
+  - "Smooth floor (normal speed)"
+  - "Carpet or rug (slow down)"
+  - "Obstacle area (navigate around)"
+  - "Open space (full speed ahead)"
+
+
+# ═══════════════════════════════════════════════════════════════
+# NOTES — Optional extra context or GM notes
+# ═══════════════════════════════════════════════════════════════
+# Use this for your own reminders as game master.
+# Eric does NOT read this section.
+# ═══════════════════════════════════════════════════════════════
+
+notes: |
+  Game master notes here — Eric ignores this section.
+  Use it to remind yourself:
+  - Which Lego figures to place where
+  - What to type as each character when Eric stops
+  - How you want the story to end
+  - Props or terrain changes to set up mid-mission
