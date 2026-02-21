@@ -1,5 +1,5 @@
 """
-E.R.I.C. — Edge Robotics Innovation by Cosmos
+ERIC — Edge Robotics Innovation by Cosmos
 ===============================================
 NVIDIA Cosmos Cookoff 2026
 
@@ -30,11 +30,11 @@ log = logging.getLogger("eric")
 
 
 def main():
-    log.info("🤖 E.R.I.C. starting — Edge Robotics Innovation by Cosmos")
+    log.info("🤖 ERIC starting — Edge Robotics Innovation by Cosmos")
 
     # Quick Cosmos connectivity test
     from cosmos import ask_cosmos
-    test = ask_cosmos("Say exactly: E.R.I.C. online and ready.", max_tokens=20)
+    test = ask_cosmos("Say exactly: ERIC online and ready.", max_tokens=20)
     log.info(f"Cosmos test: {test}")
 
     # Launch Gradio GUI (blocking)

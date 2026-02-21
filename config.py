@@ -1,5 +1,5 @@
 """
-E.R.I.C. — Configuration
+ERIC — Configuration
 All settings loaded from environment / .env file
 """
 

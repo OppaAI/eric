@@ -1,5 +1,5 @@
 """
-E.R.I.C. — Motor Control
+ERIC — Motor Control
 Waveshare UGV via serial UART to ESP32
 Command format: {"T":1,"L":speed,"R":speed}  speed in m/s
 
@@ -43,18 +43,27 @@ class Motors:
         except Exception as e:
             log.warning(f"⚠️  Motors unavailable ({e}) — simulation mode")
 
+    def _write(self, cmd: str):
+        """Send a raw command string byte by byte."""
+        if not self._ser:
+            log.info(f"[SIM] {cmd.strip()}")
+            return
+        with self._lock:
+            try:
+                for byte in cmd.encode("utf-8"):
+                    self._ser.write(bytes([byte]))
+                    time.sleep(0.001)
+            except Exception as e:
+                log.error(f"Serial write error: {e}")
+
+    def _send_raw(self, data: dict):
+        """Send any arbitrary JSON command to ESP32."""
+        cmd = json.dumps(data) + "\n"
+        self._write(cmd)
+
     def _send(self, left: float, right: float):
         cmd = json.dumps({"T": 1, "L": round(left, 3), "R": round(right, 3)}) + "\n"
-        if not self._ser:
-            log.info(f"[MOTOR SIM] {cmd.strip()}")
-        else:
-            with self._lock:
-                try:
-                    for byte in cmd.encode("utf-8"):
-                        self._ser.write(bytes([byte]))
-                        time.sleep(0.001)
-                except Exception as e:
-                    log.error(f"Motor error: {e}")
+        self._write(cmd)
 
         # Update telemetry state for GUI display
         try:
@@ -82,27 +91,15 @@ class Motors:
         if not self._ser:
             log.info(f"[OLED SIM] line {line}: {text}")
             return
-        with self._lock:
-            try:
-                for byte in cmd.encode("utf-8"):
-                    self._ser.write(bytes([byte]))
-                    time.sleep(0.001)
-            except Exception as e:
-                log.error(f"OLED error: {e}")
+        self._write(cmd)
 
     def lights(self, base: int = 255, head: int = 255):
         """Control LED lights. Values 0-255."""
-        cmd = json.dumps({"T": 132, "IO4": base, "IO5": head}) + "\n"
-        if not self._ser:
-            log.info(f"[LIGHTS SIM] base={base} head={head}")
-            return
-        with self._lock:
-            try:
-                for byte in cmd.encode("utf-8"):
-                    self._ser.write(bytes([byte]))
-                    time.sleep(0.001)
-            except Exception as e:
-                log.error(f"Lights error: {e}")
+        self._send_raw({"T": 132, "IO4": base, "IO5": head})
+
+    def pantilt(self, pan: int = 0, tilt: int = 0, speed: int = 50):
+        """Pan-tilt control. pan/tilt in degrees from center."""
+        self._send_raw({"T": 133, "X": pan, "Y": tilt, "SPD": speed, "ACC": 10})
 
     # NOTE: negative speed = forward on UGV Beast hardware
     def forward(self, speed=MOTOR_SPEED_NORMAL):  self._send(-speed, -speed)

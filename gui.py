@@ -1,5 +1,5 @@
 """
-E.R.I.C. — Gradio GUI
+ERIC — Gradio GUI
 Dual camera feeds, mission briefing, character interaction
 """
 
@@ -22,7 +22,7 @@ from mission import (
 log = logging.getLogger("eric.gui")
 
 # ─── Shared state updated by mission callbacks ────────────────────────────────
-_eric_says = "E.R.I.C. ready."
+_eric_says = "ERIC ready."
 _status    = "🔴 IDLE"
 _log_text  = ""
 
@@ -212,10 +212,10 @@ def action_status():
 # ─── Build UI ─────────────────────────────────────────────────────────────────
 def build_ui():
     with gr.Blocks(
-        title="E.R.I.C. — Edge Robotics Innovation by Cosmos",
+        title="ERIC — Edge Robotics Innovation by Cosmos",
     ) as demo:
 
-        gr.HTML('<div class="title">🤖 E.R.I.C. — Edge Robotics Innovation by Cosmos</div>')
+        gr.HTML('<div class="title">🤖 ERIC — Edge Robotics Innovation by Cosmos</div>')
         gr.HTML('<div class="sub">NVIDIA Cosmos Cookoff 2026 · Jetson Orin Nano Super 8GB · Kelowna BC · ~$750 CAD</div>')
         gr.HTML("""<style>
             body { background:#111; }
