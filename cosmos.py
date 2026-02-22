@@ -273,11 +273,11 @@ def capture_frame_raw(device: int = CAMERA_WEBCAM):
     """Capture raw RGB frame for Gradio display."""
     try:
         import cv2
-        frame = _grab_frame(device, 640, 480)
+        frame = _grab_frame(device, 480, 640)  # swap w/h since webcam is physically rotated 90°
         if frame is None:
             return None
         if device == CAMERA_WEBCAM:
-            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
+            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     except Exception:
         return None

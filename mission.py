@@ -97,7 +97,7 @@ def _cosmos_frames(frames, prompt, max_tokens=250, temp=0.3):
     return r.json()["choices"][0]["message"]["content"].strip()
 
 
-def _parse_json(response, fallback):
+def _parse_json(response, fallback, label="COSMOS"):
     try:
         clean = response.replace("```json", "").replace("```", "").strip()
         s = clean.find("{")
@@ -106,9 +106,25 @@ def _parse_json(response, fallback):
             result = json.loads(clean[s:e])
             for k, v in fallback.items():
                 result.setdefault(k, v)
+            # ── Print full result to terminal ──────────────────────────────
+            print(f"\n{'─'*60}")
+            print(f"🧠 {label}:")
+            for k, v in result.items():
+                # Highlight important fields
+                icon = ""
+                if k == "object"           and v not in ("clear", "unknown"): icon = "  ⚠️ "
+                if k == "wall_ahead"       and v:                              icon = "  🚧 "
+                if k == "obstacle_close"   and v:                              icon = "  🚧 "
+                if k == "small_obstacle"   and v:                              icon = "  ⚠️ "
+                if k == "target_visible"   and v:                              icon = "  🎯 "
+                if k == "mission_complete" and v:                              icon = "  🏆 "
+                if k == "speak"            and v:                              icon = "  🔊 "
+                print(f"  {k:25s}: {v}{icon}")
+            print(f"{'─'*60}\n")
             return result
     except Exception:
         log.warning(f"JSON parse failed: {response[:100]}")
+        print(f"\n⚠️  RAW RESPONSE ({label}): {response[:400]}\n")
     return fallback
 
 
@@ -301,8 +317,9 @@ def _nav_check() -> dict:
     if not frame:
         return dict(_NAV_FALLBACK)
     try:
+        print(f"\n🚗 NAV CHECK — 1 frame to Cosmos...")
         response = _cosmos_frames([frame], NAV_PROMPT, max_tokens=120, temp=0.2)
-        return _parse_json(response, dict(_NAV_FALLBACK))
+        return _parse_json(response, dict(_NAV_FALLBACK), label="NAV RESULT")
     except Exception as e:
         log.error(f"Nav check error: {e}")
         return dict(_NAV_FALLBACK)
@@ -319,8 +336,9 @@ def _quick_scan() -> dict:
     if not frames:
         return dict(_SCAN_FALLBACK)
     try:
+        print(f"\n📷 QUICK SCAN — {len(frames)} frames to Cosmos...")
         response = _cosmos_frames(frames, QUICK_SCAN_PROMPT, max_tokens=200, temp=0.3)
-        return _parse_json(response, dict(_SCAN_FALLBACK))
+        return _parse_json(response, dict(_SCAN_FALLBACK), label="QUICK SCAN RESULT")
     except Exception as e:
         log.error(f"Quick scan error: {e}")
         return dict(_SCAN_FALLBACK)
@@ -374,9 +392,9 @@ def _scan_360() -> dict:
     motors.oled(1, "Analyzing...")
 
     try:
+        print(f"\n🔄 360° SCAN — sending {len(all_frames)} frames to Cosmos...")
         response = _cosmos_frames(all_frames, SCAN_360_PROMPT, max_tokens=300, temp=0.2)
-        log.info(f"360 result: {response[:200]}")
-        return _parse_json(response, dict(_SCAN_FALLBACK))
+        return _parse_json(response, dict(_SCAN_FALLBACK), label="360° SCAN RESULT")
     except Exception as e:
         log.error(f"360 Cosmos error: {e}")
         return dict(_SCAN_FALLBACK)
