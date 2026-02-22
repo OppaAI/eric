@@ -25,7 +25,7 @@ from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR, VLLM_URL,
 from motors import motors
 from cosmos import (
     ask_cosmos, set_mission_briefing,
-    capture_frame, capture_dual_stable, capture_nav_frame,
+    capture_frame, capture_dual_stable, capture_nav_frame, capture_nav_clip,
     center_on_person,
     pantilt, pantilt_center, pantilt_move_wait,
     autofocus_trigger, autofocus_enable,
@@ -223,16 +223,23 @@ def resume_after_interaction():
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
 NAV_PROMPT = """
-I am moving. This is my pan-tilt wide-angle camera view — egocentric, first person.
-Fast obstacle check only. What is DIRECTLY ahead of me?
+These are frames from a 10-second video clip of my pan-tilt camera while I am moving.
+Analyze the MOTION and what is approaching — egocentric, first person view.
+
+Look for:
+- Obstacles or walls getting closer over the frames
+- People or robots appearing in the scene
+- Terrain changes (carpet, tiles, steps)
+- Any object moving into my path
 
 Respond ONLY with valid JSON:
 {
   "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
+  "person_visible": false,
   "action": "forward|slow|stop|turn_left|turn_right",
-  "physical_reasoning": "one sentence"
+  "physical_reasoning": "one sentence describing what you saw across the clip"
 }
 """
 
@@ -307,21 +314,58 @@ _NAV_FALLBACK = {
 
 # ─── Navigation Check (while moving) ─────────────────────────────────────────
 
+# Nav clip settings — tune these
+NAV_CLIP_DURATION = 10.0  # seconds of video per nav check
+NAV_CLIP_FPS      = 2     # frames per second (10s x 2fps = 20 frames to Cosmos)
+
+
 def _nav_check() -> dict:
     """
-    Fast nav check using pan-tilt only (wide angle).
-    Robot may be moving. Pan-tilt stays centered.
-    No settle wait needed since pan-tilt is already at 0,0.
+    Video nav check using pan-tilt camera.
+    Captures a 10s clip while robot moves, sends all frames to Cosmos.
+    Cosmos reasons about motion, approaching obstacles, and people over time.
+    If person spotted, stop and greet before resuming.
     """
-    frame = capture_nav_frame()
-    if not frame:
-        return dict(_NAV_FALLBACK)
+    _ui("log", f"🎬 Nav clip ({NAV_CLIP_DURATION}s)...")
+    motors.oled(1, "Nav scan...")
+
+    frames = capture_nav_clip(
+        duration_sec=NAV_CLIP_DURATION,
+        fps=NAV_CLIP_FPS,
+        width=640,
+        height=480
+    )
+
+    if not frames:
+        log.warning("Nav clip: no frames captured — fallback")
+        # Fallback to single frame
+        frame = capture_nav_frame()
+        if not frame:
+            return dict(_NAV_FALLBACK)
+        frames = [frame]
+
     try:
-        print(f"\n🚗 NAV CHECK — 1 frame to Cosmos...")
-        response = _cosmos_frames([frame], NAV_PROMPT, max_tokens=120, temp=0.2)
-        return _parse_json(response, dict(_NAV_FALLBACK), label="NAV RESULT")
+        print(f"\n🚗 NAV CLIP CHECK — {len(frames)} frames to Cosmos...")
+        response = _cosmos_frames(frames, NAV_PROMPT, max_tokens=150, temp=0.2)
+        result = _parse_json(response, dict(_NAV_FALLBACK), label="NAV CLIP RESULT")
+
+        # Greet person/robot if spotted while moving
+        if result.get("person_visible") and mission_active:
+            motors.stop()
+            _ui("log", "👤 Person spotted — greeting!")
+            _ui("status", "GREETING")
+            greeting = ask_cosmos(
+                "You just spotted someone ahead while navigating. "
+                "Give a warm friendly greeting and ask if they can help with your mission. "
+                "1-2 sentences only.",
+                max_tokens=60
+            )
+            eric_say(greeting)
+            time.sleep(1.0)
+
+        return result
     except Exception as e:
-        log.error(f"Nav check error: {e}")
+        log.error(f"Nav clip check error: {e}")
         return dict(_NAV_FALLBACK)
 
 
@@ -346,10 +390,50 @@ def _quick_scan() -> dict:
 
 # ─── 360° Scan (stopped) ──────────────────────────────────────────────────────
 
+TURN_90_SEC      = 2.2   # seconds to turn 90° at MOTOR_SPEED_SLOW — tune if needed
+BLUR_THRESHOLD   = 80.0  # Laplacian variance below this = blurry, retry
+MAX_BLUR_RETRIES = 3
+
+
+def _is_blurry(frame_b64: str) -> bool:
+    """Return True if frame is too blurry to use (low Laplacian variance)."""
+    try:
+        import cv2
+        import numpy as np
+        import base64
+        data  = base64.b64decode(frame_b64)
+        arr   = np.frombuffer(data, np.uint8)
+        img   = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return False
+        score = cv2.Laplacian(img, cv2.CV_64F).var()
+        log.debug(f"Sharpness score: {score:.1f}")
+        return score < BLUR_THRESHOLD
+    except Exception:
+        return False
+
+
+def _capture_sharp(device: int, retries: int = MAX_BLUR_RETRIES) -> str | None:
+    """Capture a frame, retrying if blurry. Returns best frame found."""
+    best = None
+    for attempt in range(retries):
+        f = capture_frame(device, 640, 480, adaptive_led=True)
+        if f is None:
+            break
+        if not _is_blurry(f):
+            return f   # sharp enough
+        log.info(f"Blurry frame on cam {device} (attempt {attempt+1}) — waiting and retrying...")
+        best = f       # keep as fallback
+        time.sleep(0.5)
+    return best  # return best we got even if still blurry
+
+
 def _scan_360() -> dict:
     """
     Full 360° body rotation scan.
-    At each of 4 positions: tilt up then down, capture pan-tilt + webcam (settled).
+    At each of 4 positions (0°, 90°, 180°, 270°):
+      - tilt up (far/mid) and down (floor/near)
+      - capture pan-tilt + webcam, retry if blurry
     """
     global mission_state
     mission_state = State.SCANNING_360
@@ -358,7 +442,7 @@ def _scan_360() -> dict:
     log.info("Starting 360 scan")
 
     motors.stop()
-    time.sleep(0.4)
+    time.sleep(0.5)
     all_frames = []
 
     for pos in range(4):
@@ -368,24 +452,28 @@ def _scan_360() -> dict:
 
         # Tilt up (far/mid-range) then down (floor/near)
         for tilt, label in [(-20, "up"), (15, "floor")]:
-            pantilt_move_wait(0, tilt, speed=40)  # settle included
+            pantilt_move_wait(0, tilt, speed=40)  # includes settle wait
 
-            # Pan-tilt frame (settled, adaptive LED)
-            f_pt = capture_frame(CAMERA_PANTILT, 640, 480, adaptive_led=True)
-            if f_pt: all_frames.append(f_pt)
+            # Pan-tilt frame — retry if blurry
+            f_pt = _capture_sharp(CAMERA_PANTILT)
+            if f_pt:
+                all_frames.append(f_pt)
+                log.info(f"  {deg}° tilt={label}: pan-tilt ✓ (sharp)")
 
-            # Webcam frame (settled, adaptive LED)
-            f_wc = capture_frame(CAMERA_WEBCAM, 640, 480, adaptive_led=True)
-            if f_wc: all_frames.append(f_wc)
+            # Webcam frame — retry if blurry
+            f_wc = _capture_sharp(CAMERA_WEBCAM)
+            if f_wc:
+                all_frames.append(f_wc)
+                log.info(f"  {deg}° tilt={label}: webcam ✓ (sharp)")
 
-        # Return to center before rotating
+        # Return to center before rotating body
         pantilt_center()
 
         if pos < 3:
             motors.right(MOTOR_SPEED_SLOW)
-            time.sleep(1.5)   # tune for true 90° on your floor
+            time.sleep(TURN_90_SEC)   # tuned for true 90° — adjust TURN_90_SEC if off
             motors.stop()
-            time.sleep(0.4)
+            time.sleep(0.5)           # settle after body rotation
 
     log.info(f"360 scan done — {len(all_frames)} frames → Cosmos")
     _ui("log", f"360 done — {len(all_frames)} frames → Cosmos")
@@ -629,15 +717,17 @@ def _process_scan(scan, from_360=False):
 
 
 # ─── Mission Loop ─────────────────────────────────────────────────────────────
+# Nav clip is 10s — after each clip, do a quick stopped scan.
+# After SCANS_BEFORE_360 quick scans with nothing found, do a full 360.
+# The 10s clip itself IS the nav check — no separate interval needed.
 
-# How many nav checks between stopped scans
-NAV_CHECKS_BETWEEN_SCANS = 3
-_nav_check_count = 0
+_nav_clips_since_scan = 0
+NAV_CLIPS_BETWEEN_SCANS = 2  # do a quick stopped scan every 2 nav clips (~20s of movement)
 
 
 def _mission_loop():
     global mission_active, mission_state, _empty_scans, _scans_since_360
-    global _avoid_attempts, _nav_check_count
+    global _avoid_attempts, _nav_clips_since_scan
 
     eric_say("Starting initial 360 degree scan of the area.")
     scan = _scan_360()
@@ -646,7 +736,7 @@ def _mission_loop():
     if mission_active and mission_state == State.SEARCHING:
         motors.forward(MOTOR_SPEED_SLOW)
 
-    _nav_check_count = 0
+    _nav_clips_since_scan = 0
 
     while mission_active:
         try:
@@ -654,11 +744,10 @@ def _mission_loop():
                 time.sleep(0.5)
                 continue
 
-            # ── Nav check while moving (pan-tilt only, fast) ──────────────────
-            if _nav_check_count < NAV_CHECKS_BETWEEN_SCANS:
-                _nav_check_count += 1
-                _ui("log", "Nav check...")
-                nav = _nav_check()
+            # ── Video nav check while moving (10s clip → Cosmos) ─────────────
+            if _nav_clips_since_scan < NAV_CLIPS_BETWEEN_SCANS:
+                _nav_clips_since_scan += 1
+                nav = _nav_check()  # captures 10s video clip, robot keeps moving
 
                 if nav.get("wall_ahead") or nav.get("obstacle_close"):
                     motors.stop()
@@ -669,7 +758,7 @@ def _mission_loop():
                     )
                     if force_360:
                         _scans_since_360 = SCANS_BEFORE_360
-                        _nav_check_count = NAV_CHECKS_BETWEEN_SCANS  # force scan
+                        _nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS  # force scan
                     else:
                         motors.forward(MOTOR_SPEED_SLOW)
                 elif nav.get("action") == "slow":
@@ -678,12 +767,10 @@ def _mission_loop():
                     motors.stop()
                 else:
                     motors.forward(MOTOR_SPEED_SLOW)
-
-                time.sleep(1.0)  # nav check interval
                 continue
 
-            # ── Stopped scan (dual camera, stable) ───────────────────────────
-            _nav_check_count = 0
+            # ── Stopped scan every NAV_CLIPS_BETWEEN_SCANS clips ─────────────
+            _nav_clips_since_scan = 0
             _scans_since_360 += 1
             motors.stop()
             time.sleep(0.3)
@@ -707,7 +794,7 @@ def _mission_loop():
                 scan = _quick_scan()
                 _process_scan(scan, from_360=False)
 
-            time.sleep(0.5)
+            time.sleep(0.3)
 
         except Exception as e:
             log.error(f"Mission loop error: {e}")

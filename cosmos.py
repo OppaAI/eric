@@ -273,7 +273,7 @@ def capture_frame_raw(device: int = CAMERA_WEBCAM):
     """Capture raw RGB frame for Gradio display."""
     try:
         import cv2
-        frame = _grab_frame(device, 480, 640)  # swap w/h since webcam is physically rotated 90°
+        frame = _grab_frame(device, 640, 480)
         if frame is None:
             return None
         if device == CAMERA_WEBCAM:
@@ -309,12 +309,53 @@ def capture_dual_stable(adaptive_led: bool = True) -> list[str]:
 # ─── Nav Capture (during movement — pan-tilt only, center, fast) ──────────────
 
 def capture_nav_frame() -> str | None:
-    """
-    Fast single frame from pan-tilt only for navigation.
-    Pan-tilt stays centered (0,0). No LED toggle.
-    Robot may be moving — keep it fast.
-    """
+    """Single frame nav capture — kept for fallback use."""
     return capture_frame(CAMERA_PANTILT, 640, 480, adaptive_led=False)
+
+
+def capture_nav_clip(duration_sec: float = 10.0,
+                     fps: int = 2,
+                     width: int = 640,
+                     height: int = 480) -> list[str]:
+    """
+    Capture a video clip from pan-tilt camera while robot is moving.
+    Samples frames at `fps` rate for `duration_sec` seconds.
+    Returns list of base64 JPEG frames — fed to Cosmos as multi-image input.
+
+    fps=2 gives 20 frames over 10s — enough temporal coverage without
+    overwhelming Cosmos context. Lower fps = less VRAM pressure.
+    """
+    import cv2
+    frames = []
+    interval = 1.0 / fps
+    end_time = time.time() + duration_sec
+    cap = _get_cap(CAMERA_PANTILT, width, height)
+
+    log.info(f"🎬 Nav clip: {duration_sec}s @ {fps}fps ({width}x{height})")
+
+    while time.time() < end_time:
+        t0 = time.time()
+        cap.grab()  # flush buffer
+        ret, frame = cap.read()
+        if ret:
+            # Resize to keep pixel budget reasonable per frame
+            # 640x480 @ 20 frames = a lot — downsample each frame
+            h, w = frame.shape[:2]
+            max_pixels = 128000  # smaller per-frame budget for video
+            if w * h > max_pixels:
+                scale = (max_pixels / (w * h)) ** 0.5
+                frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            frames.append(base64.b64encode(buf).decode("utf-8"))
+
+        # Sleep remaining interval time
+        elapsed = time.time() - t0
+        sleep_t = max(0.0, interval - elapsed)
+        if sleep_t > 0:
+            time.sleep(sleep_t)
+
+    log.info(f"🎬 Nav clip done — {len(frames)} frames captured")
+    return frames
 
 
 # ─── Cosmos API ───────────────────────────────────────────────────────────────
