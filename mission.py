@@ -45,6 +45,7 @@ class State:
 mission_state        = State.IDLE
 mission_active       = False
 conversation_history = []
+_last_good_scan      = None   # FIX B2: remember last valid scan so JSON failures don't freeze Eric
 
 _empty_scans       = 0
 _avoid_attempts    = 0
@@ -122,6 +123,11 @@ def _parse_json(response, fallback, label="COSMOS"):
     except Exception:
         log.warning(f"JSON parse failed: {response[:100]}")
         print(f"\n⚠️  RAW RESPONSE ({label}): {response[:400]}\n")
+    # FIX B2: on parse failure, use last known-good scan rather than freezing on "stop"
+    global _last_good_scan
+    if _last_good_scan and label in ("QUICK SCAN RESULT", "NAV CHECK", "360° OVERVIEW"):
+        log.info(f"JSON parse failed — using last good scan to avoid unnecessary stop")
+        return dict(_last_good_scan)
     return fallback
 
 
@@ -230,6 +236,10 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
     # Fill missing keys from fallback
     for k, v in fallback.items():
         result.setdefault(k, v)
+
+    # FIX B2: remember this as the last known-good scan
+    global _last_good_scan
+    _last_good_scan = dict(result)
 
     # ── Print ──────────────────────────────────────────────────────────────
     print(f"\n{'─'*60}")
@@ -374,6 +384,10 @@ STEP 1 — SAFETY: Look at all floor-level frames. Which direction has the most 
 STEP 2 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts. Set target_visible=true if 30%+ confident.
 STEP 3 — SPEAK: If you see the target, set speak to an excited 1-sentence reaction. Otherwise null.
 
+MISSION COMPLETE — set mission_complete=true ONLY when ALL of these are true:
+- target_visible = true AND in_my_path = true AND distance is "close" or "nearby"
+- If mission requires delivering a message: set speak to that message before marking complete
+
 OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
 "object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
 "object_name" must be a short string or null — NOT a list or dict.
@@ -411,6 +425,10 @@ OBSTACLE CHECK — lower half of every image:
 
 MISSION TARGET CHECK:
 - Person, robot, slipper, shoe — even partially visible → target_visible = true
+
+MISSION COMPLETE — set mission_complete=true ONLY when ALL of these are true:
+- target_visible = true AND in_my_path = true AND distance is "close" or "nearby"
+- If mission requires delivering a message: set speak to that message before marking complete
 
 OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
 "object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
@@ -508,8 +526,13 @@ Now analyze the frame and output ONLY the JSON object above. No markdown. No exp
 
         if result.get("person_visible") and mission_active:
             motors.stop()
-            _ui("log", "👤 Person spotted during nav — stopping")
+            _ui("log", "👤 Person spotted during nav — approaching before greeting")
             _ui("status", "PERSON SPOTTED")
+            # FIX B3: drive toward person before greeting — they could be meters away
+            motors.forward(MOTOR_SPEED_SLOW)
+            time.sleep(2.5)
+            motors.stop()
+            time.sleep(0.4)
             greeting = ask_cosmos(
                 "You spotted someone ahead while navigating. "
                 "Greet them and ask if they can help with your mission. 1-2 sentences.",
@@ -946,7 +969,38 @@ def _process_scan(scan, from_360=False):
         motors.oled(1, f"Target {target_dir}!")
         _ui("status", "TARGET SPOTTED")
         _face_direction(target_dir)
-        motors.forward(MOTOR_SPEED_SLOW)
+
+        # FIX B1: approach loop — keep moving toward target until we're close enough to interact
+        _ui("log", "Approaching target...")
+        motors.oled(1, "Approaching...")
+        for attempt in range(12):   # max ~24s of approach time
+            if not mission_active:
+                break
+            motors.forward(MOTOR_SPEED_SLOW)
+            time.sleep(2.0)
+            motors.stop()
+            time.sleep(0.4)
+
+            check = _quick_scan()
+            dist = check.get("distance", "far")
+            close_enough = dist in ("close", "nearby") or check.get("in_my_path", False)
+
+            if check.get("wall_ahead") or check.get("obstacle_close"):
+                # Hit something — treat it as arrived or let avoidance handle it
+                _ui("log", "Obstacle during approach — stopping")
+                break
+
+            if close_enough:
+                _ui("log", f"Close to target after {attempt+1} steps — switching to INTERACTING")
+                mission_state = State.INTERACTING
+                break
+
+            if not check.get("target_visible", False):
+                _ui("log", "Lost sight of target during approach — resuming search")
+                mission_state = State.SEARCHING
+                motors.forward(MOTOR_SPEED_SLOW)
+                return
+
         mission_state = State.SEARCHING
         return
 
