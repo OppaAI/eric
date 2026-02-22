@@ -277,7 +277,7 @@ def capture_frame_raw(device: int = CAMERA_WEBCAM):
         if frame is None:
             return None
         if device == CAMERA_WEBCAM:
-            frame = cv2.rotate(frame, cv2.ROTATE_90_CLOCKWISE)
+            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
         return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     except Exception:
         return None
