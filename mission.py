@@ -25,7 +25,10 @@ from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR, VLLM_URL,
 from motors import motors
 from cosmos import (
     ask_cosmos, set_mission_briefing,
-    capture_frame,
+    capture_frame, capture_dual_stable, capture_nav_frame, capture_nav_clip,
+    center_on_person,
+    pantilt, pantilt_center, pantilt_move_wait,
+    autofocus_trigger, autofocus_enable,
     CAMERA_WEBCAM, CAMERA_PANTILT
 )
 from tts import speak
@@ -101,13 +104,47 @@ def _parse_json(response, fallback, label="COSMOS"):
         e = clean.rfind("}") + 1
         if s >= 0 and e > s:
             result = json.loads(clean[s:e])
+
+            # ── Normalize malformed fields Cosmos sometimes produces ────────
+            # "object" may come back as a dict like {"person": [], "robot": ["rubblebucket"]}
+            # Flatten it to the first non-empty category, or "clear".
+            obj = result.get("object")
+            if isinstance(obj, dict):
+                priority = ["person", "robot", "slipper", "shoe", "obstacle", "wall", "clear"]
+                flat = "unknown"
+                for key in priority:
+                    if obj.get(key):          # non-empty list → this category has detections
+                        flat = key
+                        # Also pull object_name from the first item in that list
+                        items = obj[key]
+                        if isinstance(items, list) and items and not result.get("object_name"):
+                            result["object_name"] = str(items[0])
+                        break
+                    elif key in obj:          # key present but empty list → keep looking
+                        flat = key           # use as fallback if nothing better
+                result["object"] = flat
+
+            # "object_name" may come back as a list — take first item
+            name = result.get("object_name")
+            if isinstance(name, list):
+                result["object_name"] = name[0] if name else None
+
+            # Any other field that should be a plain string but is a list/dict — stringify it
+            _str_fields = ("terrain", "distance", "target_direction",
+                           "clearest_direction", "action", "physical_reasoning")
+            for field in _str_fields:
+                val = result.get(field)
+                if isinstance(val, (list, dict)):
+                    result[field] = str(val)
+
+            # Fill in missing keys from fallback
             for k, v in fallback.items():
                 result.setdefault(k, v)
+
             # ── Print full result to terminal ──────────────────────────────
             print(f"\n{'─'*60}")
             print(f"🧠 {label}:")
             for k, v in result.items():
-                # Highlight important fields
                 icon = ""
                 if k == "object"           and v not in ("clear", "unknown"): icon = "  ⚠️ "
                 if k == "wall_ahead"       and v:                              icon = "  🚧 "
@@ -166,8 +203,13 @@ def start_mission(briefing):
     _empty_scans = _avoid_attempts = _scans_since_360 = 0
     set_mission_briefing(briefing)
 
-    motors.pantilt(0, 0)
-    time.sleep(0.5)
+    try:
+        autofocus_enable(CAMERA_WEBCAM)
+        autofocus_enable(CAMERA_PANTILT)
+    except Exception:
+        pass
+
+    pantilt_center()
 
     ack = ask_cosmos(
         f"Mission briefing:\n\"{briefing}\"\n\n"
@@ -193,7 +235,7 @@ def stop_mission():
     mission_state  = State.IDLE
     motors.stop()
     motors.lights(0, 0)
-    motors.pantilt(0, 0)
+    pantilt_center()
     motors.oled(0, "ERIC STOPPED")
     motors.oled(1, "")
     eric_say("Mission disengaged. All systems halted.")
@@ -205,7 +247,7 @@ def resume_after_interaction():
     if mission_active:
         _empty_scans = _avoid_attempts = _scans_since_360 = 0
         mission_state = State.SEARCHING
-        motors.pantilt(0, 0)
+        pantilt_center()
         motors.forward(MOTOR_SPEED_SLOW)
         motors.oled(0, "ERIC ACTIVE")
         motors.oled(1, "Searching...")
@@ -215,95 +257,106 @@ def resume_after_interaction():
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
 NAV_PROMPT = """
-These are frames from a 10-second video clip captured by my forward-facing camera while I drive.
-I am a tracked robot — I CANNOT stop instantly. Study how the scene CHANGES across frames.
+You are a tracked ground robot. These frames are from your forward camera while moving.
+Study how the scene changes across frames.
 
-OBSTACLE DETECTION RULES (BE PARANOID — err on the side of stopping):
-- Does anything fill the lower half of the frame across multiple frames? → wall_ahead = true
-- Is ANY object getting visibly closer or larger across frames? → obstacle_close = true  
-- Is there anything small on the ground (cable, shoe, rug edge, step)? → small_obstacle = true
-- ONLY output action=forward if the path is completely clear for at least 1.5 meters
-- If UNSURE about anything: set obstacle_close=true and action=stop
+RULES:
+- Wall or large object filling lower half across multiple frames → wall_ahead = true
+- Any object getting visibly closer/larger → obstacle_close = true
+- Small ground hazard (cable, rug edge, step) → small_obstacle = true
+- Any human or robot visible anywhere → person_visible = true
+- ONLY set action=forward if path is clear for at least 1.5 meters
+- When unsure: obstacle_close=true, action=stop
 
-PERSON DETECTION:
-- Any human or robot visible anywhere in the clip → person_visible = true
+OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
+STRING fields must be a single word from the options listed — NOT a list, NOT a dict, NOT null.
+BOOLEAN fields must be true or false.
 
-Respond ONLY with valid JSON (nothing else, no markdown):
+Example output (copy this structure exactly, change values to match what you see):
 {
   "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
   "person_visible": false,
-  "action": "forward|slow|stop|turn_left|turn_right",
-  "physical_reasoning": "one sentence: what changed across the frames and why this action"
+  "action": "forward",
+  "physical_reasoning": "Path is clear ahead for at least two meters."
 }
+
+Now analyze the frames and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
 """
 
 SCAN_360_PROMPT = """
-These images are from a full 360-degree scan — 4 body positions (0°, 90°, 180°, 270°).
-At each position I tilted my camera up (far view) and down (floor view), with both cameras.
-Up to 16 images total. I am completely stopped.
+You are a tracked ground robot. These images are from a full 360-degree scan — 4 body positions.
+At each position the camera tilted up (far view) and down (floor view). You are completely stopped.
 
-STEP 1 — OBSTACLES FIRST (safety before mission):
-Look at ALL floor-level frames carefully. Identify walls, furniture, objects in any direction.
-Which direction has the most clear open space? → clearest_direction
+STEP 1 — SAFETY: Look at all floor-level frames. Which direction has the most open space?
+STEP 2 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts. Set target_visible=true if 30%+ confident.
+STEP 3 — SPEAK: If you see the target, set speak to an excited 1-sentence reaction. Otherwise null.
 
-STEP 2 — MISSION TARGET:
-- People: full body, faces, hands — any direction
-- Robots: chassis, cameras, wheels, lights — even partially visible counts
-- Slippers/shoes: soft footwear on the floor — check ALL floor-level frames carefully
-- Report target_visible=true if you are even 30% confident
+OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
+"object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
+"object_name" must be a short string or null — NOT a list or dict.
+All other string fields: pick exactly one option from those shown.
+Boolean fields: true or false only.
 
-STEP 3 — SPEAK:
-If you see the mission target, say something natural and excited about it.
-
-Respond ONLY with valid JSON (no markdown, no extra text):
+Example output (copy this structure exactly, change values to match what you see):
 {
-  "object": "person|robot|slipper|shoe|obstacle|wall|clear|unknown",
-  "object_name": "specific description or null",
-  "terrain": "carpet|tiles|wood|clear",
-  "distance": "close|medium|far",
+  "object": "clear",
+  "object_name": null,
+  "terrain": "tiles",
+  "distance": "far",
   "in_my_path": false,
   "wall_ahead": false,
   "small_obstacle": false,
   "target_visible": false,
-  "target_direction": "front|right|back|left|unknown",
-  "clearest_direction": "front|right|back|left",
-  "action": "forward|slow|turn_right|turn_left|turn_back|navigate_around|stop",
+  "target_direction": "unknown",
+  "clearest_direction": "front",
+  "action": "forward",
   "speak": null,
-  "physical_reasoning": "1 sentence explaining what you saw and why this action",
+  "physical_reasoning": "No target found. Hallway ahead is the clearest direction.",
   "mission_complete": false
 }
+
+Now analyze the images and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
 """
 
 QUICK_SCAN_PROMPT = """
-I am completely stopped. These stable frames are from my pan-tilt (wide angle) and webcam cameras.
+You are a tracked ground robot. You are completely stopped. These frames are from your pan-tilt and webcam cameras.
 
-OBSTACLE CHECK — LOOK AT THE LOWER HALF OF EVERY IMAGE:
-- Anything filling or touching the bottom edge of any frame? → wall_ahead = true
-- Any object within ~60cm directly ahead? → obstacle_close = true, set in_my_path = true
-- If in doubt about any object: set obstacle_close = true. Being cautious is correct.
+OBSTACLE CHECK — lower half of every image:
+- Anything filling/touching the bottom edge → wall_ahead = true
+- Object within ~60cm ahead → obstacle_close = true AND in_my_path = true
+- When in doubt: obstacle_close = true
 
 MISSION TARGET CHECK:
-- People, robots, slippers, shoes — even partially visible counts → target_visible = true
+- Person, robot, slipper, shoe — even partially visible → target_visible = true
 
-Respond ONLY with valid JSON (no markdown):
+OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
+"object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
+"object_name" must be a short string or null — NOT a list or dict.
+All other string fields: pick exactly one option from those shown.
+Boolean fields: true or false only.
+
+Example output (copy this structure exactly, change values to match what you see):
 {
-  "object": "person|robot|slipper|shoe|obstacle|wall|clear|unknown",
+  "object": "clear",
   "object_name": null,
-  "terrain": "carpet|tiles|wood|clear",
-  "distance": "close|medium|far",
+  "terrain": "tiles",
+  "distance": "far",
   "in_my_path": false,
   "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
   "target_visible": false,
-  "target_direction": "front|right|back|left",
-  "action": "forward|slow|navigate_around|stop",
+  "target_direction": "front",
+  "clearest_direction": "front",
+  "action": "forward",
   "speak": null,
-  "physical_reasoning": "1 sentence",
+  "physical_reasoning": "Path is clear. No target visible.",
   "mission_complete": false
 }
+
+Now analyze the frames and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
 """
 
 _SCAN_FALLBACK = {
@@ -338,7 +391,7 @@ def _nav_check() -> dict:
     _ui("log", "📷 Nav check...")
     motors.oled(1, "Nav check...")
 
-    frame = capture_frame(CAMERA_PANTILT, 320, 240)
+    frame = capture_nav_frame()
     if not frame:
         return dict(_NAV_FALLBACK)
 
@@ -390,15 +443,7 @@ def _quick_scan() -> dict:
     Dual camera stable scan while stopped.
     Pan-tilt centers + settles, then both cameras captured.
     """
-    motors.pantilt(0, 0)
-    time.sleep(0.5)
-    frames = []
-    pt = capture_frame(CAMERA_PANTILT, 640, 480)
-    if pt:
-        frames.append(pt)
-    wc = capture_frame(CAMERA_WEBCAM, 640, 480)
-    if wc:
-        frames.append(wc)
+    frames = capture_dual_stable(adaptive_led=True)
     if not frames:
         return dict(_SCAN_FALLBACK)
     try:
@@ -439,7 +484,7 @@ def _capture_sharp(device: int, retries: int = MAX_BLUR_RETRIES) -> str | None:
     """Capture a frame, retrying if blurry. Returns best frame found."""
     best = None
     for attempt in range(retries):
-        f = capture_frame(device, 640, 480)
+        f = capture_frame(device, 640, 480, adaptive_led=True)
         if f is None:
             break
         if not _is_blurry(f):
@@ -482,16 +527,15 @@ def _scan_360_smart() -> dict:
 
         # Also tilt up to see mid/far range
         for tilt, label in [(-20, "up"), (10, "level")]:
-            motors.pantilt(0, tilt, 40)
-            time.sleep(0.5)
+            pantilt_move_wait(0, tilt, speed=40)
 
             # Wide frame for overview collection
             f_pt = _capture_sharp(CAMERA_PANTILT)
             if f_pt:
                 all_frames.append(f_pt)
 
-            # Use _quick_scan at each position
-            result = _quick_scan()
+            # Use scan_and_identify at each position
+            result = scan_and_identify(adaptive_led=True)
 
             # ── CONFIRMED target found mid-scan ───────────────────────────
             if result.get("confirmed_target"):
@@ -529,8 +573,7 @@ def _scan_360_smart() -> dict:
                 log.info(f"Obstacle at {deg}° during 360 scan")
 
         # Re-centre pan-tilt before body rotation
-        motors.pantilt(0, 0)
-        time.sleep(0.3)
+        pantilt_center()
 
         if pos < 3:
             motors.right(MOTOR_SPEED_SLOW)
@@ -549,11 +592,11 @@ def _scan_360_smart() -> dict:
             time.sleep(TURN_90_SEC * steps_back)
             motors.stop()
             time.sleep(0.5)
-        # Try identification one more time with a quick scan
-        result = _quick_scan()
-        if result.get("target_visible") or result.get("object") not in ("clear", "unknown"):
+        # Try identification one more time
+        result = scan_and_identify(adaptive_led=True)
+        if result.get("confirmed_target"):
             return {
-                "object": result.get("object", "person"),
+                "object": result.get("object_type", "person"),
                 "object_name": result.get("object_name"),
                 "terrain": "clear", "distance": "medium",
                 "in_my_path": True, "wall_ahead": False,
@@ -669,9 +712,10 @@ def _handle_mission_complete(obj_name):
         motors.lights(0, 0);    time.sleep(0.25)
     motors.lights(128, 255)
 
-    # Tilt up slightly to face the target at close range
-    motors.pantilt(0, -10)
-    time.sleep(0.5)
+    # Look slightly up, settle, then center on person or robot
+    pantilt_move_wait(0, -10)
+    autofocus_trigger(CAMERA_PANTILT)
+    center_on_person()
 
     announcement = ask_cosmos(
         f"You found: {obj_name or 'the target'}. Mission complete. "
@@ -790,8 +834,10 @@ def _process_scan(scan, from_360=False):
         motors.oled(1, "Centering...")
         _ui("status", f"FOUND — {name}")
 
-        # Tilt up slightly to face the person at close range
-        motors.pantilt(0, -15)
+        # Center on person or robot using pan-tilt (settled capture)
+        if not center_on_person():
+            pantilt_move_wait(0, -15)  # fallback: tilt up slightly
+        autofocus_trigger(CAMERA_PANTILT)
         time.sleep(0.5)
 
         motors.oled(1, "Talking...")
@@ -849,7 +895,7 @@ def _mission_loop():
     global _avoid_attempts, _nav_clips_since_scan
 
     eric_say("Starting initial 360 degree scan of the area.")
-    scan = _scan_360_smart()
+    scan = _scan_360()
     _process_scan(scan, from_360=True)
 
     if mission_active and mission_state == State.SEARCHING:
@@ -902,7 +948,7 @@ def _mission_loop():
                     eric_say("Nothing found. Performing a full 360 scan.")
                 else:
                     _ui("log", "Periodic 360 scan...")
-                scan = _scan_360_smart()
+                scan = _scan_360()
                 _scans_since_360 = _empty_scans = 0
                 _process_scan(scan, from_360=True)
                 if mission_active and mission_state == State.SEARCHING:
