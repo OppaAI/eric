@@ -1,55 +1,90 @@
-# ERIC — Edge Robotics Innovation by Cosmos
+# E.R.I.C. — Edge Robotics Innovation by Cosmos
 
 **NVIDIA Cosmos Cookoff 2026 Entry**
 
-ERIC is a search and rescue ground robot powered by NVIDIA Cosmos Reason 2, running fully at the edge on a ~$750 CAD Jetson Orin Nano Super 8GB. No cloud. No server. Just a tracked robot reasoning about the physical world in real time.
+E.R.I.C. is a search and rescue ground robot powered by NVIDIA Cosmos Reason 2, running fully at the edge on a ~$750 CAD Jetson Orin Nano Super 8GB. No cloud. No server. Just a tracked robot reasoning about the physical world in real time.
+
+Cosmos is the **mission brain** — it sees, reasons, and decides. The D500 LiDAR and OAK-D Lite provide an independent safety layer so Eric never hits walls regardless of what Cosmos is doing. ROS2 Nav2 handles path planning when enabled.
 
 ## Demo
 
 **Mission: Find Princess Leia**
 
-Eric navigates a backyard Star Wars Lego scene, talks to characters, gathers information, and uses Cosmos Reason 2 to plan and reason at every step — entirely on-device.
+Eric navigates a Star Wars Lego scene autonomously — scanning with dual cameras, reasoning with Cosmos about what it sees, talking to characters to gather mission information, and never hitting obstacles thanks to LiDAR safety monitoring. Entire demo recorded from the Gradio GUI screen — no outdoor filming needed. Judges see both live camera feeds, reasoning, motor telemetry, and LiDAR status simultaneously.
 
 ## Hardware
 
 | Component | Details |
 |---|---|
 | SBC | Jetson Orin Nano Super 8GB |
-| Robot | Waveshare UGV Rover (tracked) |
-| Camera 1 | Webcam (navigation) |
-| Camera 2 | Pan-tilt camera |
-| TTS | Piper (CPU, zero VRAM) |
+| Robot | Waveshare UGV Beast (tracked) |
+| LiDAR | D500 (360°, reactive obstacle safety) |
+| Depth Camera | OAK-D Lite (3D perception) |
+| Camera 1 | Webcam (close-up scanning) |
+| Camera 2 | Pan-tilt wide-angle (navigation + overview) |
+| TTS | Piper danny-low (CPU, zero VRAM) |
 | Total | ~$750 CAD |
-| Location | Vancover BC, Canada |
+| Location | Kelowna BC, Canada |
 
 ## Stack
 
 | Component | Role |
 |---|---|
-| Cosmos Reason 2 (2B W4A16) via vLLM | Vision + physical reasoning |
-| Piper via RealtimeTTS | Streaming TTS, CPU only |
-| Gradio | Dual camera live feed + mission control UI |
-| Waveshare ESP32 serial UART | Motor control |
+| Cosmos Reason 2 (2B W4A16) via vLLM | Vision + physical reasoning — mission brain |
+| ROS2 Humble + Nav2 | Autonomous path planning (optional) |
+| D500 LiDAR → ROS2 /scan | Reactive obstacle safety — stops Eric independently |
+| OAK-D Lite | Depth perception via DepthAI ROS2 |
+| Piper via RealtimeTTS | Streaming TTS, CPU only, zero VRAM |
+| Gradio | Dual camera + LiDAR status + mission control UI |
+| Waveshare ESP32 serial UART | Motor + OLED + LED + pan-tilt control |
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│                  COSMOS REASON 2                    │  ← mission brain
+│  sees scene → reasons → decides where to go        │
+└─────────────────┬───────────────────────────────────┘
+                  │ goal pose / direction
+          ┌───────▼────────┐
+          │   Nav2 + ROS2  │  ← path planning (if enabled)
+          │  costmap + SLAM │
+          └───────┬─────────┘
+                  │ cmd_vel
+┌─────────────────▼───────────────────────────────────┐
+│              MOTORS (ESP32 via UART)                │
+└─────────────────────────────────────────────────────┘
+          ▲
+          │ STOP if obstacle < 30cm (independent of Cosmos)
+┌─────────┴───────────────────────────────────────────┐
+│          D500 LiDAR safety monitor                  │  ← reactive safety layer
+│    /scan → front arc check → motors.stop()          │
+└─────────────────────────────────────────────────────┘
+```
 
 ## Project Structure
 
 ```
 eric/
-├── main.py               # Entry point
-├── config.py             # All configuration (env vars)
-├── cosmos.py             # Cosmos Reason 2 API + camera
-├── motors.py             # Waveshare serial motor control + OLED
-├── tts.py                # Piper / gTTS text-to-speech
-├── mission.py            # Mission state machine + YAML loader
-├── gui.py                # Gradio dual-camera UI
-├── missions/             # Mission briefing files
-│   ├── star_wars.yaml    # Find Princess Leia
-│   ├── search_rescue.yaml # Lost hiker rescue
-│   └── office_mystery.yaml # Missing USB drive
+├── main.py                   # Entry point — initializes Nav2, LiDAR, Cosmos, GUI
+├── config.py                 # All configuration (env vars + ROS2 flags)
+├── cosmos.py                 # Cosmos Reason 2 API, camera, digital zoom crop
+├── motors.py                 # Waveshare serial motor control + OLED + LED
+├── tts.py                    # Piper streaming TTS (CPU, zero VRAM)
+├── mission.py                # Mission state machine + YAML loader
+├── nav2.py                   # ROS2 Nav2 integration (graceful fallback)
+├── lidar.py                  # D500 LiDAR safety monitor
+├── gui.py                    # Gradio dual-camera + LiDAR status UI
+├── missions/
+│   ├── template.yaml         # Start here — fully commented
+│   ├── star_wars.yaml        # Find Princess Leia
+│   ├── anakin_training.yaml  # Eric IS Anakin, faces dark side choice
+│   ├── search_rescue.yaml    # Lost hiker rescue
+│   └── office_mystery.yaml   # Missing USB drive
 ├── launch/
-│   └── cosmos.sh         # vLLM Docker launch script
-├── env.example           # Environment config template
-└── pyproject.toml        # uv dependencies
+│   └── cosmos.sh             # vLLM Docker launch script
+├── env.example               # Environment config template
+└── pyproject.toml            # uv dependencies
 ```
 
 ## Quick Start
@@ -57,75 +92,94 @@ eric/
 ```bash
 git clone https://github.com/OppaAi/eric
 cd eric
-
-# Install dependencies
 uv sync
 
-# Configure
 cp env.example .env
-nano .env   # set SERIAL_PORT, camera indices
+nano .env   # set SERIAL_PORT, camera indices, Piper paths
 
-# 1. Start Cosmos (takes ~3 minutes to load)
+# 1. Start Cosmos vLLM (takes ~3 minutes to load)
 bash launch/cosmos.sh
 docker logs -f vllm-server   # wait for "Application startup complete"
 
-# 2. Start Eric
+# 2. (Optional) Start ROS2 Nav2 + LiDAR
+ros2 launch ugv_tools navigation.launch.py   # Nav2 + SLAM
+ros2 launch ugv_tools lidar.launch.py        # D500 LiDAR
+
+# 3. Start Eric
 uv run main.py
 
-# 3. Open the GUI
+# 4. Open GUI
 http://JETSON_IP:7860
 ```
 
-## Missions
+## .env Configuration
 
-Missions are defined as YAML files in the `missions/` folder. Select one from the dropdown in the GUI, or type a briefing directly. Eric's entire reasoning adapts to whatever mission you give him.
+```bash
+# Required
+SERIAL_PORT=/dev/ttyTHS1
+PIPER_BINARY=/home/oppa-ai/piper/piper
+PIPER_MODEL=/home/oppa-ai/piper/voices/en_US-danny-low.onnx
 
-**Example missions included:**
+# Camera indices (check with: python3 -c "import cv2; [print(i, cv2.VideoCapture(i).read()[0]) for i in range(4)]")
+CAMERA_WEBCAM=2
+CAMERA_PANTILT=0
 
-| File | Mission |
-|---|---|
-| `star_wars.yaml` | Find Princess Leia — navigate a Star Wars Lego scene |
-| `search_rescue.yaml` | Find a missing hiker in backyard terrain |
-| `office_mystery.yaml` | Locate a missing USB drive in an office |
-
-**Mission YAML format:**
-```yaml
-name: "My Mission"
-description: "Short description"
-
-briefing: |
-  Full mission briefing text.
-  Eric reads this and uses it for all reasoning during the mission.
-  Include: who to find, who might know, who/what to avoid.
-
-characters:
-  - name: "Character Name"
-    hint: "How they behave"
+# Optional Nav2 + LiDAR (set true after ros2 launch)
+USE_NAV2=false
+USE_LIDAR=false
+LIDAR_STOP_DIST=0.30
+LIDAR_SLOW_DIST=0.60
 ```
-
-**Add your own mission** — drop any `.yaml` file in `missions/` and it appears in the GUI dropdown instantly.
 
 ## GUI
 
 ```
-┌─────────────────┬──────────────────────────────────┐
-│  Pan-tilt feed  │  📋 Mission (dropdown + text box)│
-│                 │  [🚀 ENGAGE]  [🛑 DISENGAGE]     │
-├─────────────────│  Status bar                      │
-│  Webcam feed    │  🔊 Eric Says                    │
-│  (navigation)   │  💬 Character Interaction        │
-│                 │  🕹️ Manual Controls              │
-│                 │  📜 Mission Log                  │
-└─────────────────┴──────────────────────────────────┘
+┌─────────────────────────────────────────────────────┐
+│              🚨 EMERGENCY STOP 🚨                   │
+├──────────────────┬──────────────────────────────────┤
+│  Pan-tilt feed   │  📋 Mission (dropdown / text)    │
+│  (wide angle)    │  [🚀 ENGAGE]  [🛑 DISENGAGE]    │
+├──────────────────┤  Status                          │
+│  Webcam feed     │  🔊 Eric Says                   │
+│  (close-up)      │  💬 Character Interaction        │
+├──────────────────┤  🕹️ Manual Controls             │
+│  🚗 Telemetry   │  🛠️ Utilities                   │
+│  📡 LiDAR       │  📜 Mission Log                  │
+└──────────────────┴──────────────────────────────────┘
 ```
 
-**How to run a mission:**
-1. Select a mission from the dropdown (or type your own briefing)
-2. Press **ENGAGE** — Eric acknowledges and starts moving autonomously
-3. Eric scans the scene every 3 seconds with Cosmos vision
-4. When Eric stops at a character — type as that character in the interaction box
-5. Eric reasons about the reply and decides next action based on mission briefing
-6. Press **DISENGAGE** anytime to stop
+## Wide-Angle Camera & Object Detection
+
+The pan-tilt camera is wide-angle — small objects like Lego figures can be hard for Cosmos to identify. Eric handles this automatically:
+
+1. **Wide scan first** — Cosmos sees full scene context
+2. **Digital zoom crop** — if something detected, `capture_zoomed()` crops and zooms that region
+3. **Multi-zoom scan** — `multi_zoom_scan()` sends 1 wide + 4 cropped frames in one Cosmos call
+4. **Webcam close-up** — when stopped and interacting, webcam gives high-detail close-up view
+
+## Missions
+
+Missions are YAML files in `missions/`. Select from dropdown — Eric's reasoning adapts completely.
+
+| File | Mission |
+|---|---|
+| `star_wars.yaml` | Find Princess Leia in a Star Wars Lego scene |
+| `anakin_training.yaml` | Eric IS Anakin Skywalker, faces the dark side choice |
+| `search_rescue.yaml` | Find a missing hiker |
+| `office_mystery.yaml` | Locate a missing USB drive |
+
+**Create your own:** copy `missions/template.yaml` — no coding required.
+
+## How a Mission Works
+
+1. Select mission → press **ENGAGE**
+2. Eric does initial 360° scan of the area
+3. Cosmos analyses video clips while Eric moves (NAV_PROMPT — 10s clips)
+4. LiDAR safety monitor runs independently — stops Eric if wall within 30cm
+5. Nav2 handles path planning around obstacles (when enabled)
+6. Eric stops at characters — type as character in GUI
+7. Eric evaluates response, gets info, politely exits if off-topic
+8. Mission continues until objective found
 
 ## Cosmos Performance (Jetson Orin Nano 8GB)
 
@@ -141,13 +195,13 @@ characters:
 ## Dependencies
 
 ```bash
-uv add python-telegram-bot requests python-dotenv \
-        opencv-python-headless gtts pygame \
-        RealtimeTTS pyserial pyyaml gradio
+uv add gradio pyyaml pyserial requests python-dotenv \
+        opencv-python-headless gtts pygame RealtimeTTS
+# ROS2 Nav2 and LiDAR via apt (ros-humble-nav2-*, ros-humble-rplidar-ros)
 ```
 
 ## Built by
 
-Solo developer — Kelowna BC, Canada  
-Built for the NVIDIA Cosmos Cookoff 2026  
+Solo developer — Kelowna BC, Canada
+Built for the NVIDIA Cosmos Cookoff 2026
 https://github.com/OppaAi/eric
