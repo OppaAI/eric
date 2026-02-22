@@ -1,6 +1,18 @@
 """
 ERIC — Mission Logic
-360-degree body rotation scan, dual camera, wall avoidance, mission complete
+
+Camera strategy:
+  Navigation (moving):  pan-tilt only, single frame, fast NAV_PROMPT
+  Scanning  (stopped):  dual camera (pan-tilt + webcam), single stable frame each
+  360° scan (stopped):  body rotates, pan-tilt tilts up/down, dual stable frames at each stop
+  Face/robot centering: pan-tilt only, settle before capture
+
+Stabilization rule:
+  Every pantilt_move_wait() includes a settle delay.
+  Captures only happen when robot is stopped or pan-tilt has settled.
+
+LED:
+  Adaptive — on only when captured frame is dark.
 """
 
 import time
@@ -13,8 +25,11 @@ from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR, VLLM_URL,
 from motors import motors
 from cosmos import (
     ask_cosmos, set_mission_briefing,
-    capture_frame, center_on_person, pantilt, pantilt_center,
-    autofocus_trigger, autofocus_enable, CAMERA_WEBCAM, CAMERA_PANTILT
+    capture_frame, capture_dual_stable, capture_nav_frame,
+    center_on_person,
+    pantilt, pantilt_center, pantilt_move_wait,
+    autofocus_trigger, autofocus_enable,
+    CAMERA_WEBCAM, CAMERA_PANTILT
 )
 from tts import speak
 
@@ -189,16 +204,32 @@ def resume_after_interaction():
         _ui("status", "SEARCHING")
 
 
-# ─── 360° Scan ────────────────────────────────────────────────────────────────
+# ─── Prompts ──────────────────────────────────────────────────────────────────
+
+NAV_PROMPT = """
+I am moving. This is my pan-tilt wide-angle camera view — egocentric, first person.
+Fast obstacle check only. What is DIRECTLY ahead of me?
+
+Respond ONLY with valid JSON:
+{
+  "wall_ahead": false,
+  "obstacle_close": false,
+  "small_obstacle": false,
+  "action": "forward|slow|stop|turn_left|turn_right",
+  "physical_reasoning": "one sentence"
+}
+"""
 
 SCAN_360_PROMPT = """
 These images are from a full 360-degree scan of my surroundings.
 I captured at 0, 90, 180, 270 degrees body rotation.
 At each position: pan-tilt tilted up (far/mid) and down (floor/near).
-Both webcam and pan-tilt camera used at each stop. Total: up to 16 images.
+Both pan-tilt and webcam cameras used at each stop (pan-tilt first, then webcam).
+Total: up to 16 images.
 
 Analyze ALL images carefully for my mission target:
 - Slippers are large soft footwear on the floor — look carefully at floor-level frames
+- Robots have cameras, lights, chassis — check face/camera area for centering
 - Report target_visible=true even if partially visible or uncertain
 - Report which direction the target is from my current facing
 
@@ -222,8 +253,8 @@ Respond ONLY with valid JSON, no markdown:
 """
 
 QUICK_SCAN_PROMPT = """
-Live camera frames from my webcam and pan-tilt camera while moving.
-Fast obstacle and target check only.
+I am stopped. These are stable frames from my pan-tilt (wide angle) and webcam cameras.
+Obstacle and mission target check.
 
 Respond ONLY with valid JSON:
 {
@@ -252,8 +283,56 @@ _SCAN_FALLBACK = {
     "physical_reasoning": "", "mission_complete": False
 }
 
+_NAV_FALLBACK = {
+    "wall_ahead": False, "obstacle_close": False, "small_obstacle": False,
+    "action": "forward", "physical_reasoning": ""
+}
 
-def _scan_360():
+
+# ─── Navigation Check (while moving) ─────────────────────────────────────────
+
+def _nav_check() -> dict:
+    """
+    Fast nav check using pan-tilt only (wide angle).
+    Robot may be moving. Pan-tilt stays centered.
+    No settle wait needed since pan-tilt is already at 0,0.
+    """
+    frame = capture_nav_frame()
+    if not frame:
+        return dict(_NAV_FALLBACK)
+    try:
+        response = _cosmos_frames([frame], NAV_PROMPT, max_tokens=120, temp=0.2)
+        return _parse_json(response, dict(_NAV_FALLBACK))
+    except Exception as e:
+        log.error(f"Nav check error: {e}")
+        return dict(_NAV_FALLBACK)
+
+
+# ─── Quick Scan (stopped) ─────────────────────────────────────────────────────
+
+def _quick_scan() -> dict:
+    """
+    Dual camera stable scan while stopped.
+    Pan-tilt centers + settles, then both cameras captured.
+    """
+    frames = capture_dual_stable(adaptive_led=True)
+    if not frames:
+        return dict(_SCAN_FALLBACK)
+    try:
+        response = _cosmos_frames(frames, QUICK_SCAN_PROMPT, max_tokens=200, temp=0.3)
+        return _parse_json(response, dict(_SCAN_FALLBACK))
+    except Exception as e:
+        log.error(f"Quick scan error: {e}")
+        return dict(_SCAN_FALLBACK)
+
+
+# ─── 360° Scan (stopped) ──────────────────────────────────────────────────────
+
+def _scan_360() -> dict:
+    """
+    Full 360° body rotation scan.
+    At each of 4 positions: tilt up then down, capture pan-tilt + webcam (settled).
+    """
     global mission_state
     mission_state = State.SCANNING_360
     _ui("status", "360 SCANNING")
@@ -266,28 +345,32 @@ def _scan_360():
 
     for pos in range(4):
         deg = pos * 90
-        _ui("log", f"Scanning {deg}...")
+        _ui("log", f"Scanning {deg}°...")
         motors.oled(1, f"Scan {deg}deg")
 
+        # Tilt up (far/mid-range) then down (floor/near)
         for tilt, label in [(-20, "up"), (15, "floor")]:
-            pantilt(0, tilt, speed=40)
-            time.sleep(0.8)
-            f1 = capture_frame(CAMERA_WEBCAM,  640, 480)
-            f2 = capture_frame(CAMERA_PANTILT, 640, 480)
-            if f1: all_frames.append(f1)
-            if f2: all_frames.append(f2)
+            pantilt_move_wait(0, tilt, speed=40)  # settle included
 
+            # Pan-tilt frame (settled, adaptive LED)
+            f_pt = capture_frame(CAMERA_PANTILT, 640, 480, adaptive_led=True)
+            if f_pt: all_frames.append(f_pt)
+
+            # Webcam frame (settled, adaptive LED)
+            f_wc = capture_frame(CAMERA_WEBCAM, 640, 480, adaptive_led=True)
+            if f_wc: all_frames.append(f_wc)
+
+        # Return to center before rotating
         pantilt_center()
-        time.sleep(0.3)
 
         if pos < 3:
             motors.right(MOTOR_SPEED_SLOW)
-            time.sleep(1.5)   # tune for true 90deg on your floor
+            time.sleep(1.5)   # tune for true 90° on your floor
             motors.stop()
             time.sleep(0.4)
 
-    log.info(f"360 scan done — {len(all_frames)} frames -> Cosmos")
-    _ui("log", f"360 done — {len(all_frames)} frames -> Cosmos")
+    log.info(f"360 scan done — {len(all_frames)} frames → Cosmos")
+    _ui("log", f"360 done — {len(all_frames)} frames → Cosmos")
     motors.oled(1, "Analyzing...")
 
     try:
@@ -299,24 +382,7 @@ def _scan_360():
         return dict(_SCAN_FALLBACK)
 
 
-def _quick_scan():
-    pantilt(0, 12, speed=80)
-    time.sleep(0.3)
-    f1 = capture_frame(CAMERA_WEBCAM,  640, 480)
-    f2 = capture_frame(CAMERA_PANTILT, 640, 480)
-    pantilt_center()
-
-    frames = [f for f in [f1, f2] if f]
-    if not frames:
-        return dict(_SCAN_FALLBACK)
-
-    try:
-        response = _cosmos_frames(frames, QUICK_SCAN_PROMPT, max_tokens=200, temp=0.3)
-        return _parse_json(response, dict(_SCAN_FALLBACK))
-    except Exception as e:
-        log.error(f"Quick scan error: {e}")
-        return dict(_SCAN_FALLBACK)
-
+# ─── Direction Control ────────────────────────────────────────────────────────
 
 def _face_direction(direction):
     if direction == "right":
@@ -330,7 +396,8 @@ def _face_direction(direction):
 
 # ─── Obstacle Avoidance ───────────────────────────────────────────────────────
 
-def _avoid_obstacle(wall_ahead, small_obstacle):
+def _avoid_obstacle(wall_ahead, small_obstacle) -> bool:
+    """Returns True if 360 scan should be forced."""
     global _avoid_attempts, mission_state
     _avoid_attempts += 1
     mission_state = State.AVOIDING
@@ -360,7 +427,7 @@ def _avoid_obstacle(wall_ahead, small_obstacle):
         motors.stop(); time.sleep(0.2)
         motors.forward(MOTOR_SPEED_SLOW); time.sleep(1.0)
         motors.stop(); time.sleep(0.2)
-        motors.left(MOTOR_SPEED_SLOW);  time.sleep(0.9)
+        motors.left(MOTOR_SPEED_SLOW);   time.sleep(0.9)
         motors.stop()
 
     return False
@@ -382,8 +449,9 @@ def _handle_mission_complete(obj_name):
         motors.lights(0, 0);    time.sleep(0.25)
     motors.lights(128, 255)
 
-    pantilt(0, 10); time.sleep(0.5)
-    autofocus_trigger(CAMERA_PANTILT); time.sleep(1.5)
+    # Look slightly up, settle, then center on person or robot
+    pantilt_move_wait(0, -10)
+    autofocus_trigger(CAMERA_PANTILT)
     center_on_person()
 
     announcement = ask_cosmos(
@@ -426,55 +494,7 @@ def handle_character_response(character, said):
     return clean
 
 
-# ─── Mission Loop ─────────────────────────────────────────────────────────────
-
-def _mission_loop():
-    global mission_active, mission_state, _empty_scans, _scans_since_360, _avoid_attempts
-
-    eric_say("Starting initial 360 degree scan of the area.")
-    scan = _scan_360()
-    _process_scan(scan, from_360=True)
-
-    if mission_active and mission_state == State.SEARCHING:
-        motors.forward(MOTOR_SPEED_SLOW)
-
-    while mission_active:
-        try:
-            if mission_state in (State.INTERACTING, State.COMPLETE):
-                time.sleep(0.5)
-                continue
-
-            _scans_since_360 += 1
-            do_360 = _empty_scans >= EMPTY_SCAN_LIMIT or _scans_since_360 >= SCANS_BEFORE_360
-
-            if do_360:
-                motors.stop(); time.sleep(0.3)
-                if _empty_scans >= EMPTY_SCAN_LIMIT:
-                    eric_say("Nothing found. Performing a full 360 scan.")
-                else:
-                    _ui("log", "Periodic 360 scan...")
-                scan = _scan_360()
-                _scans_since_360 = _empty_scans = 0
-                _process_scan(scan, from_360=True)
-                if mission_active and mission_state == State.SEARCHING:
-                    motors.forward(MOTOR_SPEED_SLOW)
-            else:
-                _ui("log", "Quick scan...")
-                motors.oled(1, "Scanning...")
-                scan = _quick_scan()
-                _process_scan(scan, from_360=False)
-
-            time.sleep(0.5)
-
-        except Exception as e:
-            log.error(f"Mission loop error: {e}")
-            time.sleep(1)
-
-    motors.stop()
-    mission_state = State.IDLE
-    _ui("status", "IDLE")
-    log.info("Mission loop ended")
-
+# ─── Process Scan Result ──────────────────────────────────────────────────────
 
 def _process_scan(scan, from_360=False):
     global mission_state, _empty_scans, _avoid_attempts, _scans_since_360
@@ -543,9 +563,11 @@ def _process_scan(scan, from_360=False):
         motors.oled(1, "Centering...")
         _ui("status", f"FOUND — {name}")
 
+        # Center on person or robot using pan-tilt (settled capture)
         if not center_on_person():
-            pantilt(0, -15); time.sleep(0.5)
-        autofocus_trigger(CAMERA_PANTILT); time.sleep(1.0)
+            pantilt_move_wait(0, -15)  # fallback: tilt up slightly
+        autofocus_trigger(CAMERA_PANTILT)
+        time.sleep(0.5)
 
         motors.oled(1, "Talking...")
         greeting = ask_cosmos(
@@ -586,3 +608,94 @@ def _process_scan(scan, from_360=False):
     motors.oled(0, "ERIC ACTIVE")
     motors.oled(1, "Searching...")
     _ui("status", "SEARCHING")
+
+
+# ─── Mission Loop ─────────────────────────────────────────────────────────────
+
+# How many nav checks between stopped scans
+NAV_CHECKS_BETWEEN_SCANS = 3
+_nav_check_count = 0
+
+
+def _mission_loop():
+    global mission_active, mission_state, _empty_scans, _scans_since_360
+    global _avoid_attempts, _nav_check_count
+
+    eric_say("Starting initial 360 degree scan of the area.")
+    scan = _scan_360()
+    _process_scan(scan, from_360=True)
+
+    if mission_active and mission_state == State.SEARCHING:
+        motors.forward(MOTOR_SPEED_SLOW)
+
+    _nav_check_count = 0
+
+    while mission_active:
+        try:
+            if mission_state in (State.INTERACTING, State.COMPLETE):
+                time.sleep(0.5)
+                continue
+
+            # ── Nav check while moving (pan-tilt only, fast) ──────────────────
+            if _nav_check_count < NAV_CHECKS_BETWEEN_SCANS:
+                _nav_check_count += 1
+                _ui("log", "Nav check...")
+                nav = _nav_check()
+
+                if nav.get("wall_ahead") or nav.get("obstacle_close"):
+                    motors.stop()
+                    _ui("log", f"Nav: obstacle — {nav.get('physical_reasoning','')}")
+                    force_360 = _avoid_obstacle(
+                        wall_ahead=nav.get("wall_ahead", False),
+                        small_obstacle=nav.get("small_obstacle", False)
+                    )
+                    if force_360:
+                        _scans_since_360 = SCANS_BEFORE_360
+                        _nav_check_count = NAV_CHECKS_BETWEEN_SCANS  # force scan
+                    else:
+                        motors.forward(MOTOR_SPEED_SLOW)
+                elif nav.get("action") == "slow":
+                    motors.slow()
+                elif nav.get("action") == "stop":
+                    motors.stop()
+                else:
+                    motors.forward(MOTOR_SPEED_SLOW)
+
+                time.sleep(1.0)  # nav check interval
+                continue
+
+            # ── Stopped scan (dual camera, stable) ───────────────────────────
+            _nav_check_count = 0
+            _scans_since_360 += 1
+            motors.stop()
+            time.sleep(0.3)
+
+            do_360 = (_empty_scans >= EMPTY_SCAN_LIMIT or
+                      _scans_since_360 >= SCANS_BEFORE_360)
+
+            if do_360:
+                if _empty_scans >= EMPTY_SCAN_LIMIT:
+                    eric_say("Nothing found. Performing a full 360 scan.")
+                else:
+                    _ui("log", "Periodic 360 scan...")
+                scan = _scan_360()
+                _scans_since_360 = _empty_scans = 0
+                _process_scan(scan, from_360=True)
+                if mission_active and mission_state == State.SEARCHING:
+                    motors.forward(MOTOR_SPEED_SLOW)
+            else:
+                _ui("log", "Quick scan (stopped)...")
+                motors.oled(1, "Scanning...")
+                scan = _quick_scan()
+                _process_scan(scan, from_360=False)
+
+            time.sleep(0.5)
+
+        except Exception as e:
+            log.error(f"Mission loop error: {e}")
+            time.sleep(1)
+
+    motors.stop()
+    mission_state = State.IDLE
+    _ui("status", "IDLE")
+    log.info("Mission loop ended")

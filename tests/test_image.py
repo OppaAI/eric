@@ -16,10 +16,10 @@ SERVER = "http://localhost:8000"
 MODEL  = "embedl/Cosmos-Reason2-2B-W4A16"
 
 PROMPT = (
-    "You are ERIC, a search and rescue robot. "
+    "You are a nature and wildlife explorer robot. "
     "Describe exactly what you see in this image. "
-    "Identify: objects, people, terrain, obstacles, and what action you would take next. "
-    "Be specific and concise — 3-4 sentences."
+    "Identify: objects, animals, the animals' species and behaviour if found, vegetations, terrain, obstacles, and what actions you would take next."
+    "Be specific and detailed — within 10-12 sentences."
 )
 
 
@@ -97,6 +97,7 @@ def main():
         print("❌ Cosmos server not reachable. Start with: bash launch/cosmos.sh")
         sys.exit(1)
     print("✅ Server ready\n")
+    print("System Prompt:", PROMPT)
 
     print(f"Loading image: {args.image}")
     img_b64, mime = load_image(args.image)
@@ -119,7 +120,7 @@ def main():
             print(f"\r Run {i:2d}/{args.iterations} — {elapsed:.2f}s | in:{in_tok} out:{out_tok} tok | TPS: {tps:.1f}")
 
             # Show first response in full, truncate rest
-            if i == 1:
+            if i != 0:
                 print(f"         Response: {reply}\n")
             else:
                 print(f"         Response: {reply[:80]}{'...' if len(reply) > 80 else ''}\n")
