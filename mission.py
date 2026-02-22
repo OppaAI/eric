@@ -96,67 +96,156 @@ def _cosmos_frames(frames, prompt, max_tokens=250, temp=0.3):
 
 def _parse_json(response, fallback, label="COSMOS"):
     try:
-        clean = response.replace("```json", "").replace("```", "").strip()
+        clean = response.replace("```json", "").replace("```python", "").replace("```", "").strip()
+
+        # ── Handle JSON array — Cosmos sometimes returns [{...}, {...}] ───────
+        # Merge all items: pick the highest-priority object across all entries,
+        # collect all object_names, and OR all boolean flags together.
+        arr_start = clean.find("[")
+        obj_start = clean.find("{")
+        if arr_start >= 0 and (obj_start < 0 or arr_start < obj_start):
+            arr_end = clean.rfind("]") + 1
+            if arr_end > arr_start:
+                items = json.loads(clean[arr_start:arr_end])
+                if isinstance(items, list) and items:
+                    result = _merge_array_items(items, fallback)
+                    # skip to normalization below
+                    return _finalize_result(result, fallback, label)
+
+        # ── Normal single-object JSON ─────────────────────────────────────────
         s = clean.find("{")
         e = clean.rfind("}") + 1
         if s >= 0 and e > s:
             result = json.loads(clean[s:e])
+            return _finalize_result(result, fallback, label)
 
-            # ── Normalize malformed fields Cosmos sometimes produces ────────
-            # "object" may come back as a dict like {"person": [], "robot": ["rubblebucket"]}
-            # Flatten it to the first non-empty category, or "clear".
-            obj = result.get("object")
-            if isinstance(obj, dict):
-                priority = ["person", "robot", "slipper", "shoe", "obstacle", "wall", "clear"]
-                flat = "unknown"
-                for key in priority:
-                    if obj.get(key):          # non-empty list → this category has detections
-                        flat = key
-                        # Also pull object_name from the first item in that list
-                        items = obj[key]
-                        if isinstance(items, list) and items and not result.get("object_name"):
-                            result["object_name"] = str(items[0])
-                        break
-                    elif key in obj:          # key present but empty list → keep looking
-                        flat = key           # use as fallback if nothing better
-                result["object"] = flat
-
-            # "object_name" may come back as a list — take first item
-            name = result.get("object_name")
-            if isinstance(name, list):
-                result["object_name"] = name[0] if name else None
-
-            # Any other field that should be a plain string but is a list/dict — stringify it
-            _str_fields = ("terrain", "distance", "target_direction",
-                           "clearest_direction", "action", "physical_reasoning")
-            for field in _str_fields:
-                val = result.get(field)
-                if isinstance(val, (list, dict)):
-                    result[field] = str(val)
-
-            # Fill in missing keys from fallback
-            for k, v in fallback.items():
-                result.setdefault(k, v)
-
-            # ── Print full result to terminal ──────────────────────────────
-            print(f"\n{'─'*60}")
-            print(f"🧠 {label}:")
-            for k, v in result.items():
-                icon = ""
-                if k == "object"           and v not in ("clear", "unknown"): icon = "  ⚠️ "
-                if k == "wall_ahead"       and v:                              icon = "  🚧 "
-                if k == "obstacle_close"   and v:                              icon = "  🚧 "
-                if k == "small_obstacle"   and v:                              icon = "  ⚠️ "
-                if k == "target_visible"   and v:                              icon = "  🎯 "
-                if k == "mission_complete" and v:                              icon = "  🏆 "
-                if k == "speak"            and v:                              icon = "  🔊 "
-                print(f"  {k:25s}: {v}{icon}")
-            print(f"{'─'*60}\n")
-            return result
     except Exception:
         log.warning(f"JSON parse failed: {response[:100]}")
         print(f"\n⚠️  RAW RESPONSE ({label}): {response[:400]}\n")
     return fallback
+
+
+# Object-name → category mapping for when Cosmos sets object="unknown"
+# but object_name reveals what it actually is.
+_NAME_TO_CATEGORY = {
+    # obstacles / furniture
+    "book": "obstacle", "box": "obstacle", "bag": "obstacle",
+    "chair": "obstacle", "table": "obstacle", "desk": "obstacle",
+    "bottle": "obstacle", "cup": "obstacle", "shoe": "shoe",
+    "slipper": "slipper", "sandal": "slipper",
+    # people
+    "man": "person", "woman": "person", "person": "person",
+    "human": "person", "child": "person", "kid": "person",
+    # robots
+    "droid": "robot", "robot": "robot", "r2": "robot", "bb8": "robot",
+    # walls / structural
+    "wall": "wall", "door": "wall", "fence": "wall",
+}
+
+_OBJ_PRIORITY = ["person", "robot", "slipper", "shoe", "obstacle", "wall", "clear", "unknown"]
+
+
+def _infer_category(obj: str, name: str | None) -> str:
+    """If obj is 'unknown' but name hints at a real category, return that category."""
+    if obj not in ("unknown", "", None):
+        return obj
+    if not name:
+        return obj or "unknown"
+    name_lower = str(name).lower()
+    for keyword, category in _NAME_TO_CATEGORY.items():
+        if keyword in name_lower:
+            return category
+    return obj or "unknown"
+
+
+def _merge_array_items(items: list, fallback: dict) -> dict:
+    """Merge a list of per-frame result dicts into one combined result."""
+    merged = dict(fallback)
+    names = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        # Pick highest-priority object seen across frames
+        item_obj = _infer_category(
+            item.get("object", "unknown"),
+            item.get("object_name")
+        )
+        merged_obj = merged.get("object", "unknown")
+        if _OBJ_PRIORITY.index(item_obj) < _OBJ_PRIORITY.index(merged_obj):
+            merged["object"] = item_obj
+        # Collect names
+        n = item.get("object_name")
+        if n and str(n) not in names:
+            names.append(str(n))
+        # OR all boolean flags
+        for flag in ("wall_ahead", "obstacle_close", "small_obstacle",
+                     "target_visible", "in_my_path", "mission_complete"):
+            if item.get(flag):
+                merged[flag] = True
+        # Take first non-empty string fields
+        for field in ("terrain", "distance", "target_direction",
+                      "clearest_direction", "action", "speak", "physical_reasoning"):
+            if not merged.get(field) or merged[field] in (None, "", fallback.get(field)):
+                val = item.get(field)
+                if val and val not in (None, ""):
+                    merged[field] = val
+    merged["object_name"] = ", ".join(names) if names else None
+    return merged
+
+
+def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
+    """Normalize types, infer category from name, fill fallback, print."""
+    # Flatten dict-type "object" field
+    obj = result.get("object")
+    if isinstance(obj, dict):
+        priority = ["person", "robot", "slipper", "shoe", "obstacle", "wall", "clear"]
+        flat = "unknown"
+        for key in priority:
+            if obj.get(key):
+                flat = key
+                items = obj[key]
+                if isinstance(items, list) and items and not result.get("object_name"):
+                    result["object_name"] = str(items[0])
+                break
+            elif key in obj:
+                flat = key
+        result["object"] = flat
+
+    # Flatten list-type "object_name"
+    name = result.get("object_name")
+    if isinstance(name, list):
+        result["object_name"] = ", ".join(str(x) for x in name if x) or None
+
+    # Infer category from name when object is "unknown"
+    result["object"] = _infer_category(result.get("object", "unknown"),
+                                        result.get("object_name"))
+
+    # Stringify any remaining list/dict in string fields
+    for field in ("terrain", "distance", "target_direction",
+                  "clearest_direction", "action", "physical_reasoning"):
+        val = result.get(field)
+        if isinstance(val, (list, dict)):
+            result[field] = str(val)
+
+    # Fill missing keys from fallback
+    for k, v in fallback.items():
+        result.setdefault(k, v)
+
+    # ── Print ──────────────────────────────────────────────────────────────
+    print(f"\n{'─'*60}")
+    print(f"🧠 {label}:")
+    for k, v in result.items():
+        icon = ""
+        if k == "object"           and v not in ("clear", "unknown"): icon = "  ⚠️ "
+        if k == "wall_ahead"       and v:                              icon = "  🚧 "
+        if k == "obstacle_close"   and v:                              icon = "  🚧 "
+        if k == "small_obstacle"   and v:                              icon = "  ⚠️ "
+        if k == "target_visible"   and v:                              icon = "  🎯 "
+        if k == "mission_complete" and v:                              icon = "  🏆 "
+        if k == "speak"            and v:                              icon = "  🔊 "
+        print(f"  {k:25s}: {v}{icon}")
+    print(f"{'─'*60}\n")
+    return result
 
 
 # ─── Mission File Loading ─────────────────────────────────────────────────────
@@ -200,7 +289,8 @@ def start_mission(briefing):
     _empty_scans = _avoid_attempts = _scans_since_360 = 0
     set_mission_briefing(briefing)
 
-    motors.pantilt(0, 0)
+    motors.pantilt(0, 5)   # slight downward tilt — see ground objects at normal range
+    motors.lights(0, 0)    # LEDs off — only turn on if scene is pitch black
     time.sleep(0.5)
 
     ack = ask_cosmos(
@@ -215,7 +305,6 @@ def start_mission(briefing):
     _ui("status", "SEARCHING")
     motors.oled(0, "ERIC ACTIVE")
     motors.oled(1, "Searching...")
-    motors.lights(base=128, head=255)
 
     threading.Thread(target=_mission_loop, daemon=True).start()
     return ack
@@ -227,7 +316,7 @@ def stop_mission():
     mission_state  = State.IDLE
     motors.stop()
     motors.lights(0, 0)
-    motors.pantilt(0, 0)
+    motors.pantilt(0, 5)
     motors.oled(0, "ERIC STOPPED")
     motors.oled(1, "")
     eric_say("Mission disengaged. All systems halted.")
@@ -239,7 +328,7 @@ def resume_after_interaction():
     if mission_active:
         _empty_scans = _avoid_attempts = _scans_since_360 = 0
         mission_state = State.SEARCHING
-        motors.pantilt(0, 0)
+        motors.pantilt(0, 5)   # ground-looking default
         motors.forward(MOTOR_SPEED_SLOW)
         motors.oled(0, "ERIC ACTIVE")
         motors.oled(1, "Searching...")
@@ -436,19 +525,47 @@ Now analyze the frame and output ONLY the JSON object above. No markdown. No exp
 
 # ─── Quick Scan (stopped) ─────────────────────────────────────────────────────
 
+def _is_pitch_black(frame_b64: str, threshold: float = 20.0) -> bool:
+    """Return True only if mean luminance is below threshold — genuinely pitch black."""
+    try:
+        import cv2
+        import numpy as np
+        import base64
+        data  = base64.b64decode(frame_b64)
+        arr   = np.frombuffer(data, np.uint8)
+        img   = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            return False
+        return float(img.mean()) < threshold
+    except Exception:
+        return False
+
 def _quick_scan() -> dict:
     """
     Dual camera stable scan while stopped.
-    Pan-tilt centers + settles, then both cameras captured.
+    Pan-tilt at ground-looking default (slight downward), then both cameras captured.
+    LED only fires if frame is pitch black (luminance < 20).
     """
-    motors.pantilt(0, 0)
+    motors.pantilt(0, 5)   # ground-looking default — sees objects on floor
+    motors.lights(0, 0)    # start with lights off
     time.sleep(0.5)
     frames = []
     pt = capture_frame(CAMERA_PANTILT, 640, 480)
     if pt:
+        # Only turn on LED if scene is pitch black
+        if _is_pitch_black(pt):
+            motors.lights(base=180, head=255)
+            time.sleep(0.3)
+            pt = capture_frame(CAMERA_PANTILT, 640, 480) or pt
+            motors.lights(0, 0)
         frames.append(pt)
     wc = capture_frame(CAMERA_WEBCAM, 640, 480)
     if wc:
+        if _is_pitch_black(wc):
+            motors.lights(base=180, head=255)
+            time.sleep(0.3)
+            wc = capture_frame(CAMERA_WEBCAM, 640, 480) or wc
+            motors.lights(0, 0)
         frames.append(wc)
     if not frames:
         return dict(_SCAN_FALLBACK)
@@ -503,42 +620,43 @@ def _capture_sharp(device: int, retries: int = MAX_BLUR_RETRIES) -> str | None:
 
 def _scan_360_smart() -> dict:
     """
-    Full 360° scan using image-based scanning with early target identification.
-
-    At each of 4 body positions (0°, 90°, 180°, 270°):
-      1. Use _quick_scan() at each tilt position
-      2. If target VISIBLE during scan → return immediately, don't continue
-      3. If potential target — record and continue scan
-      4. Collect all wide frames for final Cosmos 360 overview if needed
-
-    This means Eric can identify a target mid-scan and stop early —
-    much smarter than waiting to send 16 frames all at once.
+    Full 360° scan: 8 body positions × 45° (finer than 4×90°, less overshoot).
+    At each position: tilt down to ground level (5°) then up to mid-range (-15°).
+    LED only on if pitch black.
     """
     global mission_state
     mission_state = State.SCANNING_360
     _ui("status", "360 SCANNING")
     motors.oled(0, "360 Scan")
-    log.info("Starting smart 360 image scan")
+    log.info("Starting smart 360 image scan (8×45°)")
 
     motors.stop()
+    motors.lights(0, 0)
     time.sleep(0.5)
 
-    all_frames   = []   # collect for final overview if no target found
-    best_spot    = None  # best potential target seen so far
+    all_frames   = []
+    best_spot    = None
 
-    for pos in range(4):
-        deg = pos * 90
+    TURN_45_SEC = TURN_90_SEC / 2   # half the 90° time
+
+    for pos in range(8):
+        deg = pos * 45
         _ui("log", f"Scanning {deg}°...")
         motors.oled(1, f"Scan {deg}deg")
 
-        # Tilt up to see mid/far range, then level
-        for tilt, label in [(-20, "up"), (10, "level")]:
+        # Ground level first (see objects on floor), then mid-range
+        for tilt, label in [(5, "ground"), (-15, "mid")]:
             motors.pantilt(0, tilt, 40)
-            time.sleep(0.5)
+            time.sleep(0.4)
 
-            # Wide frame for overview collection
+            # Wide frame for overview collection — adaptive LED only if pitch black
             f_pt = _capture_sharp(CAMERA_PANTILT)
             if f_pt:
+                if _is_pitch_black(f_pt):
+                    motors.lights(base=180, head=255)
+                    time.sleep(0.3)
+                    f_pt = _capture_sharp(CAMERA_PANTILT) or f_pt
+                    motors.lights(0, 0)
                 all_frames.append(f_pt)
 
             # Quick scan at this position
@@ -573,28 +691,27 @@ def _scan_360_smart() -> dict:
                     best_spot = (deg, result)
                     log.info(f"Potential target ({result.get('object')}) at {deg}° — continuing scan")
 
-            # ── Hard obstacle detected ────────────────────────────────────
             if result.get("wall_ahead") or result.get("obstacle_close"):
                 log.info(f"Obstacle at {deg}° during 360 scan")
 
-        # Re-centre pan-tilt before body rotation
-        motors.pantilt(0, 0)
+        # Re-centre pan-tilt to ground default before body rotation
+        motors.pantilt(0, 5)
         time.sleep(0.3)
 
-        if pos < 3:
+        if pos < 7:
             motors.right(MOTOR_SPEED_SLOW)
-            time.sleep(TURN_90_SEC)
+            time.sleep(TURN_45_SEC)
             motors.stop()
-            time.sleep(0.5)
+            time.sleep(0.4)
 
     # ── Re-visit best potential target for a second look ─────────────────────
     if best_spot:
         deg, spot = best_spot
         _ui("log", f"Re-visiting best potential target at {deg}°...")
-        steps_back = (4 - (deg // 90)) % 4
+        steps_back = (8 - (deg // 45)) % 8
         if steps_back > 0:
             motors.right(MOTOR_SPEED_SLOW)
-            time.sleep(TURN_90_SEC * steps_back)
+            time.sleep(TURN_45_SEC * steps_back)
             motors.stop()
             time.sleep(0.5)
         result = _quick_scan()
@@ -719,10 +836,10 @@ def _handle_mission_complete(obj_name):
     for _ in range(5):
         motors.lights(255, 255); time.sleep(0.25)
         motors.lights(0, 0);    time.sleep(0.25)
-    motors.lights(128, 255)
+    motors.lights(128, 255)   # brief celebratory lights, then off below
 
-    # Tilt up slightly to face the target at close range
-    motors.pantilt(0, -10)
+    # Tilt to ground-looking default to face the target at close range
+    motors.pantilt(0, 5)
     time.sleep(0.5)
 
     announcement = ask_cosmos(
@@ -842,8 +959,8 @@ def _process_scan(scan, from_360=False):
         motors.oled(1, "Centering...")
         _ui("status", f"FOUND — {name}")
 
-        # Tilt up slightly to face the person at close range
-        motors.pantilt(0, -15)
+        # Ground-looking tilt to see person/robot at close range
+        motors.pantilt(0, 5)
         time.sleep(0.5)
 
         motors.oled(1, "Talking...")
