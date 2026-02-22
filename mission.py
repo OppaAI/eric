@@ -25,10 +25,7 @@ from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR, VLLM_URL,
 from motors import motors
 from cosmos import (
     ask_cosmos, set_mission_briefing,
-    capture_frame, capture_dual_stable, capture_nav_frame, capture_nav_clip,
-    center_on_person,
-    pantilt, pantilt_center, pantilt_move_wait,
-    autofocus_trigger, autofocus_enable,
+    capture_frame,
     CAMERA_WEBCAM, CAMERA_PANTILT
 )
 from tts import speak
@@ -203,13 +200,8 @@ def start_mission(briefing):
     _empty_scans = _avoid_attempts = _scans_since_360 = 0
     set_mission_briefing(briefing)
 
-    try:
-        autofocus_enable(CAMERA_WEBCAM)
-        autofocus_enable(CAMERA_PANTILT)
-    except Exception:
-        pass
-
-    pantilt_center()
+    motors.pantilt(0, 0)
+    time.sleep(0.5)
 
     ack = ask_cosmos(
         f"Mission briefing:\n\"{briefing}\"\n\n"
@@ -235,7 +227,7 @@ def stop_mission():
     mission_state  = State.IDLE
     motors.stop()
     motors.lights(0, 0)
-    pantilt_center()
+    motors.pantilt(0, 0)
     motors.oled(0, "ERIC STOPPED")
     motors.oled(1, "")
     eric_say("Mission disengaged. All systems halted.")
@@ -247,7 +239,7 @@ def resume_after_interaction():
     if mission_active:
         _empty_scans = _avoid_attempts = _scans_since_360 = 0
         mission_state = State.SEARCHING
-        pantilt_center()
+        motors.pantilt(0, 0)
         motors.forward(MOTOR_SPEED_SLOW)
         motors.oled(0, "ERIC ACTIVE")
         motors.oled(1, "Searching...")
@@ -391,7 +383,7 @@ def _nav_check() -> dict:
     _ui("log", "📷 Nav check...")
     motors.oled(1, "Nav check...")
 
-    frame = capture_nav_frame()
+    frame = capture_frame(CAMERA_PANTILT, 320, 240)
     if not frame:
         return dict(_NAV_FALLBACK)
 
@@ -405,15 +397,21 @@ Check ONLY for immediate safety hazards:
 - Small ground obstacle (cables, edges, steps) → small_obstacle = true
 - Person or robot visible anywhere → person_visible = true
 
-Respond ONLY with valid JSON:
+OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
+STRING fields must be a single word from the options listed — NOT a list, NOT a dict, NOT null.
+BOOLEAN fields must be true or false.
+
+Example output (copy this structure exactly, change values to match what you see):
 {
   "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
   "person_visible": false,
-  "action": "forward|slow|stop|turn_left|turn_right",
-  "physical_reasoning": "one sentence"
+  "action": "forward",
+  "physical_reasoning": "Path ahead is clear with no obstacles visible."
 }
+
+Now analyze the frame and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
 """
     try:
         response = ask_cosmos(NAV_IMAGE_PROMPT, image_b64=frame, max_tokens=120)
@@ -443,7 +441,15 @@ def _quick_scan() -> dict:
     Dual camera stable scan while stopped.
     Pan-tilt centers + settles, then both cameras captured.
     """
-    frames = capture_dual_stable(adaptive_led=True)
+    motors.pantilt(0, 0)
+    time.sleep(0.5)
+    frames = []
+    pt = capture_frame(CAMERA_PANTILT, 640, 480)
+    if pt:
+        frames.append(pt)
+    wc = capture_frame(CAMERA_WEBCAM, 640, 480)
+    if wc:
+        frames.append(wc)
     if not frames:
         return dict(_SCAN_FALLBACK)
     try:
@@ -484,7 +490,7 @@ def _capture_sharp(device: int, retries: int = MAX_BLUR_RETRIES) -> str | None:
     """Capture a frame, retrying if blurry. Returns best frame found."""
     best = None
     for attempt in range(retries):
-        f = capture_frame(device, 640, 480, adaptive_led=True)
+        f = capture_frame(device, 640, 480)
         if f is None:
             break
         if not _is_blurry(f):
@@ -500,9 +506,9 @@ def _scan_360_smart() -> dict:
     Full 360° scan using image-based scanning with early target identification.
 
     At each of 4 body positions (0°, 90°, 180°, 270°):
-      1. Use scan_and_identify() — wide angle spots + webcam identifies
-      2. If target CONFIRMED during scan → return immediately, don't continue
-      3. If potential target but not confirmed → record and continue scan
+      1. Use _quick_scan() at each tilt position
+      2. If target VISIBLE during scan → return immediately, don't continue
+      3. If potential target — record and continue scan
       4. Collect all wide frames for final Cosmos 360 overview if needed
 
     This means Eric can identify a target mid-scan and stop early —
@@ -518,62 +524,62 @@ def _scan_360_smart() -> dict:
     time.sleep(0.5)
 
     all_frames   = []   # collect for final overview if no target found
-    best_spot    = None  # best unconfirmed potential target
+    best_spot    = None  # best potential target seen so far
 
     for pos in range(4):
         deg = pos * 90
         _ui("log", f"Scanning {deg}°...")
         motors.oled(1, f"Scan {deg}deg")
 
-        # Also tilt up to see mid/far range
+        # Tilt up to see mid/far range, then level
         for tilt, label in [(-20, "up"), (10, "level")]:
-            pantilt_move_wait(0, tilt, speed=40)
+            motors.pantilt(0, tilt, 40)
+            time.sleep(0.5)
 
             # Wide frame for overview collection
             f_pt = _capture_sharp(CAMERA_PANTILT)
             if f_pt:
                 all_frames.append(f_pt)
 
-            # Use scan_and_identify at each position
-            result = scan_and_identify(adaptive_led=True)
+            # Quick scan at this position
+            result = _quick_scan()
 
-            # ── CONFIRMED target found mid-scan ───────────────────────────
-            if result.get("confirmed_target"):
-                log.info(f"🎯 Target CONFIRMED at {deg}° tilt={label} — stopping scan early!")
-                _ui("log", f"Target confirmed at {deg}° — stopping scan!")
+            # ── Target found mid-scan — stop early ───────────────────────
+            if result.get("target_visible"):
+                log.info(f"🎯 Target VISIBLE at {deg}° tilt={label} — stopping scan early!")
+                _ui("log", f"Target visible at {deg}° — stopping scan!")
                 motors.oled(1, "TARGET FOUND!")
-
-                # Return a scan result compatible with _process_scan()
                 return {
-                    "object":           result.get("object_type", "person"),
-                    "object_name":      result.get("object_name"),
-                    "terrain":          "clear",
-                    "distance":         "close",
-                    "in_my_path":       True,
-                    "wall_ahead":       False,
-                    "obstacle_close":   False,
-                    "small_obstacle":   False,
-                    "target_visible":   True,
-                    "target_direction": "front",  # already aligned
+                    "object":             result.get("object", "person"),
+                    "object_name":        result.get("object_name"),
+                    "terrain":            result.get("terrain", "clear"),
+                    "distance":           result.get("distance", "close"),
+                    "in_my_path":         True,
+                    "wall_ahead":         False,
+                    "obstacle_close":     False,
+                    "small_obstacle":     False,
+                    "target_visible":     True,
+                    "target_direction":   "front",
                     "clearest_direction": "front",
-                    "action":           "stop",
-                    "speak":            result.get("speak"),
-                    "physical_reasoning": f"Target confirmed by webcam at {deg}°",
-                    "mission_complete": False
+                    "action":             "stop",
+                    "speak":              result.get("speak"),
+                    "physical_reasoning": f"Target confirmed at {deg}° tilt={label}",
+                    "mission_complete":   False
                 }
 
-            # ── Potential but not confirmed — remember best ────────────────
-            if result.get("potential_target") and result.get("confidence") in ("medium", "high"):
-                if best_spot is None or result.get("confidence") == "high":
+            # ── Remember best non-empty result for re-visit ───────────────
+            if result.get("object") not in ("clear", "unknown", None):
+                if best_spot is None:
                     best_spot = (deg, result)
-                    log.info(f"Potential target at {deg}° — continuing scan")
+                    log.info(f"Potential target ({result.get('object')}) at {deg}° — continuing scan")
 
             # ── Hard obstacle detected ────────────────────────────────────
             if result.get("wall_ahead") or result.get("obstacle_close"):
                 log.info(f"Obstacle at {deg}° during 360 scan")
 
         # Re-centre pan-tilt before body rotation
-        pantilt_center()
+        motors.pantilt(0, 0)
+        time.sleep(0.3)
 
         if pos < 3:
             motors.right(MOTOR_SPEED_SLOW)
@@ -581,31 +587,34 @@ def _scan_360_smart() -> dict:
             motors.stop()
             time.sleep(0.5)
 
-    # ── If we found a potential (unconfirmed) target — go back and retry ID ──
+    # ── Re-visit best potential target for a second look ─────────────────────
     if best_spot:
         deg, spot = best_spot
         _ui("log", f"Re-visiting best potential target at {deg}°...")
-        # Rotate back to that bearing
         steps_back = (4 - (deg // 90)) % 4
         if steps_back > 0:
             motors.right(MOTOR_SPEED_SLOW)
             time.sleep(TURN_90_SEC * steps_back)
             motors.stop()
             time.sleep(0.5)
-        # Try identification one more time
-        result = scan_and_identify(adaptive_led=True)
-        if result.get("confirmed_target"):
+        result = _quick_scan()
+        if result.get("target_visible") or result.get("object") not in ("clear", "unknown"):
             return {
-                "object": result.get("object_type", "person"),
-                "object_name": result.get("object_name"),
-                "terrain": "clear", "distance": "medium",
-                "in_my_path": True, "wall_ahead": False,
-                "obstacle_close": False, "small_obstacle": False,
-                "target_visible": True, "target_direction": "front",
-                "clearest_direction": "front", "action": "stop",
-                "speak": result.get("speak"),
+                "object":             result.get("object", "person"),
+                "object_name":        result.get("object_name"),
+                "terrain":            result.get("terrain", "clear"),
+                "distance":           result.get("distance", "medium"),
+                "in_my_path":         True,
+                "wall_ahead":         False,
+                "obstacle_close":     False,
+                "small_obstacle":     False,
+                "target_visible":     True,
+                "target_direction":   "front",
+                "clearest_direction": "front",
+                "action":             "stop",
+                "speak":              result.get("speak"),
                 "physical_reasoning": "Target confirmed on second look",
-                "mission_complete": False
+                "mission_complete":   False
             }
 
     # ── No target found — send overview frames to Cosmos for direction ────────
@@ -712,10 +721,9 @@ def _handle_mission_complete(obj_name):
         motors.lights(0, 0);    time.sleep(0.25)
     motors.lights(128, 255)
 
-    # Look slightly up, settle, then center on person or robot
-    pantilt_move_wait(0, -10)
-    autofocus_trigger(CAMERA_PANTILT)
-    center_on_person()
+    # Tilt up slightly to face the target at close range
+    motors.pantilt(0, -10)
+    time.sleep(0.5)
 
     announcement = ask_cosmos(
         f"You found: {obj_name or 'the target'}. Mission complete. "
@@ -834,10 +842,8 @@ def _process_scan(scan, from_360=False):
         motors.oled(1, "Centering...")
         _ui("status", f"FOUND — {name}")
 
-        # Center on person or robot using pan-tilt (settled capture)
-        if not center_on_person():
-            pantilt_move_wait(0, -15)  # fallback: tilt up slightly
-        autofocus_trigger(CAMERA_PANTILT)
+        # Tilt up slightly to face the person at close range
+        motors.pantilt(0, -15)
         time.sleep(0.5)
 
         motors.oled(1, "Talking...")
@@ -895,7 +901,7 @@ def _mission_loop():
     global _avoid_attempts, _nav_clips_since_scan
 
     eric_say("Starting initial 360 degree scan of the area.")
-    scan = _scan_360()
+    scan = _scan_360_smart()
     _process_scan(scan, from_360=True)
 
     if mission_active and mission_state == State.SEARCHING:
@@ -909,10 +915,10 @@ def _mission_loop():
                 time.sleep(0.5)
                 continue
 
-            # ── Video nav check while moving (10s clip → Cosmos) ─────────────
+            # ── Nav check while moving ────────────────────────────────────
             if _nav_clips_since_scan < NAV_CLIPS_BETWEEN_SCANS:
                 _nav_clips_since_scan += 1
-                nav = _nav_check()  # captures 10s video clip, robot keeps moving
+                nav = _nav_check()
 
                 if nav.get("wall_ahead") or nav.get("obstacle_close"):
                     motors.stop()
@@ -934,7 +940,7 @@ def _mission_loop():
                     motors.forward(MOTOR_SPEED_SLOW)
                 continue
 
-            # ── Stopped scan every NAV_CLIPS_BETWEEN_SCANS clips ─────────────
+            # ── Stopped scan every NAV_CLIPS_BETWEEN_SCANS checks ─────────
             _nav_clips_since_scan = 0
             _scans_since_360 += 1
             motors.stop()
@@ -948,7 +954,7 @@ def _mission_loop():
                     eric_say("Nothing found. Performing a full 360 scan.")
                 else:
                     _ui("log", "Periodic 360 scan...")
-                scan = _scan_360()
+                scan = _scan_360_smart()
                 _scans_since_360 = _empty_scans = 0
                 _process_scan(scan, from_360=True)
                 if mission_active and mission_state == State.SEARCHING:
