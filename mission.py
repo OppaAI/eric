@@ -25,10 +25,7 @@ from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR, VLLM_URL,
 from motors import motors
 from cosmos import (
     ask_cosmos, set_mission_briefing,
-    capture_frame, capture_dual_stable, capture_nav_frame, capture_nav_clip,
-    center_on_person,
-    pantilt, pantilt_center, pantilt_move_wait,
-    autofocus_trigger, autofocus_enable,
+    capture_frame,
     CAMERA_WEBCAM, CAMERA_PANTILT
 )
 from tts import speak
@@ -169,13 +166,8 @@ def start_mission(briefing):
     _empty_scans = _avoid_attempts = _scans_since_360 = 0
     set_mission_briefing(briefing)
 
-    try:
-        autofocus_enable(CAMERA_WEBCAM)
-        autofocus_enable(CAMERA_PANTILT)
-    except Exception:
-        pass
-
-    pantilt_center()
+    motors.pantilt(0, 0)
+    time.sleep(0.5)
 
     ack = ask_cosmos(
         f"Mission briefing:\n\"{briefing}\"\n\n"
@@ -201,7 +193,7 @@ def stop_mission():
     mission_state  = State.IDLE
     motors.stop()
     motors.lights(0, 0)
-    pantilt_center()
+    motors.pantilt(0, 0)
     motors.oled(0, "ERIC STOPPED")
     motors.oled(1, "")
     eric_say("Mission disengaged. All systems halted.")
@@ -213,7 +205,7 @@ def resume_after_interaction():
     if mission_active:
         _empty_scans = _avoid_attempts = _scans_since_360 = 0
         mission_state = State.SEARCHING
-        pantilt_center()
+        motors.pantilt(0, 0)
         motors.forward(MOTOR_SPEED_SLOW)
         motors.oled(0, "ERIC ACTIVE")
         motors.oled(1, "Searching...")
@@ -346,7 +338,7 @@ def _nav_check() -> dict:
     _ui("log", "📷 Nav check...")
     motors.oled(1, "Nav check...")
 
-    frame = capture_nav_frame()
+    frame = capture_frame(CAMERA_PANTILT, 320, 240)
     if not frame:
         return dict(_NAV_FALLBACK)
 
@@ -398,7 +390,15 @@ def _quick_scan() -> dict:
     Dual camera stable scan while stopped.
     Pan-tilt centers + settles, then both cameras captured.
     """
-    frames = capture_dual_stable(adaptive_led=True)
+    motors.pantilt(0, 0)
+    time.sleep(0.5)
+    frames = []
+    pt = capture_frame(CAMERA_PANTILT, 640, 480)
+    if pt:
+        frames.append(pt)
+    wc = capture_frame(CAMERA_WEBCAM, 640, 480)
+    if wc:
+        frames.append(wc)
     if not frames:
         return dict(_SCAN_FALLBACK)
     try:
@@ -439,7 +439,7 @@ def _capture_sharp(device: int, retries: int = MAX_BLUR_RETRIES) -> str | None:
     """Capture a frame, retrying if blurry. Returns best frame found."""
     best = None
     for attempt in range(retries):
-        f = capture_frame(device, 640, 480, adaptive_led=True)
+        f = capture_frame(device, 640, 480)
         if f is None:
             break
         if not _is_blurry(f):
@@ -482,15 +482,16 @@ def _scan_360_smart() -> dict:
 
         # Also tilt up to see mid/far range
         for tilt, label in [(-20, "up"), (10, "level")]:
-            pantilt_move_wait(0, tilt, speed=40)
+            motors.pantilt(0, tilt, 40)
+            time.sleep(0.5)
 
             # Wide frame for overview collection
             f_pt = _capture_sharp(CAMERA_PANTILT)
             if f_pt:
                 all_frames.append(f_pt)
 
-            # Use scan_and_identify at each position
-            result = scan_and_identify(adaptive_led=True)
+            # Use _quick_scan at each position
+            result = _quick_scan()
 
             # ── CONFIRMED target found mid-scan ───────────────────────────
             if result.get("confirmed_target"):
@@ -528,7 +529,8 @@ def _scan_360_smart() -> dict:
                 log.info(f"Obstacle at {deg}° during 360 scan")
 
         # Re-centre pan-tilt before body rotation
-        pantilt_center()
+        motors.pantilt(0, 0)
+        time.sleep(0.3)
 
         if pos < 3:
             motors.right(MOTOR_SPEED_SLOW)
@@ -547,11 +549,11 @@ def _scan_360_smart() -> dict:
             time.sleep(TURN_90_SEC * steps_back)
             motors.stop()
             time.sleep(0.5)
-        # Try identification one more time
-        result = scan_and_identify(adaptive_led=True)
-        if result.get("confirmed_target"):
+        # Try identification one more time with a quick scan
+        result = _quick_scan()
+        if result.get("target_visible") or result.get("object") not in ("clear", "unknown"):
             return {
-                "object": result.get("object_type", "person"),
+                "object": result.get("object", "person"),
                 "object_name": result.get("object_name"),
                 "terrain": "clear", "distance": "medium",
                 "in_my_path": True, "wall_ahead": False,
@@ -667,10 +669,9 @@ def _handle_mission_complete(obj_name):
         motors.lights(0, 0);    time.sleep(0.25)
     motors.lights(128, 255)
 
-    # Look slightly up, settle, then center on person or robot
-    pantilt_move_wait(0, -10)
-    autofocus_trigger(CAMERA_PANTILT)
-    center_on_person()
+    # Tilt up slightly to face the target at close range
+    motors.pantilt(0, -10)
+    time.sleep(0.5)
 
     announcement = ask_cosmos(
         f"You found: {obj_name or 'the target'}. Mission complete. "
@@ -789,10 +790,8 @@ def _process_scan(scan, from_360=False):
         motors.oled(1, "Centering...")
         _ui("status", f"FOUND — {name}")
 
-        # Center on person or robot using pan-tilt (settled capture)
-        if not center_on_person():
-            pantilt_move_wait(0, -15)  # fallback: tilt up slightly
-        autofocus_trigger(CAMERA_PANTILT)
+        # Tilt up slightly to face the person at close range
+        motors.pantilt(0, -15)
         time.sleep(0.5)
 
         motors.oled(1, "Talking...")
@@ -850,7 +849,7 @@ def _mission_loop():
     global _avoid_attempts, _nav_clips_since_scan
 
     eric_say("Starting initial 360 degree scan of the area.")
-    scan = _scan_360()
+    scan = _scan_360_smart()
     _process_scan(scan, from_360=True)
 
     if mission_active and mission_state == State.SEARCHING:
@@ -903,7 +902,7 @@ def _mission_loop():
                     eric_say("Nothing found. Performing a full 360 scan.")
                 else:
                     _ui("log", "Periodic 360 scan...")
-                scan = _scan_360()
+                scan = _scan_360_smart()
                 _scans_since_360 = _empty_scans = 0
                 _process_scan(scan, from_360=True)
                 if mission_active and mission_state == State.SEARCHING:
