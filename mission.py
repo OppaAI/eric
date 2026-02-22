@@ -52,9 +52,9 @@ conversation_history = []
 _empty_scans       = 0
 _avoid_attempts    = 0
 _scans_since_360   = 0
-EMPTY_SCAN_LIMIT   = 2
-SCANS_BEFORE_360   = 4
-MAX_AVOID_ATTEMPTS = 4
+EMPTY_SCAN_LIMIT   = 1   # trigger 360 after just 1 empty scan (was 2)
+SCANS_BEFORE_360   = 2   # periodic 360 every 2 quick scans (was 4)
+MAX_AVOID_ATTEMPTS = 3   # force 360 sooner (was 4)
 
 _ui_callbacks = {"eric_says": None, "status": None, "log": None}
 
@@ -223,44 +223,53 @@ def resume_after_interaction():
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
 NAV_PROMPT = """
-These are frames from a 10-second video clip of my pan-tilt camera while I am moving.
-Analyze the MOTION and what is approaching — egocentric, first person view.
+These are frames from a 10-second video clip captured by my forward-facing camera while I drive.
+I am a tracked robot — I CANNOT stop instantly. Study how the scene CHANGES across frames.
 
-Look for:
-- Obstacles or walls getting closer over the frames
-- People or robots appearing in the scene
-- Terrain changes (carpet, tiles, steps)
-- Any object moving into my path
+OBSTACLE DETECTION RULES (BE PARANOID — err on the side of stopping):
+- Does anything fill the lower half of the frame across multiple frames? → wall_ahead = true
+- Is ANY object getting visibly closer or larger across frames? → obstacle_close = true  
+- Is there anything small on the ground (cable, shoe, rug edge, step)? → small_obstacle = true
+- ONLY output action=forward if the path is completely clear for at least 1.5 meters
+- If UNSURE about anything: set obstacle_close=true and action=stop
 
-Respond ONLY with valid JSON:
+PERSON DETECTION:
+- Any human or robot visible anywhere in the clip → person_visible = true
+
+Respond ONLY with valid JSON (nothing else, no markdown):
 {
   "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
   "person_visible": false,
   "action": "forward|slow|stop|turn_left|turn_right",
-  "physical_reasoning": "one sentence describing what you saw across the clip"
+  "physical_reasoning": "one sentence: what changed across the frames and why this action"
 }
 """
 
 SCAN_360_PROMPT = """
-These images are from a full 360-degree scan of my surroundings.
-I captured at 0, 90, 180, 270 degrees body rotation.
-At each position: pan-tilt tilted up (far/mid) and down (floor/near).
-Both pan-tilt and webcam cameras used at each stop (pan-tilt first, then webcam).
-Total: up to 16 images.
+These images are from a full 360-degree scan — 4 body positions (0°, 90°, 180°, 270°).
+At each position I tilted my camera up (far view) and down (floor view), with both cameras.
+Up to 16 images total. I am completely stopped.
 
-Analyze ALL images carefully for my mission target:
-- Slippers are large soft footwear on the floor — look carefully at floor-level frames
-- Robots have cameras, lights, chassis — check face/camera area for centering
-- Report target_visible=true even if partially visible or uncertain
-- Report which direction the target is from my current facing
+STEP 1 — OBSTACLES FIRST (safety before mission):
+Look at ALL floor-level frames carefully. Identify walls, furniture, objects in any direction.
+Which direction has the most clear open space? → clearest_direction
 
-Respond ONLY with valid JSON, no markdown:
+STEP 2 — MISSION TARGET:
+- People: full body, faces, hands — any direction
+- Robots: chassis, cameras, wheels, lights — even partially visible counts
+- Slippers/shoes: soft footwear on the floor — check ALL floor-level frames carefully
+- Report target_visible=true if you are even 30% confident
+
+STEP 3 — SPEAK:
+If you see the mission target, say something natural and excited about it.
+
+Respond ONLY with valid JSON (no markdown, no extra text):
 {
   "object": "person|robot|slipper|shoe|obstacle|wall|clear|unknown",
-  "object_name": "description or null",
-  "terrain": "carpet|tiles|clear",
+  "object_name": "specific description or null",
+  "terrain": "carpet|tiles|wood|clear",
   "distance": "close|medium|far",
   "in_my_path": false,
   "wall_ahead": false,
@@ -270,26 +279,34 @@ Respond ONLY with valid JSON, no markdown:
   "clearest_direction": "front|right|back|left",
   "action": "forward|slow|turn_right|turn_left|turn_back|navigate_around|stop",
   "speak": null,
-  "physical_reasoning": "1 sentence",
+  "physical_reasoning": "1 sentence explaining what you saw and why this action",
   "mission_complete": false
 }
 """
 
 QUICK_SCAN_PROMPT = """
-I am stopped. These are stable frames from my pan-tilt (wide angle) and webcam cameras.
-Obstacle and mission target check.
+I am completely stopped. These stable frames are from my pan-tilt (wide angle) and webcam cameras.
 
-Respond ONLY with valid JSON:
+OBSTACLE CHECK — LOOK AT THE LOWER HALF OF EVERY IMAGE:
+- Anything filling or touching the bottom edge of any frame? → wall_ahead = true
+- Any object within ~60cm directly ahead? → obstacle_close = true, set in_my_path = true
+- If in doubt about any object: set obstacle_close = true. Being cautious is correct.
+
+MISSION TARGET CHECK:
+- People, robots, slippers, shoes — even partially visible counts → target_visible = true
+
+Respond ONLY with valid JSON (no markdown):
 {
   "object": "person|robot|slipper|shoe|obstacle|wall|clear|unknown",
   "object_name": null,
-  "terrain": "carpet|tiles|clear",
+  "terrain": "carpet|tiles|wood|clear",
   "distance": "close|medium|far",
   "in_my_path": false,
   "wall_ahead": false,
+  "obstacle_close": false,
   "small_obstacle": false,
   "target_visible": false,
-  "target_direction": "front",
+  "target_direction": "front|right|back|left",
   "action": "forward|slow|navigate_around|stop",
   "speak": null,
   "physical_reasoning": "1 sentence",
@@ -302,13 +319,14 @@ _SCAN_FALLBACK = {
     "distance": "far", "in_my_path": False, "wall_ahead": False,
     "small_obstacle": False, "target_visible": False,
     "target_direction": "unknown", "clearest_direction": "front",
-    "action": "forward", "speak": None,
+    "action": "stop", "speak": None,   # SAFE default — never forward on failure
     "physical_reasoning": "", "mission_complete": False
 }
 
 _NAV_FALLBACK = {
     "wall_ahead": False, "obstacle_close": False, "small_obstacle": False,
-    "action": "forward", "physical_reasoning": ""
+    "person_visible": False,
+    "action": "stop", "physical_reasoning": ""  # SAFE default — stop on nav failure
 }
 
 
@@ -503,7 +521,10 @@ def _face_direction(direction):
 # ─── Obstacle Avoidance ───────────────────────────────────────────────────────
 
 def _avoid_obstacle(wall_ahead, small_obstacle) -> bool:
-    """Returns True if 360 scan should be forced."""
+    """
+    Obstacle avoidance. Returns True if 360 scan should be forced.
+    Always re-scans after turning to confirm the new path is clear.
+    """
     global _avoid_attempts, mission_state
     _avoid_attempts += 1
     mission_state = State.AVOIDING
@@ -513,28 +534,46 @@ def _avoid_obstacle(wall_ahead, small_obstacle) -> bool:
         _ui("log", f"Wall — attempt {_avoid_attempts}")
         motors.oled(1, "Wall! Back up...")
         motors.stop(); time.sleep(0.3)
-        motors.backward(MOTOR_SPEED_SLOW); time.sleep(1.2)
-        motors.stop(); time.sleep(0.2)
-        if _avoid_attempts % 2 == 1:
-            motors.right(MOTOR_SPEED_SLOW); time.sleep(1.5)
-        else:
-            motors.left(MOTOR_SPEED_SLOW);  time.sleep(1.5)
+
+        # Back up more decisively
+        motors.backward(MOTOR_SPEED_SLOW); time.sleep(1.5)
         motors.stop(); time.sleep(0.3)
+
+        # Longer turn — alternate left/right, increase turn time each attempt
+        turn_time = min(1.8 + (_avoid_attempts * 0.4), 3.5)
+        if _avoid_attempts % 2 == 1:
+            motors.right(MOTOR_SPEED_SLOW); time.sleep(turn_time)
+        else:
+            motors.left(MOTOR_SPEED_SLOW);  time.sleep(turn_time)
+        motors.stop(); time.sleep(0.5)
+
         if _avoid_attempts >= MAX_AVOID_ATTEMPTS:
             _avoid_attempts = 0
-            eric_say("I keep hitting obstacles. Let me do a full scan.")
+            eric_say("Too many obstacles. Let me scan the full area.")
             return True  # trigger 360
+
+        # Re-scan after turning — confirm new path is clear before moving
+        _ui("log", "Re-scanning after avoidance...")
+        rescan = _quick_scan()
+        if rescan.get("wall_ahead") or rescan.get("obstacle_close"):
+            _ui("log", "Still blocked after turn — trying again")
+            return _avoid_obstacle(wall_ahead=True, small_obstacle=False)
 
     elif small_obstacle:
         _ui("log", "Small obstacle — stepping around")
         motors.oled(1, "Step around...")
         motors.stop(); time.sleep(0.2)
-        motors.right(MOTOR_SPEED_SLOW); time.sleep(0.9)
+        motors.right(MOTOR_SPEED_SLOW); time.sleep(1.1)
         motors.stop(); time.sleep(0.2)
-        motors.forward(MOTOR_SPEED_SLOW); time.sleep(1.0)
+        motors.forward(MOTOR_SPEED_SLOW); time.sleep(1.2)
         motors.stop(); time.sleep(0.2)
-        motors.left(MOTOR_SPEED_SLOW);   time.sleep(0.9)
-        motors.stop()
+        motors.left(MOTOR_SPEED_SLOW);   time.sleep(1.1)
+        motors.stop(); time.sleep(0.4)
+
+        # Quick check after step-around
+        rescan = _quick_scan()
+        if rescan.get("wall_ahead") or rescan.get("obstacle_close"):
+            return _avoid_obstacle(wall_ahead=True, small_obstacle=False)
 
     return False
 
@@ -629,10 +668,18 @@ def _process_scan(scan, from_360=False):
         _handle_mission_complete(obj_name)
         return
 
-    if wall_ahead or (in_path and obj == "wall"):
+    obstacle_close = scan.get("obstacle_close", False)
+
+    # Treat unknown with in_path as obstacle — never blindly forward on uncertainty
+    if obj == "unknown" and in_path:
+        log.info("Unknown object in path — treating as obstacle")
+        wall_ahead = True
+
+    if wall_ahead or obstacle_close or (in_path and obj in ["wall", "obstacle"]):
         motors.stop()
         if speak_tx: eric_say(speak_tx)
-        force_360 = _avoid_obstacle(wall_ahead=True, small_obstacle=False)
+        is_wall = wall_ahead or (obj == "wall")
+        force_360 = _avoid_obstacle(wall_ahead=is_wall, small_obstacle=small_obs)
         if force_360:
             _scans_since_360 = SCANS_BEFORE_360
         else:
@@ -644,7 +691,7 @@ def _process_scan(scan, from_360=False):
         _avoid_obstacle(wall_ahead=False, small_obstacle=True)
         motors.forward(MOTOR_SPEED_SLOW)
 
-    if not wall_ahead and not small_obs:
+    if not wall_ahead and not obstacle_close and not small_obs:
         _avoid_attempts = 0
 
     if speak_tx:

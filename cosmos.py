@@ -345,7 +345,7 @@ def capture_nav_clip(duration_sec: float = 10.0,
             if w * h > max_pixels:
                 scale = (max_pixels / (w * h)) ** 0.5
                 frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
-            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 75])
+            _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 90])  # higher quality for Cosmos
             frames.append(base64.b64encode(buf).decode("utf-8"))
 
         # Sleep remaining interval time
