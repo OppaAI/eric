@@ -46,6 +46,7 @@ mission_state        = State.IDLE
 mission_active       = False
 conversation_history = []
 _last_good_scan      = None   # FIX B2: remember last valid scan so JSON failures don't freeze Eric
+_target_keywords     = set()  # FIX B5: words from mission briefing used to detect target by name
 
 _empty_scans       = 0
 _avoid_attempts    = 0
@@ -226,6 +227,22 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
     result["object"] = _infer_category(result.get("object", "unknown"),
                                         result.get("object_name"))
 
+    # FIX B5: Cosmos contradiction fix — if it named the mission target but set target_visible=False,
+    # override it. Catches the "object: robot, object_name: r2d2, target_visible: False" bug.
+    if _target_keywords and not result.get("target_visible"):
+        obj_name_str  = str(result.get("object_name") or "").lower()
+        obj_str       = str(result.get("object") or "").lower()
+        combined      = obj_name_str + " " + obj_str
+        matched       = [kw for kw in _target_keywords if kw in combined]
+        if matched:
+            log.info(f"🎯 Target keyword match '{matched}' in object_name — forcing target_visible=True")
+            result["target_visible"]   = True
+            result["in_my_path"]       = result.get("in_my_path", True)  # keep existing or default True
+            if result.get("target_direction", "unknown") == "unknown":
+                result["target_direction"] = "front"
+            if not result.get("action") or result["action"] == "stop":
+                result["action"] = "forward"
+
     # Stringify any remaining list/dict in string fields
     for field in ("terrain", "distance", "target_direction",
                   "clearest_direction", "action", "physical_reasoning"):
@@ -288,7 +305,7 @@ def get_briefing_from_file(name):
 
 def start_mission(briefing):
     global mission_active, mission_state, conversation_history
-    global _empty_scans, _avoid_attempts, _scans_since_360
+    global _empty_scans, _avoid_attempts, _scans_since_360, _target_keywords
 
     if mission_active:
         return "Mission already active. Disengage first."
@@ -297,6 +314,17 @@ def start_mission(briefing):
 
     conversation_history = []
     _empty_scans = _avoid_attempts = _scans_since_360 = 0
+
+    # FIX B5: extract target keywords from briefing so we can catch Cosmos contradictions
+    # e.g. briefing "find r2d2" → _target_keywords = {"r2d2", "r2", "d2"}
+    import re
+    words = re.findall(r"[a-zA-Z0-9]+", briefing.lower())
+    stopwords = {"find", "the", "a", "an", "go", "to", "and", "or", "in", "at",
+                 "with", "for", "of", "is", "it", "locate", "search", "mission",
+                 "your", "my", "deliver", "message", "room"}
+    _target_keywords = {w for w in words if w not in stopwords and len(w) >= 2}
+    log.info(f"🎯 Target keywords from briefing: {_target_keywords}")
+
     set_mission_briefing(briefing)
 
     motors.pantilt(0, 5)   # slight downward tilt — see ground objects at normal range
@@ -347,54 +375,18 @@ def resume_after_interaction():
 
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
-NAV_PROMPT = """
-You are a tracked ground robot. These frames are from your forward camera while moving.
-Study how the scene changes across frames.
-
-RULES:
-- Wall or large object filling lower half across multiple frames → wall_ahead = true
-- Any object getting visibly closer/larger → obstacle_close = true
-- Small ground hazard (cable, rug edge, step) → small_obstacle = true
-- Any human or robot visible anywhere → person_visible = true
-- ONLY set action=forward if path is clear for at least 1.5 meters
-- When unsure: obstacle_close=true, action=stop
-
-OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
-STRING fields must be a single word from the options listed — NOT a list, NOT a dict, NOT null.
-BOOLEAN fields must be true or false.
-
-Example output (copy this structure exactly, change values to match what you see):
+NAV_PROMPT = """Output ONLY this JSON, no markdown, no extra fields:
 {
   "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
   "person_visible": false,
   "action": "forward",
-  "physical_reasoning": "Path is clear ahead for at least two meters."
+  "physical_reasoning": "one sentence"
 }
+Rules: wall_ahead=true if large object fills lower half. obstacle_close=true if anything within 60cm. person_visible=true if any human/robot visible. action must be forward/stop/slow."""
 
-Now analyze the frames and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
-"""
-
-SCAN_360_PROMPT = """
-You are a tracked ground robot. These images are from a full 360-degree scan — 4 body positions.
-At each position the camera tilted up (far view) and down (floor view). You are completely stopped.
-
-STEP 1 — SAFETY: Look at all floor-level frames. Which direction has the most open space?
-STEP 2 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts. Set target_visible=true if 30%+ confident.
-STEP 3 — SPEAK: If you see the target, set speak to an excited 1-sentence reaction. Otherwise null.
-
-MISSION COMPLETE — set mission_complete=true ONLY when ALL of these are true:
-- target_visible = true AND in_my_path = true AND distance is "close" or "nearby"
-- If mission requires delivering a message: set speak to that message before marking complete
-
-OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
-"object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
-"object_name" must be a short string or null — NOT a list or dict.
-All other string fields: pick exactly one option from those shown.
-Boolean fields: true or false only.
-
-Example output (copy this structure exactly, change values to match what you see):
+SCAN_360_PROMPT = """Output ONLY this JSON, no markdown, no extra fields:
 {
   "object": "clear",
   "object_name": null,
@@ -408,35 +400,12 @@ Example output (copy this structure exactly, change values to match what you see
   "clearest_direction": "front",
   "action": "forward",
   "speak": null,
-  "physical_reasoning": "No target found. Hallway ahead is the clearest direction.",
+  "physical_reasoning": "one sentence",
   "mission_complete": false
 }
+Rules: object must be one word: person/robot/slipper/shoe/obstacle/wall/clear/unknown. target_visible=true if mission target seen. target_direction and clearest_direction must be: front/left/right/back/unknown. mission_complete=true only when target is in_my_path AND distance is close/nearby."""
 
-Now analyze the images and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
-"""
-
-QUICK_SCAN_PROMPT = """
-You are a tracked ground robot. You are completely stopped. These frames are from your pan-tilt and webcam cameras.
-
-OBSTACLE CHECK — lower half of every image:
-- Anything filling/touching the bottom edge → wall_ahead = true
-- Object within ~60cm ahead → obstacle_close = true AND in_my_path = true
-- When in doubt: obstacle_close = true
-
-MISSION TARGET CHECK:
-- Person, robot, slipper, shoe — even partially visible → target_visible = true
-
-MISSION COMPLETE — set mission_complete=true ONLY when ALL of these are true:
-- target_visible = true AND in_my_path = true AND distance is "close" or "nearby"
-- If mission requires delivering a message: set speak to that message before marking complete
-
-OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
-"object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
-"object_name" must be a short string or null — NOT a list or dict.
-All other string fields: pick exactly one option from those shown.
-Boolean fields: true or false only.
-
-Example output (copy this structure exactly, change values to match what you see):
+QUICK_SCAN_PROMPT = """Output ONLY this JSON, no markdown, no extra fields:
 {
   "object": "clear",
   "object_name": null,
@@ -451,12 +420,10 @@ Example output (copy this structure exactly, change values to match what you see
   "clearest_direction": "front",
   "action": "forward",
   "speak": null,
-  "physical_reasoning": "Path is clear. No target visible.",
+  "physical_reasoning": "one sentence",
   "mission_complete": false
 }
-
-Now analyze the frames and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
-"""
+Rules: object must be one word: person/robot/slipper/shoe/obstacle/wall/clear/unknown. target_visible=true if mission target seen — if object_name matches the target, target_visible MUST be true. distance must be: close/nearby/far. action must be: forward/stop/slow/turn_left/turn_right. mission_complete=true only when target is in_my_path AND distance is close/nearby."""
 
 _SCAN_FALLBACK = {
     "object": "unknown", "object_name": None, "terrain": "clear",
@@ -582,6 +549,9 @@ def _quick_scan() -> dict:
             pt = capture_frame(CAMERA_PANTILT, 640, 480) or pt
             motors.lights(0, 0)
         frames.append(pt)
+
+    time.sleep(0.2)   # small gap — prevents V4L2 select() timeout when grabbing both cams back-to-back
+
     wc = capture_frame(CAMERA_WEBCAM, 640, 480)
     if wc:
         if _is_pitch_black(wc):

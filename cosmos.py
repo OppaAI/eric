@@ -71,77 +71,138 @@ def get_mission_briefing() -> str:
 # Avoids repeated open/close overhead and keeps buffer state tuned.
 import cv2 as _cv2
 import time as _time
+import threading as _threading
+import queue as _queue
 
-_caps: dict = {}
+# ── Persistent background camera readers ─────────────────────────────────────
+# The root cause of V4L2 select() timeouts on Jetson is that when Python is
+# busy (Cosmos inference, TTS, mission logic) nobody reads from the camera.
+# After ~1 second of no reads the kernel buffer fills and V4L2 stalls.
+# Fix: one daemon thread per camera that reads continuously and stores the
+# latest frame in a 1-slot queue. capture_frame() just grabs from the queue.
 
+class _CameraReader:
+    """Background thread that continuously reads from a V4L2 camera."""
 
-def _open_cap(device: int, width: int = 640, height: int = 480) -> "_cv2.VideoCapture":
-    """
-    Get or create a persistent, low-latency VideoCapture for a device.
-    Applies all latency-reduction settings on first open:
-      - MJPEG fourcc  (much faster than YUYV on USB)
-      - Buffer size 1 (prevents queued stale frames)
-      - 30 fps target
-      - MMAL/V4L2 backend
-    """
-    global _caps
-    cap = _caps.get(device)
-    if cap is not None and cap.isOpened():
+    RECONNECT_DELAY = 2.0   # seconds to wait before reconnecting after failure
+    READ_TIMEOUT    = 3.0   # seconds capture_frame() waits for a frame
+
+    def __init__(self, device: int, width: int = 640, height: int = 480):
+        self.device = device
+        self.width  = width
+        self.height = height
+        self._frame_q: _queue.Queue = _queue.Queue(maxsize=1)
+        self._stop    = _threading.Event()
+        self._thread  = _threading.Thread(target=self._run, daemon=True, name=f"cam-{device}")
+        self._thread.start()
+
+    def _open(self):
+        """Open camera with low-latency settings. Try GStreamer first."""
+        # GStreamer path
+        try:
+            pipeline = (
+                f"v4l2src device=/dev/video{self.device} io-mode=2 ! "
+                "video/x-raw, width=640, height=480, framerate=30/1 ! "
+                "videoconvert n-threads=2 ! "
+                "video/x-raw, format=BGR ! "
+                "appsink drop=1 max-buffers=1 sync=false"
+            )
+            cap = _cv2.VideoCapture(pipeline, _cv2.CAP_GSTREAMER)
+            if cap.isOpened():
+                ret, _ = cap.read()
+                if ret:
+                    log.info(f"📷 Camera {self.device}: GStreamer reader started")
+                    return cap
+                cap.release()
+        except Exception:
+            pass
+
+        # V4L2 fallback
+        cap = _cv2.VideoCapture(self.device, _cv2.CAP_V4L2)
+        cap.set(_cv2.CAP_PROP_FOURCC,      _cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(_cv2.CAP_PROP_FRAME_WIDTH,  self.width)
+        cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        cap.set(_cv2.CAP_PROP_FPS,          30)
+        cap.set(_cv2.CAP_PROP_BUFFERSIZE,   1)
+        log.info(f"📷 Camera {self.device}: V4L2 reader started")
         return cap
 
-    # Try GStreamer low-latency pipeline first (needs OpenCV built with GST)
-    gst_ok = False
-    try:
-        pipeline = (
-            f"v4l2src device=/dev/video{device} io-mode=2 ! "
-            "video/x-raw, width=640, height=480, framerate=30/1 ! "
-            "videoconvert n-threads=2 ! "
-            "video/x-raw, format=BGR ! "
-            "appsink drop=1 max-buffers=1 sync=false"
-        )
-        cap = _cv2.VideoCapture(pipeline, _cv2.CAP_GSTREAMER)
-        if cap.isOpened():
-            ret, _ = cap.read()
-            if ret:
-                gst_ok = True
-                log.info(f"📷 Camera {device}: GStreamer pipeline (low-latency)")
-            else:
-                cap.release()
-    except Exception:
-        pass
+    def _run(self):
+        """Main loop: read frames as fast as possible, keep latest in queue."""
+        cap = None
+        fails = 0
+        while not self._stop.is_set():
+            if cap is None or not cap.isOpened():
+                try:
+                    if cap:
+                        cap.release()
+                    cap = self._open()
+                    fails = 0
+                except Exception as e:
+                    log.error(f"Camera {self.device}: open failed ({e}) — retrying in {self.RECONNECT_DELAY}s")
+                    _time.sleep(self.RECONNECT_DELAY)
+                    continue
 
-    if not gst_ok:
-        # Fallback: plain V4L2 with manual latency settings
-        cap = _cv2.VideoCapture(device, _cv2.CAP_V4L2)
-        cap.set(_cv2.CAP_PROP_FOURCC,       _cv2.VideoWriter_fourcc(*"MJPG"))
-        cap.set(_cv2.CAP_PROP_FRAME_WIDTH,  width)
-        cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, height)
-        cap.set(_cv2.CAP_PROP_FPS,          30)
-        cap.set(_cv2.CAP_PROP_BUFFERSIZE,   1)   # key: minimize queued frames
-        log.info(f"📷 Camera {device}: V4L2 MJPEG 640x480@30fps (low-latency)")
+            ret, frame = cap.read()
+            if not ret:
+                fails += 1
+                if fails >= 5:
+                    log.warning(f"Camera {self.device}: {fails} consecutive read failures — reconnecting")
+                    cap.release()
+                    cap = None
+                    fails = 0
+                    _time.sleep(self.RECONNECT_DELAY)
+                continue
+            fails = 0
 
-    _caps[device] = cap
-    return cap
+            # Drop old frame, put new one (non-blocking)
+            try:
+                self._frame_q.get_nowait()
+            except _queue.Empty:
+                pass
+            try:
+                self._frame_q.put_nowait(frame)
+            except _queue.Full:
+                pass
+
+        if cap:
+            cap.release()
+
+    def get_frame(self) -> "_cv2.Mat | None":
+        """Return the latest frame, waiting up to READ_TIMEOUT seconds."""
+        try:
+            return self._frame_q.get(timeout=self.READ_TIMEOUT)
+        except _queue.Empty:
+            log.warning(f"Camera {self.device}: no frame available after {self.READ_TIMEOUT}s")
+            return None
+
+    def stop(self):
+        self._stop.set()
 
 
-def _flush_and_read(cap: "_cv2.VideoCapture"):
-    """Flush stale buffered frames then read a fresh one."""
-    for _ in range(4):   # discard up to 4 queued old frames
-        cap.grab()
-    return cap.read()
+# One reader per camera device, created on first use
+_readers: dict[int, _CameraReader] = {}
+
+
+def _get_reader(device: int) -> _CameraReader:
+    if device not in _readers:
+        _readers[device] = _CameraReader(device)
+        _time.sleep(0.5)   # brief settle so first frame is ready
+    return _readers[device]
 
 
 def capture_frame(device: int = CAMERA_WEBCAM,
                   width: int = CAMERA_WIDTH,
                   height: int = CAMERA_HEIGHT) -> str | None:
-    """Capture a fresh frame, return base64 JPEG. Auto-resizes if over Cosmos pixel budget."""
+    """Capture the latest frame from the persistent background reader."""
     try:
-        cap = _open_cap(device, width, height)
-        ret, frame = _flush_and_read(cap)
-        if not ret:
-            log.error(f"Camera {device}: frame capture failed — reopening")
-            _caps.pop(device, None)
+        frame = _get_reader(device).get_frame()
+        if frame is None:
             return None
+
+        # Resize if needed
+        if width != CAMERA_WIDTH or height != CAMERA_HEIGHT:
+            frame = _cv2.resize(frame, (width, height))
 
         # Cosmos pixel budget: 256k max
         h, w = frame.shape[:2]
@@ -153,8 +214,7 @@ def capture_frame(device: int = CAMERA_WEBCAM,
         _, buf = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, 85])
         return base64.b64encode(buf).decode("utf-8")
     except Exception as e:
-        log.error(f"Camera {device} error: {e}")
-        _caps.pop(device, None)
+        log.error(f"Camera {device} capture error: {e}")
         return None
 
 
@@ -168,19 +228,19 @@ def capture_frames_video(device: int = CAMERA_WEBCAM,
     fps_sample: frames per second to sample
     """
     try:
-        cap      = _open_cap(device)
-        frames   = []
-        start    = _time.time()
-        last     = 0.0
+        reader = _get_reader(device)
+        frames = []
+        start  = _time.time()
+        last   = 0.0
         interval = 1.0 / fps_sample
 
         while _time.time() - start < duration:
-            ret, frame = cap.read()   # no flush here — we want continuous stream
-            if not ret:
+            frame = reader.get_frame()
+            if frame is None:
                 break
             elapsed = _time.time() - start
             if elapsed - last >= interval:
-                frame = _cv2.resize(frame, (320, 240))  # small per-frame for multi-frame Cosmos
+                frame = _cv2.resize(frame, (320, 240))
                 _, buf = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, 80])
                 frames.append(base64.b64encode(buf).decode("utf-8"))
                 last = elapsed
@@ -189,23 +249,19 @@ def capture_frames_video(device: int = CAMERA_WEBCAM,
         return frames
     except Exception as e:
         log.error(f"Video capture error: {e}")
-        _caps.pop(device, None)
         return []
 
 
 def capture_frame_raw(device: int = CAMERA_WEBCAM):
-    """Capture raw RGB frame for Gradio display — low latency via persistent cap."""
+    """Capture raw RGB frame for Gradio display — from persistent background reader."""
     try:
-        cap = _open_cap(device)
-        ret, frame = _flush_and_read(cap)
-        if not ret:
-            _caps.pop(device, None)
+        frame = _get_reader(device).get_frame()
+        if frame is None:
             return None
         if device == CAMERA_WEBCAM:
             frame = _cv2.rotate(frame, _cv2.ROTATE_90_COUNTERCLOCKWISE)
         return _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
     except Exception:
-        _caps.pop(device, None)
         return None
 
 
