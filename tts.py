@@ -1,5 +1,5 @@
 """
-E.R.I.C. — Text to Speech
+ERIC — Text to Speech
 Piper via RealtimeTTS (CPU, zero VRAM) with gTTS fallback
 Based on working Spencer/Grace voice chatbot implementation
 """

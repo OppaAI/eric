@@ -1,5 +1,5 @@
 """
-E.R.I.C. — Cosmos Reason 2 Interface
+ERIC — Cosmos Reason 2 Interface
 Vision + physical reasoning via vLLM
 """
 
@@ -17,7 +17,7 @@ from config import (
 log = logging.getLogger("eric.cosmos")
 
 _BASE_SYSTEM_PROMPT = """
-You are E.R.I.C. — Edge Robotics Innovation by Cosmos.
+You are ERIC — Edge Robotics Innovation by Cosmos.
 You are a search and rescue tracked ground robot.
 The camera view is YOUR view — egocentric, first person.
 
@@ -67,34 +67,94 @@ def get_mission_briefing() -> str:
 
 
 # ─── Camera ───────────────────────────────────────────────────────────────────
+# Persistent capture objects — one per device index.
+# Avoids repeated open/close overhead and keeps buffer state tuned.
+import cv2 as _cv2
+import time as _time
+
+_caps: dict = {}
+
+
+def _open_cap(device: int, width: int = 640, height: int = 480) -> "_cv2.VideoCapture":
+    """
+    Get or create a persistent, low-latency VideoCapture for a device.
+    Applies all latency-reduction settings on first open:
+      - MJPEG fourcc  (much faster than YUYV on USB)
+      - Buffer size 1 (prevents queued stale frames)
+      - 30 fps target
+      - MMAL/V4L2 backend
+    """
+    global _caps
+    cap = _caps.get(device)
+    if cap is not None and cap.isOpened():
+        return cap
+
+    # Try GStreamer low-latency pipeline first (needs OpenCV built with GST)
+    gst_ok = False
+    try:
+        pipeline = (
+            f"v4l2src device=/dev/video{device} io-mode=2 ! "
+            "video/x-raw, width=640, height=480, framerate=30/1 ! "
+            "videoconvert n-threads=2 ! "
+            "video/x-raw, format=BGR ! "
+            "appsink drop=1 max-buffers=1 sync=false"
+        )
+        cap = _cv2.VideoCapture(pipeline, _cv2.CAP_GSTREAMER)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                gst_ok = True
+                log.info(f"📷 Camera {device}: GStreamer pipeline (low-latency)")
+            else:
+                cap.release()
+    except Exception:
+        pass
+
+    if not gst_ok:
+        # Fallback: plain V4L2 with manual latency settings
+        cap = _cv2.VideoCapture(device, _cv2.CAP_V4L2)
+        cap.set(_cv2.CAP_PROP_FOURCC,       _cv2.VideoWriter_fourcc(*"MJPG"))
+        cap.set(_cv2.CAP_PROP_FRAME_WIDTH,  width)
+        cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, height)
+        cap.set(_cv2.CAP_PROP_FPS,          30)
+        cap.set(_cv2.CAP_PROP_BUFFERSIZE,   1)   # key: minimize queued frames
+        log.info(f"📷 Camera {device}: V4L2 MJPEG 640x480@30fps (low-latency)")
+
+    _caps[device] = cap
+    return cap
+
+
+def _flush_and_read(cap: "_cv2.VideoCapture"):
+    """Flush stale buffered frames then read a fresh one."""
+    for _ in range(4):   # discard up to 4 queued old frames
+        cap.grab()
+    return cap.read()
+
 
 def capture_frame(device: int = CAMERA_WEBCAM,
                   width: int = CAMERA_WIDTH,
                   height: int = CAMERA_HEIGHT) -> str | None:
-    """Capture frame, return base64 JPEG. Tries full res, falls back if too large."""
+    """Capture a fresh frame, return base64 JPEG. Auto-resizes if over Cosmos pixel budget."""
     try:
-        import cv2
-        cap = cv2.VideoCapture(device)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-        ret, frame = cap.read()
-        cap.release()
+        cap = _open_cap(device, width, height)
+        ret, frame = _flush_and_read(cap)
         if not ret:
-            log.error(f"Camera {device}: frame capture failed")
+            log.error(f"Camera {device}: frame capture failed — reopening")
+            _caps.pop(device, None)
             return None
 
-        # Check pixel count — Cosmos max is 256000
+        # Cosmos pixel budget: 256k max
         h, w = frame.shape[:2]
         max_pixels = 256000
         if w * h > max_pixels:
             scale = (max_pixels / (w * h)) ** 0.5
-            frame = cv2.resize(frame, (int(w * scale), int(h * scale)))
-            log.info(f"Camera {device}: resized {w}x{h} → {int(w*scale)}x{int(h*scale)}")
+            frame = _cv2.resize(frame, (int(w * scale), int(h * scale)))
 
-        _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+        _, buf = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, 85])
         return base64.b64encode(buf).decode("utf-8")
     except Exception as e:
         log.error(f"Camera {device} error: {e}")
+        _caps.pop(device, None)
         return None
 
 
@@ -102,57 +162,50 @@ def capture_frames_video(device: int = CAMERA_WEBCAM,
                          duration: float = 10.0,
                          fps_sample: float = 1.0) -> list[str]:
     """
-    Capture video clip and return list of sampled base64 frames.
+    Capture video clip, return list of sampled base64 frames.
+    Uses persistent cap with MJPEG + buffer=1 for low latency.
     duration: seconds to record
-    fps_sample: frames per second to sample (1.0 = 1 frame/sec)
+    fps_sample: frames per second to sample
     """
     try:
-        import cv2, time
-        cap     = cv2.VideoCapture(device)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        frames  = []
-        start   = time.time()
-        last    = 0.0
+        cap      = _open_cap(device)
+        frames   = []
+        start    = _time.time()
+        last     = 0.0
         interval = 1.0 / fps_sample
 
-        while time.time() - start < duration:
-            ret, frame = cap.read()
+        while _time.time() - start < duration:
+            ret, frame = cap.read()   # no flush here — we want continuous stream
             if not ret:
                 break
-            elapsed = time.time() - start
+            elapsed = _time.time() - start
             if elapsed - last >= interval:
-                # Resize to fit Cosmos pixel budget across multiple frames
-                # 10 frames × ~25k pixels each = ~250k total ≈ safe
-                frame = cv2.resize(frame, (320, 240))
-                _, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+                frame = _cv2.resize(frame, (320, 240))  # small per-frame for multi-frame Cosmos
+                _, buf = _cv2.imencode(".jpg", frame, [_cv2.IMWRITE_JPEG_QUALITY, 80])
                 frames.append(base64.b64encode(buf).decode("utf-8"))
                 last = elapsed
 
-        cap.release()
         log.info(f"📹 Captured {len(frames)} frames over {duration}s")
         return frames
     except Exception as e:
         log.error(f"Video capture error: {e}")
+        _caps.pop(device, None)
         return []
 
 
 def capture_frame_raw(device: int = CAMERA_WEBCAM):
-    """Capture raw RGB frame for Gradio display (640x480)."""
+    """Capture raw RGB frame for Gradio display — low latency via persistent cap."""
     try:
-        import cv2
-        cap = cv2.VideoCapture(device)
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH,  640)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        ret, frame = cap.read()
-        cap.release()
+        cap = _open_cap(device)
+        ret, frame = _flush_and_read(cap)
         if not ret:
+            _caps.pop(device, None)
             return None
-        # Rotate cam2 (webcam) 90 degrees clockwise to fix sideways mount
         if device == CAMERA_WEBCAM:
-            frame = cv2.rotate(frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        return cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frame = _cv2.rotate(frame, _cv2.ROTATE_90_COUNTERCLOCKWISE)
+        return _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
     except Exception:
+        _caps.pop(device, None)
         return None
 
 

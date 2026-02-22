@@ -1,5 +1,5 @@
 """
-E.R.I.C. — ROS2 Nav2 Integration
+ERIC — ROS2 Nav2 Integration
 Sends navigation goals to Nav2 stack.
 Falls back gracefully if ROS2 not running.
 

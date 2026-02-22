@@ -1,6 +1,6 @@
 """
-E.R.I.C. — Edge Robotics Innovation by Cosmos
-===============================================
+ERIC — Edge Robotics Innovation by Cosmos
+================================================
 NVIDIA Cosmos Cookoff 2026
 
 Stack:

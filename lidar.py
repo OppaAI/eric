@@ -1,5 +1,5 @@
 """
-E.R.I.C. — LiDAR Safety Monitor
+ERIC — LiDAR Safety Monitor
 Waveshare UGV Beast D500 LiDAR via ROS2 LaserScan topic.
 Runs as independent safety layer — stops Eric if obstacle too close,
 regardless of what Cosmos is doing.
