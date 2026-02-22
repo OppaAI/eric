@@ -24,7 +24,7 @@ Eric navigates a Star Wars Lego scene autonomously — scanning with dual camera
 | Camera 2 | Pan-tilt wide-angle (navigation + overview) |
 | TTS | Piper danny-low (CPU, zero VRAM) |
 | Total | ~$750 CAD |
-| Location | Kelowna BC, Canada |
+| Location | Vancouver BC, Canada |
 
 ## Stack
 
@@ -202,6 +202,6 @@ uv add gradio pyyaml pyserial requests python-dotenv \
 
 ## Built by
 
-Solo developer — Kelowna BC, Canada
+Solo developer — Vancouver BC, Canada
 Built for the NVIDIA Cosmos Cookoff 2026
 https://github.com/OppaAi/eric

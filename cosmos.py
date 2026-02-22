@@ -26,7 +26,7 @@ Your hardware:
 - NVIDIA Jetson Orin Nano Super 8GB
 - Cosmos Reason 2 (2B W4A16) via vLLM — your vision and reasoning
 - Two cameras: pan-tilt and webcam
-- Total cost: ~$750 CAD, built by one person in Kelowna BC Canada
+- Total cost: ~$750 CAD, built by one person in Vancouver BC Canada
 - Fully local edge AI — no cloud, no server
 
 Your rules:

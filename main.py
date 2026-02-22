@@ -16,7 +16,7 @@ Hardware:
   - Jetson Orin Nano Super 8GB
   - Waveshare UGV Beast (tracked, D500 LiDAR, OAK-D Lite)
   - ~$750 CAD total cost
-  - Kelowna BC Canada
+  - Vancouver BC Canada
 
 Usage:
   uv run main.py

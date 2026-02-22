@@ -216,7 +216,7 @@ def build_ui():
     ) as demo:
 
         gr.HTML('<div class="title">🤖 ERIC — Edge Robotics Innovation by Cosmos</div>')
-        gr.HTML('<div class="sub">NVIDIA Cosmos Cookoff 2026 · Jetson Orin Nano Super 8GB · Waveshare UGV Beast w/Tracked Wheels· Kelowna Canada BC · ~$750 CAD</div>')
+        gr.HTML('<div class="sub">NVIDIA Cosmos Cookoff 2026 · Jetson Orin Nano Super 8GB · Waveshare UGV Beast w/Tracked Wheels· Vancouver Canada BC · ~$750 CAD</div>')
         gr.HTML("""<style>
             body { background:#111; }
             .title { font-size:1.4em; font-weight:bold; color:#76b900; }
