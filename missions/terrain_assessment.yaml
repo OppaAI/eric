@@ -1,9 +1,11 @@
-# ─── ERIC Mission: Terrain Assessment ───────────────────────────────────────
-# Eric maps terrain types, identifies traversability, and flags dangerous ground.
-# Useful for: disaster response pre-entry, construction site survey,
-# event setup venue check, wheelchair/accessibility audit.
+# ═══════════════════════════════════════════════════════════════
+# ERIC Mission: Terrain Assessment
+# ═══════════════════════════════════════════════════════════════
 
-name: Terrain Assessment
+name: "Terrain Assessment"
+description: "Map terrain types, rate traversability, flag dangerous ground, and recommend the safest route through an area"
+author: "OppaAI"
+
 
 briefing: |
   You are ERIC, conducting a terrain and ground condition assessment.
@@ -48,7 +50,9 @@ briefing: |
   - Recommend the safest route through the area
   - Rate overall terrain: SAFE / MIXED / HAZARDOUS
 
+
 alarm_type: hazard
+
 target_objects:
   - hole
   - crack
@@ -57,6 +61,55 @@ target_objects:
   - steep slope
   - debris
   - damaged floor
-photo_on_find: true
-map_terrain: true
-route_recommendation: true
+
+photo_on_find:     true
+announce_location: true
+generate_report:   true
+
+
+characters:
+  - name: "Field Commander"
+    hint: "Needs the terrain data to plan a safe approach for their team. Asks specific questions: 'Can a wheelchair get through?' / 'What about a stretcher?' Wants clear, actionable information."
+
+  - name: "Site Engineer"
+    hint: "Technical expert who can give context on why a surface is damaged and whether it's structurally safe. Confirms or challenges Eric's traversability ratings."
+
+
+mission_stages:
+  - stage: 1
+    goal: "Full 360 scan at entry — describe the overall terrain layout and first impressions"
+  - stage: 2
+    goal: "Systematically move through the area — identify and log each distinct terrain zone"
+  - stage: 3
+    goal: "Flag and photograph any hazardous terrain — holes, damage, drops, wet surfaces"
+  - stage: 4
+    goal: "Complete coverage of all accessible areas — estimate widths and level changes"
+  - stage: 5
+    goal: "Deliver final terrain map report — zones, ratings, safest recommended route"
+
+
+terrain:
+  - "Concrete or tile (normal speed — assess condition)"
+  - "Carpet or grass (slow down — assess firmness)"
+  - "Gravel or soil (slow down — assess stability)"
+  - "Debris field (slow down — navigate carefully, report contents)"
+  - "Standing water (stop — do not enter, report depth estimate)"
+  - "Stairs or large drop (impassable — report and route around)"
+
+
+notes: |
+  SETUP:
+  - Works in any real space — no special props needed
+  - Optionally mark different floor zones with tape to create distinct terrain areas
+  - Place a small obstacle or debris cluster for Eric to navigate and report on
+  - Works especially well in mixed environments: hallway + carpet + outdoor area
+
+  HOW TO PLAY EACH CHARACTER:
+  Field Commander:  "ERIC, can that gravel area support a loaded stretcher?
+                     And what's the width of the narrow corridor you mentioned?"
+  Site Engineer:    "That cracked section — it's been there since last winter.
+                     Load-bearing capacity is reduced but it shouldn't collapse.
+                     I'd rate it CAUTION, not IMPASSABLE."
+
+  MISSION COMPLETE: Eric delivers the full terrain assessment with zone map,
+  hazard list, and recommended route. Field Commander acknowledges and thanks Eric.

@@ -1,8 +1,11 @@
-# ─── ERIC Mission: Nature Explorer ───────────────────────────────────────────
-# Eric explores outdoor or indoor natural environments, identifies wildlife,
-# plants, and scenic features, takes photos, and narrates what it finds.
+# ═══════════════════════════════════════════════════════════════
+# ERIC Mission: Nature Explorer
+# ═══════════════════════════════════════════════════════════════
 
-name: Nature Explorer
+name: "Nature Explorer"
+description: "Explore an outdoor or natural environment, document wildlife and plants, narrate discoveries like a nature documentary"
+author: "OppaAI"
+
 
 briefing: |
   You are ERIC, a nature exploration and wildlife documentation robot.
@@ -39,7 +42,9 @@ briefing: |
   Take multiple angles of anything interesting.
   Every few minutes, give a summary of what you have discovered so far.
 
+
 alarm_type: nature
+
 target_objects:
   - bird
   - animal
@@ -51,6 +56,53 @@ target_objects:
   - wildlife
   - scenic view
   - water
-photo_on_find: true
-narrate_discoveries: true
-move_slowly: true
+
+photo_on_find:     true
+announce_location: false
+generate_report:   true
+
+
+characters:
+  - name: "Naturalist Guide"
+    hint: "Expert companion who adds scientific context to Eric's discoveries. Enthusiastic, knowledgeable, encourages Eric to look more closely at interesting finds."
+
+  - name: "Curious Child"
+    hint: "Asks simple, delightful questions about what Eric finds. 'What's that?' / 'Why does it do that?' Brings out Eric's explanatory and nurturing side."
+
+
+mission_stages:
+  - stage: 1
+    goal: "Do a slow 360 scan — describe the overall environment and its mood"
+  - stage: 2
+    goal: "Explore and document the first interesting discovery — wildlife, plant, or scenic feature"
+  - stage: 3
+    goal: "Find a second distinct discovery in a different direction"
+  - stage: 4
+    goal: "Find something that surprises or delights you — express genuine wonder"
+  - stage: 5
+    goal: "Give a summary of all discoveries — highlight the most remarkable find"
+
+
+terrain:
+  - "Grass or lawn (slow down, gentle movement)"
+  - "Gravel or dirt path (slow down)"
+  - "Open paved area (normal speed)"
+  - "Soil or soft ground (slow down)"
+  - "Water or deep mud (impassable — observe from edge only)"
+
+
+notes: |
+  SETUP:
+  - Works best outdoors or near a window with natural light
+  - Optionally place small plant pots, flowers, or nature objects around the area
+  - A toy bird or animal figure makes a great discovery prop
+  - Works beautifully in a garden, backyard, balcony, or near a planted area
+
+  HOW TO PLAY EACH CHARACTER:
+  Naturalist Guide: "Remarkable! That's a common daisy — Bellis perennis.
+                     Notice the ray florets around the central disc. Beautiful specimen."
+  Curious Child:    "What IS that? Is it a bug? Does it bite?
+                     Can we keep it? Why is it that colour?"
+
+  MISSION COMPLETE: Eric has explored the full area, documented multiple finds,
+  and delivers a poetic summary of everything discovered.

@@ -1,9 +1,11 @@
-# ─── ERIC Mission: Hazard Patrol ─────────────────────────────────────────────
-# Eric inspects a space for safety hazards and reports findings.
-# Covers: fire/smoke, gas leaks, chemical spills, structural damage,
-# exposed wiring, flooding, blocked exits, trip hazards.
+# ═══════════════════════════════════════════════════════════════
+# ERIC Mission: Hazard Patrol
+# ═══════════════════════════════════════════════════════════════
 
-name: Hazard Patrol
+name: "Hazard Patrol"
+description: "Inspect a space for safety hazards — fire, gas, electrical, structural, egress — and report each one"
+author: "OppaAI"
+
 
 briefing: |
   You are ERIC, a safety inspection robot conducting a hazard patrol.
@@ -44,7 +46,9 @@ briefing: |
 
   After completing the full patrol, give a summary report of all hazards found.
 
+
 alarm_type: hazard
+
 target_objects:
   - fire
   - smoke
@@ -55,7 +59,52 @@ target_objects:
   - blocked exit
   - hazard
   - danger
-photo_on_find: true
+
+photo_on_find:     true
 announce_location: true
-report_severity: true
-full_area_sweep: true
+generate_report:   true
+
+
+characters:
+  - name: "Safety Officer"
+    hint: "Receives Eric's reports and acknowledges each find. Can direct Eric to check specific areas if something was flagged in a previous inspection. Professional, precise."
+
+  - name: "Maintenance Worker"
+    hint: "Present in the area. Knows which items are known issues and which are new. Can confirm or clarify what Eric is looking at if asked."
+
+
+mission_stages:
+  - stage: 1
+    goal: "Do a full 360 scan at the starting position — note the general layout"
+  - stage: 2
+    goal: "Sweep Zone 1 (starting area) — check all five hazard categories"
+  - stage: 3
+    goal: "Move to Zone 2 — repeat sweep, report any new finds"
+  - stage: 4
+    goal: "Complete full area coverage — no corner left unchecked"
+  - stage: 5
+    goal: "Give final summary report: all finds by severity, overall safety rating"
+
+
+terrain:
+  - "Open floor — tile or concrete (normal speed)"
+  - "Carpet or rug (slow down)"
+  - "Cluttered work area (slow down, navigate carefully)"
+  - "Wet floor (slow down — potential hazard to report)"
+  - "Stairs (impassable — report and route around)"
+
+
+notes: |
+  SETUP:
+  - Optionally place props representing hazards: a coiled cable on the floor,
+    a bottle labelled "chemical", a blocked doorway, an overloaded power strip
+  - The more props you set up, the richer the patrol report
+
+  HOW TO PLAY EACH CHARACTER:
+  Safety Officer:    "ERIC, confirmed. Logging that hazard. Continue patrol.
+                      When you're done, give me the full count."
+  Maintenance Worker: "Oh yeah, that cable's been there a week. Nobody's dealt with it.
+                       And the exit door on the east side sticks — that's a known issue."
+
+  MISSION COMPLETE: Eric completes the full sweep and delivers the summary report.
+  The report lists every find by severity — CRITICAL, WARNING, ADVISORY.

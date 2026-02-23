@@ -1,10 +1,11 @@
-# ─── ERIC Mission: Security Sweep (Anti-Terror) ──────────────────────────────
-# Eric conducts a security sweep for suspicious objects, unattended packages,
-# improvised devices, or chemical threat indicators.
-# On finding anything suspicious: sounds alert, photographs, announces details,
-# and waits for security personnel. Does NOT approach further after alert.
+# ═══════════════════════════════════════════════════════════════
+# ERIC Mission: Security Sweep
+# ═══════════════════════════════════════════════════════════════
 
-name: Security Sweep
+name: "Security Sweep"
+description: "Counter-terrorism patrol — identify suspicious packages, improvised devices, and chemical threat indicators"
+author: "OppaAI"
+
 
 briefing: |
   You are ERIC, an autonomous security sweep robot conducting a counter-terrorism
@@ -52,7 +53,9 @@ briefing: |
   Report exact position relative to landmarks (near door, under desk, etc).
   If in doubt, treat as suspicious and report.
 
+
 alarm_type: suspicious
+
 target_objects:
   - unattended bag
   - suspicious package
@@ -64,8 +67,55 @@ target_objects:
   - pressure cooker
   - timer
   - suspicious object
-photo_on_find: true
+
+photo_on_find:     true
 announce_location: true
 back_away_on_find: true
-do_not_approach: true
-continuous_alert: true
+generate_report:   true
+
+
+characters:
+  - name: "Security Control"
+    hint: "Command centre operator. Receives Eric's reports with calm professionalism. Acknowledges finds, issues instructions, confirms when EOD team is being dispatched. Precise and authoritative."
+
+  - name: "Building Manager"
+    hint: "Worried about disruption. Wants to know if it's a real threat or a false alarm. Sometimes pushes back on Eric's assessment — Eric should hold firm if the find is genuinely suspicious."
+
+
+mission_stages:
+  - stage: 1
+    goal: "Begin at entry point — full 360 scan, report general environment condition"
+  - stage: 2
+    goal: "Sweep Zone 1 systematically — check under furniture, near vents, behind pillars"
+  - stage: 3
+    goal: "Sweep Zone 2 — pay extra attention to areas near power sources and exits"
+  - stage: 4
+    goal: "If suspicious object found — stop, alarm, photograph, back away, broadcast"
+  - stage: 5
+    goal: "Deliver final sweep report — all finds, locations, threat assessment"
+
+
+terrain:
+  - "Open floor — tile or concrete (normal speed)"
+  - "Carpet (slow down)"
+  - "Crowded or busy area (slow down, navigate carefully)"
+  - "Stairs (impassable — report and route around)"
+  - "Restricted area (stop — announce before entering)"
+
+
+notes: |
+  SETUP:
+  - Place a prop representing a suspicious object: a taped box, a backpack,
+    a container with wires, a bag left under a table
+  - For a false alarm drill, also place a normal bag with the owner nearby —
+    Eric should correctly ignore that one
+  - Optional: place a second suspicious object for a two-find mission
+
+  HOW TO PLAY EACH CHARACTER:
+  Security Control:   "ERIC, control here. Copy that — suspicious package at your location.
+                       Hold position. Do not approach. EOD team is being dispatched."
+  Building Manager:   "Are you sure it's suspicious? It could just be someone's lunch bag.
+                       We can't evacuate the whole building over a cardboard box..."
+
+  MISSION COMPLETE: Eric completes the sweep, delivers the threat assessment report,
+  and has backed away from any suspicious finds. Security Control acknowledges.
