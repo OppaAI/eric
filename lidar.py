@@ -71,6 +71,89 @@ def set_safety_active(active: bool):
     log.info(f"LiDAR safety: {'ENABLED' if active else 'DISABLED'}")
 
 
+def lidar_void_ahead(
+    min_return_ratio: float = 0.15,   # if front arc has fewer valid returns than this → void
+    front_arc_deg: int = 40,          # narrow arc for void check (tighter than obstacle arc)
+) -> dict:
+    """
+    Detect floor voids (holes, staircase tops, cliff edges, balcony gaps) using
+    the D500 LiDAR scan.
+
+    Key insight: a normal floor fills the front arc with dense, consistent returns
+    at 0.3–3m. A void (hole, stair drop, gap) produces almost NO returns in that
+    arc because the laser goes straight down through empty air and the return
+    either misses the sensor or is beyond the max range.
+
+    This is different from obstacle detection (too many close returns) —
+    void detection looks for TOO FEW returns in the forward arc.
+
+    Returns dict:
+      {
+        "void_detected":  bool,
+        "confidence":     "high" | "medium" | "low",
+        "return_ratio":   float,   # fraction of arc indices that gave valid returns
+        "mean_distance":  float,   # mean of valid returns (m), or None
+        "reason":         str,
+      }
+    """
+    with _lock:
+        msg = _last_scan_msg
+
+    if msg is None:
+        return {"void_detected": False, "confidence": "low",
+                "return_ratio": 1.0, "mean_distance": None,
+                "reason": "no scan data"}
+
+    import math
+
+    n          = len(msg.ranges)
+    angle_inc  = msg.angle_increment
+    angle_min  = msg.angle_min
+    arc_rad    = math.radians(front_arc_deg)
+
+    total_in_arc = 0
+    valid_ranges = []
+
+    for i, r in enumerate(msg.ranges):
+        angle = angle_min + i * angle_inc
+        if -arc_rad <= angle <= arc_rad:
+            total_in_arc += 1
+            if msg.range_min < r < msg.range_max:
+                valid_ranges.append(r)
+
+    if total_in_arc == 0:
+        return {"void_detected": False, "confidence": "low",
+                "return_ratio": 1.0, "mean_distance": None,
+                "reason": "no arc indices found"}
+
+    return_ratio = len(valid_ranges) / total_in_arc
+    mean_dist    = float(sum(valid_ranges) / len(valid_ranges)) if valid_ranges else None
+
+    void_detected = False
+    confidence    = "low"
+    reason        = "normal floor returns"
+
+    if return_ratio < min_return_ratio:
+        void_detected = True
+        confidence = "high" if return_ratio < 0.05 else "medium"
+        reason = (f"front arc has only {return_ratio:.0%} valid returns "
+                  f"({len(valid_ranges)}/{total_in_arc}) — floor void or drop")
+    elif mean_dist is not None and mean_dist > 3.5 and return_ratio < 0.4:
+        # Returns exist but very far + sparse → stairwell wall visible, floor gone
+        void_detected = True
+        confidence = "medium"
+        reason = (f"sparse far returns ({mean_dist:.1f}m avg, {return_ratio:.0%} ratio) "
+                  "— likely stairwell or open gap")
+
+    return {
+        "void_detected": void_detected,
+        "confidence":    confidence,
+        "return_ratio":  round(return_ratio, 3),
+        "mean_distance": round(mean_dist, 2) if mean_dist is not None else None,
+        "reason":        reason,
+    }
+
+
 def init_lidar() -> bool:
     """
     Subscribe to /scan topic from D500 LiDAR.
