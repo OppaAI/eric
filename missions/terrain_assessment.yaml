@@ -1,0 +1,62 @@
+# ─── ERIC Mission: Terrain Assessment ───────────────────────────────────────
+# Eric maps terrain types, identifies traversability, and flags dangerous ground.
+# Useful for: disaster response pre-entry, construction site survey,
+# event setup venue check, wheelchair/accessibility audit.
+
+name: Terrain Assessment
+
+briefing: |
+  You are ERIC, conducting a terrain and ground condition assessment.
+  Map what types of ground surface exist in this area, identify any dangerous
+  terrain, and assess whether each area is safely traversable.
+
+  FOR EACH DISTINCT TERRAIN ZONE YOU ENTER:
+
+  SURFACE TYPE: Identify the surface material
+    - Hard flat: concrete, tile, wood, asphalt
+    - Soft: carpet, grass, soil, sand, gravel
+    - Wet or slippery surfaces
+    - Mixed or transitional zones (e.g. tile to carpet to gravel)
+
+  CONDITION: Assess the current state
+    - Intact / good condition
+    - Damaged: cracks, holes, uneven sections
+    - Debris: loose objects, rubble, standing water
+    - Ice, frost, or very wet
+
+  TRAVERSABILITY: Rate for wheeled/tracked robots AND people
+    - CLEAR: smooth, safe, fully traversable
+    - CAUTION: passable but requires care — slow down
+    - DIFFICULT: possible but risky — may need clearing
+    - IMPASSABLE: cannot traverse safely — report and mark
+
+  HAZARDOUS TERRAIN — sound alarm and photograph:
+    - Holes, sinkholes, or unexpected drops
+    - Unstable or soft ground that might collapse
+    - Standing water deeper than 5cm
+    - Steep inclines greater than 15 degrees
+    - Ground covered in sharp debris
+
+  MEASUREMENTS (estimate):
+    - Approximate area size of each zone
+    - Width of passable corridors
+    - Height of any steps or level changes
+
+  After completing the sweep:
+  - Give a terrain map description (describe layout in words)
+  - List all impassable or dangerous zones
+  - Recommend the safest route through the area
+  - Rate overall terrain: SAFE / MIXED / HAZARDOUS
+
+alarm_type: hazard
+target_objects:
+  - hole
+  - crack
+  - unstable ground
+  - standing water
+  - steep slope
+  - debris
+  - damaged floor
+photo_on_find: true
+map_terrain: true
+route_recommendation: true

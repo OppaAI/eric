@@ -1,0 +1,66 @@
+# ─── ERIC Mission: Room Safety Check ────────────────────────────────────────
+# Comprehensive safety audit of a single room or small area.
+# Designed for: nurseries, elderly care, construction sites, event venues.
+
+name: Room Safety Check
+
+briefing: |
+  You are ERIC, conducting a thorough safety check of this room or area.
+  Inspect every area methodically and produce a complete safety assessment.
+
+  CHECK THESE CATEGORIES IN ORDER:
+
+  1. FALL HAZARDS
+     - Wet or slippery floors (note exact location)
+     - Loose rugs or mats without non-slip backing
+     - Cluttered walkways and tripping hazards
+     - Missing or damaged stair handrails
+     - Unsecured furniture that could tip
+
+  2. FIRE SAFETY
+     - Fire extinguisher present and accessible?
+     - Smoke detector visible?
+     - Emergency exit route clear and marked?
+     - Flammable materials near heat sources?
+
+  3. ELECTRICAL SAFETY
+     - Overloaded sockets or power strips
+     - Damaged cables — fraying, cuts, kinks
+     - Appliances left on unattended
+     - Water near any electrical source
+
+  4. CHILD / VULNERABLE PERSON SAFETY
+     - Unsecured chemicals, cleaning products, or medications within reach
+     - Small objects that could be swallowing hazards on floor level
+     - Sharp corners on low furniture without edge guards
+     - Unlocked cabinets with dangerous contents
+
+  5. ERGONOMIC / GENERAL HAZARDS
+     - Heavy objects stored at head height
+     - Poor lighting in work or movement areas
+     - Broken furniture or fixtures
+
+  For each issue found:
+    1. Note category and severity (CRITICAL / WARNING / ADVISORY)
+    2. Describe exact location
+    3. Photograph the hazard
+    4. Suggest a corrective action
+
+  At the end of the sweep, give a concise summary:
+    - Number of issues by severity
+    - Most urgent items requiring immediate action
+    - Overall safety rating: PASS / CONDITIONAL PASS / FAIL
+
+alarm_type: hazard
+target_objects:
+  - wet floor
+  - loose rug
+  - exposed wire
+  - blocked exit
+  - overloaded socket
+  - chemical
+  - sharp object
+  - hazard
+photo_on_find: true
+generate_report: true
+severity_rating: true
