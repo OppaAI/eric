@@ -72,7 +72,6 @@ def get_mission_briefing() -> str:
 import cv2 as _cv2
 import time as _time
 import threading as _threading
-import queue as _queue
 
 # ── Persistent background camera readers ─────────────────────────────────────
 # The root cause of V4L2 select() timeouts on Jetson is that when Python is
@@ -82,23 +81,37 @@ import queue as _queue
 # latest frame in a 1-slot queue. capture_frame() just grabs from the queue.
 
 class _CameraReader:
-    """Background thread that continuously reads from a V4L2 camera."""
+    """
+    Background thread that continuously reads from a V4L2 camera.
+
+    Design: _run() calls cap.read() in a tight loop with NO blocking on the
+    consumer side. The latest frame is stored in self._latest (protected by a
+    lock) and a threading.Event is set each time a new frame arrives.
+    get_frame() just waits on the event — it never touches cap.read() and
+    never interferes with the reader loop.
+
+    This guarantees the kernel V4L2 buffer is drained as fast as possible,
+    preventing the select() timeout stalls that occur when the buffer fills up
+    during long Cosmos inference calls.
+    """
 
     RECONNECT_DELAY = 2.0   # seconds to wait before reconnecting after failure
-    READ_TIMEOUT    = 3.0   # seconds capture_frame() waits for a frame
+    READ_TIMEOUT    = 3.0   # seconds get_frame() waits for a fresh frame
 
     def __init__(self, device: int, width: int = 640, height: int = 480):
-        self.device = device
-        self.width  = width
-        self.height = height
-        self._frame_q: _queue.Queue = _queue.Queue(maxsize=1)
+        self.device   = device
+        self.width    = width
+        self.height   = height
+        self._latest  = None               # most recent frame (numpy array)
+        self._lock    = _threading.Lock()  # protects _latest
+        self._event   = _threading.Event() # set whenever a new frame is stored
         self._stop    = _threading.Event()
         self._thread  = _threading.Thread(target=self._run, daemon=True, name=f"cam-{device}")
         self._thread.start()
 
     def _open(self):
-        """Open camera with low-latency settings. Try GStreamer first."""
-        # GStreamer path
+        """Open camera with low-latency settings. Try GStreamer first, then V4L2."""
+        # ── GStreamer path ────────────────────────────────────────────────────
         try:
             pipeline = (
                 f"v4l2src device=/dev/video{self.device} io-mode=2 ! "
@@ -117,19 +130,53 @@ class _CameraReader:
         except Exception:
             pass
 
-        # V4L2 fallback
-        cap = _cv2.VideoCapture(self.device, _cv2.CAP_V4L2)
-        cap.set(_cv2.CAP_PROP_FOURCC,      _cv2.VideoWriter_fourcc(*"MJPG"))
-        cap.set(_cv2.CAP_PROP_FRAME_WIDTH,  self.width)
-        cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        cap.set(_cv2.CAP_PROP_FPS,          30)
-        cap.set(_cv2.CAP_PROP_BUFFERSIZE,   1)
-        log.info(f"📷 Camera {self.device}: V4L2 reader started")
-        return cap
+        # ── V4L2 path — try MJPG, fall back to YUYV ──────────────────────────
+        # Set BUFFERSIZE=2 during open so the kernel has room to negotiate
+        # format before we starve it. Reduce to 1 after warm-up.
+        for fourcc_str in ("MJPG", "YUYV"):
+            cap = _cv2.VideoCapture(self.device, _cv2.CAP_V4L2)
+            if not cap.isOpened():
+                log.warning(f"Camera {self.device}: V4L2 open failed")
+                cap.release()
+                continue
+
+            cap.set(_cv2.CAP_PROP_FOURCC,      _cv2.VideoWriter_fourcc(*fourcc_str))
+            cap.set(_cv2.CAP_PROP_FRAME_WIDTH,  self.width)
+            cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            cap.set(_cv2.CAP_PROP_FPS,          30)
+            cap.set(_cv2.CAP_PROP_BUFFERSIZE,   2)   # warm-up buffer
+
+            # Drain a few frames to let the kernel settle before going low-latency
+            ok = False
+            for _ in range(5):
+                ret, _ = cap.read()
+                if ret:
+                    ok = True
+                    break
+                _time.sleep(0.05)
+
+            if ok:
+                cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)  # low-latency once warm
+                log.info(f"📷 Camera {self.device}: V4L2 reader started ({fourcc_str})")
+                return cap
+
+            log.warning(f"Camera {self.device}: {fourcc_str} gave no frames — trying next format")
+            cap.release()
+
+        # ── Last resort: autodetect (let OpenCV negotiate everything) ─────────
+        cap = _cv2.VideoCapture(self.device)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                log.info(f"📷 Camera {self.device}: auto-detect reader started")
+                return cap
+            cap.release()
+
+        raise RuntimeError(f"Camera {self.device}: all open strategies failed")
 
     def _run(self):
-        """Main loop: read frames as fast as possible, keep latest in queue."""
-        cap = None
+        """Tight read loop — drains V4L2 buffer as fast as possible."""
+        cap   = None
         fails = 0
         while not self._stop.is_set():
             if cap is None or not cap.isOpened():
@@ -138,6 +185,10 @@ class _CameraReader:
                         cap.release()
                     cap = self._open()
                     fails = 0
+                except RuntimeError as e:
+                    log.error(f"Camera {self.device}: {e} — retrying in {self.RECONNECT_DELAY * 3}s")
+                    _time.sleep(self.RECONNECT_DELAY * 3)
+                    continue
                 except Exception as e:
                     log.error(f"Camera {self.device}: open failed ({e}) — retrying in {self.RECONNECT_DELAY}s")
                     _time.sleep(self.RECONNECT_DELAY)
@@ -149,32 +200,33 @@ class _CameraReader:
                 if fails >= 5:
                     log.warning(f"Camera {self.device}: {fails} consecutive read failures — reconnecting")
                     cap.release()
-                    cap = None
+                    cap   = None
                     fails = 0
                     _time.sleep(self.RECONNECT_DELAY)
                 continue
             fails = 0
 
-            # Drop old frame, put new one (non-blocking)
-            try:
-                self._frame_q.get_nowait()
-            except _queue.Empty:
-                pass
-            try:
-                self._frame_q.put_nowait(frame)
-            except _queue.Full:
-                pass
+            # Store latest frame and signal any waiting get_frame() call.
+            # This never blocks — the consumer never touches cap.read().
+            with self._lock:
+                self._latest = frame
+            self._event.set()   # wake get_frame() if it's waiting
 
         if cap:
             cap.release()
 
     def get_frame(self) -> "_cv2.Mat | None":
-        """Return the latest frame, waiting up to READ_TIMEOUT seconds."""
-        try:
-            return self._frame_q.get(timeout=self.READ_TIMEOUT)
-        except _queue.Empty:
+        """
+        Return the most recent frame, waiting up to READ_TIMEOUT seconds for one.
+        Clears the event so the next call waits for a genuinely new frame.
+        """
+        got = self._event.wait(timeout=self.READ_TIMEOUT)
+        if not got:
             log.warning(f"Camera {self.device}: no frame available after {self.READ_TIMEOUT}s")
             return None
+        self._event.clear()
+        with self._lock:
+            return self._latest
 
     def stop(self):
         self._stop.set()
@@ -186,8 +238,14 @@ _readers: dict[int, _CameraReader] = {}
 
 def _get_reader(device: int) -> _CameraReader:
     if device not in _readers:
-        _readers[device] = _CameraReader(device)
-        _time.sleep(0.5)   # brief settle so first frame is ready
+        reader = _CameraReader(device)
+        _readers[device] = reader
+        # Wait until the background thread delivers its first real frame
+        # (up to 10s — covers the warm-up reads inside _open()).
+        # This prevents the "no frame available" warning on the very first call.
+        ready = reader._event.wait(timeout=10.0)
+        if not ready:
+            log.warning(f"Camera {device}: no frame within 10s of startup — proceeding anyway")
     return _readers[device]
 
 

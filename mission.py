@@ -49,9 +49,11 @@ conversation_history = []
 _empty_scans       = 0
 _avoid_attempts    = 0
 _scans_since_360   = 0
+_target_spotted_count = 0   # consecutive scans that saw the target — resets on miss
 EMPTY_SCAN_LIMIT   = 1   # trigger 360 after just 1 empty scan (was 2)
 SCANS_BEFORE_360   = 2   # periodic 360 every 2 quick scans (was 4)
 MAX_AVOID_ATTEMPTS = 3   # force 360 sooner (was 4)
+TARGET_CONFIRM_NEEDED = 1  # only needs 1 positive scan to approach (Cosmos is inconsistent)
 
 _ui_callbacks = {"eric_says": None, "status": None, "log": None}
 
@@ -225,6 +227,44 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
     result["object"] = _infer_category(result.get("object", "unknown"),
                                         result.get("object_name"))
 
+    # ── Normalize action to canonical set ────────────────────────────────────
+    # Cosmos 2B invents values like "move_forward", "go_forward", "continue" etc.
+    _VALID_ACTIONS = {"forward", "backward", "left", "right", "slow",
+                      "stop", "navigate_around", "turn_left", "turn_right", "turn_back"}
+    raw_action = str(result.get("action", "forward")).lower().strip()
+    if raw_action not in _VALID_ACTIONS:
+        # Map common inventions to canonical values
+        _ACTION_MAP = {
+            "move_forward": "forward", "go_forward": "forward", "continue": "forward",
+            "move": "forward", "proceed": "forward", "advance": "forward",
+            "go": "forward", "drive": "forward", "go_ahead": "forward",
+            "turn": "turn_right", "avoid": "navigate_around", "reverse": "backward",
+            "back_up": "backward", "back": "backward", "halt": "stop", "pause": "stop",
+        }
+        normalized = _ACTION_MAP.get(raw_action)
+        if not normalized:
+            # Fuzzy: if "forward" appears anywhere in the value, use forward
+            normalized = "forward" if "forward" in raw_action else "stop"
+        log.info(f"Normalized action '{raw_action}' → '{normalized}'")
+        result["action"] = normalized
+
+    # ── Consistency fix: if object IS the target, target_visible must be True ──
+    # The 2B model frequently sets object="slipper" but target_visible=false.
+    # Enforce agreement here so the mission code never misses a confirmed sighting.
+    _TARGET_OBJECTS = {"slipper", "shoe", "person", "robot"}
+    if result.get("object") in _TARGET_OBJECTS and not result.get("target_visible"):
+        log.info(f"Auto-correcting target_visible=True (object={result['object']})")
+        result["target_visible"] = True
+
+    # ── Consistency fix: action=stop requires an obstacle reason ─────────────
+    # If Cosmos says stop but there's no wall/obstacle, promote to forward.
+    if (result.get("action") == "stop"
+            and not result.get("wall_ahead")
+            and not result.get("obstacle_close")
+            and not result.get("in_my_path")):
+        log.info("Auto-correcting action: stop→forward (no obstacle present)")
+        result["action"] = "forward"
+
     # Stringify any remaining list/dict in string fields
     for field in ("terrain", "distance", "target_direction",
                   "clearest_direction", "action", "physical_reasoning"):
@@ -291,7 +331,7 @@ def start_mission(briefing):
         return "No mission briefing provided."
 
     conversation_history = []
-    _empty_scans = _avoid_attempts = _scans_since_360 = 0
+    _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
     set_mission_briefing(briefing)
 
     motors.pantilt(0, 5)   # slight downward tilt — see ground objects at normal range
@@ -329,9 +369,9 @@ def stop_mission():
 
 
 def resume_after_interaction():
-    global mission_state, _empty_scans, _avoid_attempts, _scans_since_360
+    global mission_state, _empty_scans, _avoid_attempts, _scans_since_360, _target_spotted_count
     if mission_active:
-        _empty_scans = _avoid_attempts = _scans_since_360 = 0
+        _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
         mission_state = State.SEARCHING
         motors.pantilt(0, 5)   # ground-looking default
         motors.forward(MOTOR_SPEED_SLOW)
@@ -409,21 +449,49 @@ Now analyze the images and output ONLY the JSON object above. No markdown. No ex
 QUICK_SCAN_PROMPT = """
 You are a tracked ground robot. You are completely stopped. These frames are from your pan-tilt and webcam cameras.
 
-OBSTACLE CHECK — lower half of every image:
+STEP 1 — OBSTACLE CHECK (lower half of every image):
 - Anything filling/touching the bottom edge → wall_ahead = true
-- Object within ~60cm ahead → obstacle_close = true AND in_my_path = true
-- When in doubt: obstacle_close = true
+- Object within ~60cm directly ahead → obstacle_close = true AND in_my_path = true
+- When in doubt → obstacle_close = true
 
-MISSION TARGET CHECK:
-- Person, robot, slipper, shoe — even partially visible → target_visible = true
+STEP 2 — MISSION TARGET CHECK:
+- If you set object to "slipper", "shoe", "person", or "robot" → you MUST set target_visible = true
+- Any slipper, shoe, person, or robot visible anywhere in any frame → target_visible = true
+- "far" distance does NOT mean target_visible = false — set it true even if far away
+- target_visible = false ONLY if none of those objects appear anywhere
 
-OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
-"object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
-"object_name" must be a short string or null — NOT a list or dict.
-All other string fields: pick exactly one option from those shown.
+STEP 3 — ACTION:
+- action = "stop" is ONLY valid when wall_ahead=true OR obstacle_close=true
+- If path is clear and no obstacle: action = "forward"
+- If target visible and no obstacle blocking: action = "forward"
+
+CONSISTENCY RULE: If object is "slipper" or "shoe" or "person" or "robot", then target_visible MUST be true. These two fields must agree.
+
+OUTPUT: A single JSON object. Every field is REQUIRED.
+"object": one word from: person, robot, slipper, shoe, obstacle, wall, clear, unknown
+"object_name": short string or null
 Boolean fields: true or false only.
 
-Example output (copy this structure exactly, change values to match what you see):
+Example when target found:
+{
+  "object": "slipper",
+  "object_name": "blue slipper",
+  "terrain": "tiles",
+  "distance": "far",
+  "in_my_path": false,
+  "wall_ahead": false,
+  "obstacle_close": false,
+  "small_obstacle": false,
+  "target_visible": true,
+  "target_direction": "front",
+  "clearest_direction": "front",
+  "action": "forward",
+  "speak": "I can see a slipper ahead!",
+  "physical_reasoning": "Slipper visible in frame — moving toward it.",
+  "mission_complete": false
+}
+
+Example when path is clear:
 {
   "object": "clear",
   "object_name": null,
@@ -434,7 +502,7 @@ Example output (copy this structure exactly, change values to match what you see
   "obstacle_close": false,
   "small_obstacle": false,
   "target_visible": false,
-  "target_direction": "front",
+  "target_direction": "unknown",
   "clearest_direction": "front",
   "action": "forward",
   "speak": null,
@@ -491,8 +559,12 @@ Check ONLY for immediate safety hazards:
 - Small ground obstacle (cables, edges, steps) → small_obstacle = true
 - Person or robot visible anywhere → person_visible = true
 
+ACTION RULE: "action" must be EXACTLY one of these two words: "forward" or "stop"
+- Use "stop" ONLY if wall_ahead=true OR obstacle_close=true
+- Use "forward" in all other cases
+- NEVER use "move_forward", "continue", "go", or any other value
+
 OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
-STRING fields must be a single word from the options listed — NOT a list, NOT a dict, NOT null.
 BOOLEAN fields must be true or false.
 
 Example output (copy this structure exactly, change values to match what you see):
@@ -699,7 +771,7 @@ def _scan_360_smart() -> dict:
                     "target_visible":     True,
                     "target_direction":   "front",
                     "clearest_direction": "front",
-                    "action":             "stop",
+                    "action":             "forward",  # must not be "stop" — _process_scan routes on action
                     "speak":              result.get("speak"),
                     "physical_reasoning": f"Target confirmed at {deg}° tilt={label}",
                     "mission_complete":   False
@@ -748,7 +820,7 @@ def _scan_360_smart() -> dict:
                 "target_visible":     True,
                 "target_direction":   "front",
                 "clearest_direction": "front",
-                "action":             "stop",
+                "action":             "forward",  # must not be "stop"
                 "speak":              result.get("speak"),
                 "physical_reasoning": "Target confirmed on second look",
                 "mission_complete":   False
@@ -957,6 +1029,7 @@ def _approach_target():
 
 def _process_scan(scan, from_360=False):
     global mission_state, _empty_scans, _avoid_attempts, _scans_since_360
+    global _target_spotted_count
 
     obj            = scan.get("object", "unknown")
     obj_name       = scan.get("object_name")
@@ -1011,22 +1084,30 @@ def _process_scan(scan, from_360=False):
     if speak_tx:
         eric_say(speak_tx)
 
-    if target_visible and from_360:
-        _empty_scans = 0
-        _ui("log", f"Target spotted at {target_dir} — approaching!")
-        motors.oled(1, f"Target {target_dir}!")
-        _ui("status", "TARGET SPOTTED")
-        _face_direction(target_dir)
-        _approach_target()
-        return
+    # ── Target persistence: Cosmos often flip-flops target_visible ───────────
+    # One positive sighting is enough — don't require back-to-back confirmation.
+    if target_visible:
+        _target_spotted_count += 1
+    else:
+        # Allow 1 missed scan before giving up — Cosmos is inconsistent on small objects
+        if _target_spotted_count > 0:
+            _target_spotted_count -= 1
+            if _target_spotted_count > 0:
+                log.info("Target_visible=False but keeping target lock (Cosmos flip-flop guard)")
+                target_visible = True   # restore for this cycle
 
-    # Also trigger approach from regular quick scan
-    if target_visible and not from_360:
+    if target_visible:
         _empty_scans = 0
-        _ui("log", "Target spotted during scan — approaching")
+        _target_spotted_count = 0   # reset — _approach_target takes over from here
+        direction = target_dir if target_dir and target_dir not in ("unknown",) else "front"
+        if from_360:
+            _ui("log", f"Target spotted at {direction} — approaching!")
+            motors.oled(1, f"Target {direction}!")
+        else:
+            _ui("log", "Target spotted during scan — approaching")
         _ui("status", "TARGET SPOTTED")
-        if target_dir and target_dir not in ("front", "unknown"):
-            _face_direction(target_dir)
+        if direction != "front":
+            _face_direction(direction)
         _approach_target()
         return
 

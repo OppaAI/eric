@@ -73,12 +73,12 @@ class Motors:
             if left == 0 and right == 0:
                 _motor_state["direction"] = "stopped"
             elif left < 0 and right < 0:
-                _motor_state["direction"] = "forward"
+                _motor_state["direction"] = "forward"   # negative = forward on UGV Beast
             elif left > 0 and right > 0:
                 _motor_state["direction"] = "backward"
-            elif left > 0 and right < 0:
-                _motor_state["direction"] = "left"
             elif left < 0 and right > 0:
+                _motor_state["direction"] = "left"
+            elif left > 0 and right < 0:
                 _motor_state["direction"] = "right"
             else:
                 _motor_state["direction"] = "spinning"
@@ -104,8 +104,8 @@ class Motors:
     # NOTE: negative speed = forward on UGV Beast hardware
     def forward(self, speed=MOTOR_SPEED_NORMAL):  self._send(-speed, -speed)
     def backward(self, speed=MOTOR_SPEED_NORMAL): self._send(speed, speed)
-    def left(self, speed=MOTOR_SPEED_SLOW):       self._send(speed, -speed)
-    def right(self, speed=MOTOR_SPEED_SLOW):      self._send(-speed, speed)
+    def left(self, speed=MOTOR_SPEED_SLOW):       self._send(-speed, speed)   # left track back, right track forward
+    def right(self, speed=MOTOR_SPEED_SLOW):      self._send(speed, -speed)   # right track back, left track forward
     def stop(self):                                self._send(0.0, 0.0)
     def slow(self):                                self.forward(MOTOR_SPEED_SLOW)
     def fast(self):                                self.forward(MOTOR_SPEED_FAST)
