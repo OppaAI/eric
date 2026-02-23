@@ -71,6 +71,7 @@ from logger import (
     log_ai, log_action, log_mission_event,
     start_mission_log, end_mission_log, log_exception
 )
+from alarm import sound_alarm, stop_alarm, AlarmType
 
 log = logging.getLogger("eric.mission")
 
@@ -211,6 +212,15 @@ class MissionStep:
 
 _mission_steps:     list[MissionStep] = []
 _current_step_idx:  int = 0
+
+# ─── Mission Metadata (loaded from YAML) ──────────────────────────────────────
+# Set when a named YAML mission is loaded. Free-text briefings default to
+# no alarm, no special target list, no special flags.
+_mission_alarm_type:    str       = AlarmType.HAZARD   # default for unknown
+_mission_target_objects: list[str] = []                # extra objects to look for
+_mission_flags:          dict      = {}                # YAML flags: photo_on_find, etc.
+_mission_find_count:     int       = 0                 # how many targets found this mission
+_mission_hazard_log:     list[dict] = []               # all found hazards/targets this run
 
 
 def register_ui_callbacks(**cbs):
@@ -913,17 +923,29 @@ def load_mission_file(name):
         return None
 
 
-def get_briefing_from_file(name):
+def get_briefing_from_file(name: str) -> str | None:
     data = load_mission_file(name)
     return data.get("briefing", "").strip() if data else None
 
 
+def get_mission_metadata(name: str) -> dict:
+    """Return full YAML dict for a named mission (for GUI display / start_mission)."""
+    return load_mission_file(name) or {}
+
+
 # ─── Mission Control ──────────────────────────────────────────────────────────
 
-def start_mission(briefing):
+def start_mission(briefing: str, mission_name: str = ""):
+    """
+    Start a mission from a briefing string (and optional YAML mission name).
+    If mission_name is provided, alarm_type and target_objects are loaded from
+    the YAML file. Free-text briefings default to no alarm, generic scan.
+    """
     global mission_active, mission_state, conversation_history
     global _empty_scans, _avoid_attempts, _scans_since_360
     global _mission_steps, _current_step_idx
+    global _mission_alarm_type, _mission_target_objects, _mission_flags
+    global _mission_find_count, _mission_hazard_log
 
     if mission_active:
         return "Mission already active. Disengage first."
@@ -932,6 +954,24 @@ def start_mission(briefing):
 
     conversation_history = []
     _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
+    _mission_find_count  = 0
+    _mission_hazard_log  = []
+
+    # ── Load YAML metadata if mission_name given ──────────────────────────────
+    _mission_alarm_type     = AlarmType.HAZARD
+    _mission_target_objects = []
+    _mission_flags          = {}
+
+    if mission_name:
+        yaml_data = load_mission_file(mission_name)
+        if yaml_data:
+            _mission_alarm_type     = yaml_data.get("alarm_type", AlarmType.HAZARD)
+            _mission_target_objects = yaml_data.get("target_objects", [])
+            _mission_flags          = {k: v for k, v in yaml_data.items()
+                                       if k not in ("briefing", "name", "alarm_type",
+                                                    "target_objects")}
+            log.info(f"Mission YAML loaded: alarm={_mission_alarm_type} "
+                     f"targets={_mission_target_objects} flags={list(_mission_flags)}")
 
     # ── Parse mission into steps ──────────────────────────────────────────────
     _mission_steps    = _parse_mission_steps(briefing)
@@ -1456,7 +1496,8 @@ def _quick_scan() -> dict:
         return dict(_SCAN_FALLBACK)
 
     sensor_ctx = _sensor_context()
-    prompt = sensor_ctx + QUICK_SCAN_PROMPT if sensor_ctx else QUICK_SCAN_PROMPT
+    mission_ov = _get_mission_scan_overlay()
+    prompt = mission_ov + (sensor_ctx + QUICK_SCAN_PROMPT if sensor_ctx else QUICK_SCAN_PROMPT)
 
     try:
         print(f"\n📷 QUICK SCAN — {len(frames)} frames to Cosmos (incl. floor-edge)...")
@@ -1751,7 +1792,8 @@ def _scan_360_pantilt() -> dict:
         return dict(_SCAN_FALLBACK)
 
     sensor_ctx = _sensor_context()
-    prompt_360 = sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT
+    mission_ov = _get_mission_scan_overlay()
+    prompt_360 = mission_ov + (sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT)
 
     try:
         # Use async future so we can do sensor checks while Cosmos is thinking
@@ -1988,13 +2030,195 @@ def _avoid_obstacle_legacy(wall_ahead: bool, small_obstacle: bool) -> bool:
 
 # ─── Mission Complete ─────────────────────────────────────────────────────────
 
+def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
+                           severity: str = "WARNING", frame_b64: str = None):
+    """
+    Fire the mission-specific alarm, log the find, optionally save a photo.
+    Called whenever a hazard/target/suspicious object is confirmed.
+
+    obj_name:      what was found ("unattended bag", "gas canister", "injured person")
+    location_hint: Cosmos physical_reasoning text, used as location description
+    severity:      CRITICAL / WARNING / ADVISORY (hazard patrol) or just context
+    frame_b64:     if provided and YAML photo_on_find=True, saves a timestamped photo
+    """
+    global _mission_find_count, _mission_hazard_log
+
+    _mission_find_count += 1
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+
+    # ── Build spoken announcement ─────────────────────────────────────────────
+    alarm_type = _mission_alarm_type
+
+    if alarm_type == AlarmType.SIREN:
+        msg = (f"EMERGENCY! I have found {obj_name}! "
+               f"Location: {location_hint or 'current position'}. "
+               f"Requesting immediate rescue assistance!")
+    elif alarm_type == AlarmType.SUSPICIOUS:
+        msg = (f"SECURITY ALERT! I have identified a suspicious object: {obj_name}. "
+               f"Location: {location_hint or 'current position'}. "
+               f"Alerting security personnel immediately. Do NOT approach.")
+    elif alarm_type == AlarmType.NATURE:
+        msg = (f"I've discovered something wonderful — {obj_name}! "
+               f"{location_hint or 'Right here in front of me'}. "
+               f"Let me get a closer look!")
+    else:  # HAZARD / default
+        msg = (f"{severity}! I have found a hazard: {obj_name}. "
+               f"Location: {location_hint or 'current position'}. "
+               f"This requires attention.")
+
+    # ── Log the find ──────────────────────────────────────────────────────────
+    entry = {
+        "find_num":  _mission_find_count,
+        "time":      ts,
+        "obj":       obj_name,
+        "severity":  severity,
+        "location":  location_hint,
+        "alarm":     alarm_type,
+    }
+    _mission_hazard_log.append(entry)
+    log_mission_event("target_alarm", f"[{severity}] {obj_name} @ {location_hint}")
+    _ui("log", f"🚨 [{alarm_type.upper()}] #{_mission_find_count}: {obj_name} — {severity}")
+
+    # ── Save photo if configured ──────────────────────────────────────────────
+    if _mission_flags.get("photo_on_find") and frame_b64:
+        import base64 as _b64
+        safe_obj = obj_name.replace(" ", "_")[:20]
+        fname = (pathlib.Path("missions/photos") /
+                 f"{alarm_type}_{_mission_find_count:02d}_{safe_obj}_{ts.replace(':','')}.jpg")
+        fname.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            fname.write_bytes(_b64.b64decode(frame_b64))
+            _ui("log", f"📸 Saved: {fname.name}")
+            log_mission_event("photo_saved", fname.name)
+        except Exception as e:
+            log_exception("alarm_photo_save", e)
+
+    # ── OLED display ──────────────────────────────────────────────────────────
+    motors.oled(0, f"{alarm_type.upper()}!")
+    motors.oled(1, obj_name[:16])
+
+    # ── Sound alarm (non-blocking — TTS + LED + tone run in background) ───────
+    sound_alarm(alarm_type, detail=msg)
+
+    # ── Announce via TTS immediately (alarm.sound_alarm handles this) ─────────
+    _ui("status", f"🚨 {alarm_type.upper()}: {obj_name}")
+
+    # ── Security sweep: back away after alerting ──────────────────────────────
+    if alarm_type == AlarmType.SUSPICIOUS and _mission_flags.get("back_away_on_find"):
+        _ui("log", "Security protocol: backing away from suspicious object")
+        log_action("BACK_AWAY_SUSPICIOUS", obj_name)
+        motors.backward(MOTOR_SPEED_SLOW)
+        time.sleep(3.0)
+        motors.stop()
+        time.sleep(0.5)
+        # Turn 180° to face away
+        motors.right(MOTOR_SPEED_SLOW)
+        time.sleep(TURN_90_SEC * 2.0)
+        motors.stop()
+
+    # ── Search and rescue: stay with target ───────────────────────────────────
+    if alarm_type == AlarmType.SIREN and _mission_flags.get("stay_with_target"):
+        _ui("log", "SAR protocol: staying with casualty — repeating location broadcast")
+        log_action("SAR_STAY", obj_name)
+        # Repeat broadcast every 15s for 60s while rescuers come
+        for i in range(4):
+            time.sleep(15)
+            if not mission_active:
+                break
+            from tts import speak
+            speak(f"Still with casualty: {obj_name}. {location_hint}. "
+                  f"Awaiting rescue team. This is broadcast {i + 2}.")
+
+
+def _mission_report() -> str:
+    """
+    Build a plain-text summary report of everything found this mission.
+    Called at mission end or on request.
+    """
+    if not _mission_hazard_log:
+        return "Mission complete. No hazards or targets were found during this patrol."
+
+    lines = [f"MISSION REPORT — {len(_mission_hazard_log)} finding(s):"]
+    for e in _mission_hazard_log:
+        lines.append(
+            f"  #{e['find_num']:02d} [{e['time']}] [{e['severity']}] "
+            f"{e['obj']} — {e['location'] or 'location unrecorded'}"
+        )
+
+    # Severity summary for hazard/security missions
+    criticals = sum(1 for e in _mission_hazard_log if e["severity"] == "CRITICAL")
+    warnings  = sum(1 for e in _mission_hazard_log if e["severity"] == "WARNING")
+    if criticals or warnings:
+        lines.append(f"\nSUMMARY: {criticals} CRITICAL, {warnings} WARNING items require action.")
+
+    return "\n".join(lines)
+
+
+def _get_mission_scan_overlay() -> str:
+    """
+    Returns mission-specific instructions to prepend to Cosmos scan prompts.
+    This customises what Cosmos looks for based on the active mission type.
+    """
+    if not _mission_target_objects and not _mission_alarm_type:
+        return ""
+
+    alarm = _mission_alarm_type
+    targets = _mission_target_objects
+
+    if alarm == AlarmType.SIREN:
+        target_list = ", ".join(targets) if targets else "injured or unconscious people"
+        return (
+            f"SEARCH AND RESCUE MODE: You are searching for {target_list}.\n"
+            "If you see ANY person who appears injured, unconscious, on the floor, "
+            "or in distress — set target_visible=true, set object='person', "
+            "set severity='CRITICAL', and set speak to an urgent rescue announcement.\n"
+            "Also watch for: smoke, fire, structural collapse, flooding.\n\n"
+        )
+
+    elif alarm == AlarmType.SUSPICIOUS:
+        target_list = ", ".join(targets) if targets else "unattended bags or suspicious objects"
+        return (
+            f"SECURITY SWEEP MODE: You are scanning for {target_list}.\n"
+            "Suspicious objects include: unattended bags, packages with wires, "
+            "unusual canisters or containers, objects with timers or electronics attached.\n"
+            "If you see anything suspicious — set target_visible=true, "
+            "set object='obstacle', set severity='CRITICAL'.\n"
+            "DO NOT move closer. Report exact location and description.\n\n"
+        )
+
+    elif alarm == AlarmType.HAZARD:
+        target_list = ", ".join(targets) if targets else "hazards and dangerous conditions"
+        return (
+            f"HAZARD PATROL MODE: You are scanning for {target_list}.\n"
+            "Classify each hazard: CRITICAL (immediate danger) / WARNING (needs attention) "
+            "/ ADVISORY (monitor).\n"
+            "Look carefully for: wet floors, exposed wires, gas canisters, fire, smoke, "
+            "blocked exits, chemical spills, structural damage.\n"
+            "Set target_visible=true for any hazard found. Report location precisely.\n\n"
+        )
+
+    elif alarm == AlarmType.NATURE:
+        target_list = ", ".join(targets) if targets else "wildlife and interesting plants"
+        return (
+            f"NATURE EXPLORE MODE: You are documenting {target_list}.\n"
+            "Describe everything you see with scientific curiosity and poetic appreciation.\n"
+            "Wildlife: note species, behaviour, colours, movement.\n"
+            "Plants/flowers: describe colours, structure, seasonal state.\n"
+            "Scenic features: lighting, textures, composition.\n"
+            "Set target_visible=true for any wildlife, flower, or interesting scene.\n"
+            "Use vivid descriptive language in the speak field.\n\n"
+        )
+
+    return ""
+
+
 def _handle_mission_complete(obj_name):
     global mission_active, mission_state
     log.info(f"MISSION COMPLETE — {obj_name}")
     log_mission_event("mission_complete", obj_name or "target")
     mission_state = State.COMPLETE
     motors.stop()
-    # Cancel any active Nav2 goal
+    stop_alarm()   # cancel any running alarm pattern
     try:
         from config import USE_NAV2
         if USE_NAV2:
@@ -2015,9 +2239,15 @@ def _handle_mission_complete(obj_name):
     motors.pantilt(0, 5)
     time.sleep(0.5)
 
+    # Build report for patrol/security missions
+    report = _mission_report()
+    if _mission_hazard_log:
+        _ui("log", f"📋 MISSION REPORT:\n{report}")
+
     announcement = ask_cosmos(
         f"You found: {obj_name or 'the target'}. Mission complete. "
-        "Warm triumphant 2-3 sentence announcement.",
+        + (f"You found {len(_mission_hazard_log)} item(s) during the mission. " if _mission_hazard_log else "")
+        + "Warm triumphant 2-3 sentence announcement.",
         max_tokens=120
     )
     eric_say(announcement)
@@ -2315,6 +2545,30 @@ def _process_scan(scan, from_360=False):
         _empty_scans = 0
         _target_spotted_count = 0
         direction = str(target_dir).lower().strip() if target_dir else "front"
+
+        # ── Mission-specific alarm: hazard/rescue/security/nature find ────────
+        # Trigger alarm for special missions when target matches a mission target.
+        # For SAR and security, always alarm on any confirmed target_visible.
+        # For hazard patrol / nature, alarm when it matches target_objects list.
+        _should_alarm = False
+        _alarm_severity = "WARNING"
+        if _mission_alarm_type in (AlarmType.SIREN, AlarmType.SUSPICIOUS):
+            _should_alarm = True
+            _alarm_severity = "CRITICAL"
+        elif _mission_alarm_type in (AlarmType.HAZARD, AlarmType.NATURE):
+            t_lower = str(obj_name or obj).lower()
+            _should_alarm = any(kw.lower() in t_lower
+                                for kw in (_mission_target_objects or [obj]))
+            _alarm_severity = scan.get("severity", "WARNING")
+
+        if _should_alarm:
+            alarm_frame = capture_frame(CAMERA_PANTILT, 640, 480)
+            _trigger_mission_alarm(
+                obj_name or obj,
+                location_hint = reason,
+                severity      = _alarm_severity,
+                frame_b64     = alarm_frame,
+            )
 
         if direction in ("down", "below"):
             _ui("log", "Target is directly below — already arrived!")
