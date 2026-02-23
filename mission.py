@@ -36,7 +36,7 @@ from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR, VLLM_URL,
 from motors import motors
 from cosmos import (
     ask_cosmos, set_mission_briefing,
-    capture_frame,
+    capture_frame, capture_frames_video,
     CAMERA_WEBCAM, CAMERA_PANTILT
 )
 from tts import speak
@@ -667,6 +667,8 @@ Example when target found:
   "action": "forward",
   "speak": "I can see a slipper ahead!",
   "physical_reasoning": "Slipper visible in frame — moving toward it.",
+  "social_intent": "any detected social cues or null",
+  "risk_assessment": "collision or hazard risk description or null"
   "mission_complete": false
 }
 
@@ -918,6 +920,10 @@ TURN_90_SEC      = 2.2   # seconds to turn 90° at MOTOR_SPEED_SLOW — tune if 
 BLUR_THRESHOLD   = 80.0  # Laplacian variance below this = blurry, retry
 MAX_BLUR_RETRIES = 3
 
+# Video scan settings — used during 360° scan positions (Eric is stopped)
+VIDEO_SCAN_DURATION = 3.0   # seconds per position — short enough to keep 360 moving
+VIDEO_SCAN_FPS      = 2.0   # frames/sec → 6 frames per position
+
 
 def _is_blurry(frame_b64: str) -> bool:
     """Return True if frame is too blurry to use (low Laplacian variance)."""
@@ -950,6 +956,73 @@ def _capture_sharp(device: int, retries: int = MAX_BLUR_RETRIES) -> str | None:
         best = f       # keep as fallback
         time.sleep(0.5)
     return best  # return best we got even if still blurry
+
+
+def _video_scan_at_position() -> dict:
+    """
+    Short video clip scan at a single 360° position.
+    Eric is stopped — captures VIDEO_SCAN_DURATION seconds of footage.
+    Cosmos reasons about temporal changes across frames (things getting closer,
+    motion, etc.) which is more informative than a single frame.
+    Falls back to _quick_scan() if video capture fails.
+    """
+    _ui("log", "🎬 Video scan...")
+    motors.lights(0, 0)
+
+    frames = capture_frames_video(CAMERA_PANTILT,
+                                  duration=VIDEO_SCAN_DURATION,
+                                  fps_sample=VIDEO_SCAN_FPS)
+    if not frames:
+        log.warning("Video capture returned no frames — falling back to quick scan")
+        return _quick_scan()
+
+    # Also grab one webcam frame for extra context
+    wc = capture_frame(CAMERA_WEBCAM, 320, 240)
+    if wc:
+        frames.append(wc)
+
+    # LED check on last frame
+    if frames and _is_pitch_black(frames[-1]):
+        motors.lights(base=180, head=255)
+        time.sleep(0.3)
+        frames = capture_frames_video(CAMERA_PANTILT,
+                                      duration=VIDEO_SCAN_DURATION,
+                                      fps_sample=VIDEO_SCAN_FPS) or frames
+        motors.lights(0, 0)
+
+    sensor_ctx = _sensor_context()
+    prompt = sensor_ctx + QUICK_SCAN_PROMPT if sensor_ctx else QUICK_SCAN_PROMPT
+
+    try:
+        print(f"\n🎬 VIDEO SCAN — {len(frames)} frames to Cosmos...")
+        response = _cosmos_frames(frames, prompt, max_tokens=200, temp=0.3)
+        result = _parse_json(response, dict(_SCAN_FALLBACK), label="VIDEO SCAN RESULT")
+
+        # Sensor overrides — same as _quick_scan
+        try:
+            from lidar import obstacle_close as lidar_close
+            if lidar_close():
+                result["wall_ahead"] = True
+                result["obstacle_close"] = True
+                result["action"] = "stop"
+        except Exception:
+            pass
+
+        try:
+            from oakd import get_front_depth, oakd_available
+            if oakd_available():
+                d = get_front_depth()
+                if d is not None and d < 0.30:
+                    result["wall_ahead"] = True
+                    result["obstacle_close"] = True
+                    result["action"] = "stop"
+        except Exception:
+            pass
+
+        return result
+    except Exception as e:
+        log.error(f"Video scan error: {e} — falling back to quick scan")
+        return _quick_scan()
 
 
 def _scan_360_smart() -> dict:
@@ -994,8 +1067,8 @@ def _scan_360_smart() -> dict:
                     motors.lights(0, 0)
                 all_frames.append(f_pt)
 
-            # Quick scan at this position
-            result = _quick_scan()
+            # Video scan at this position — Eric is stopped so no crawl penalty
+            result = _video_scan_at_position()
 
             # ── Target found mid-scan — turn to face it, then stop early ─────
             if result.get("target_visible"):
@@ -1052,7 +1125,7 @@ def _scan_360_smart() -> dict:
             time.sleep(TURN_45_SEC * steps_back)
             motors.stop()
             time.sleep(0.5)
-        result = _quick_scan()
+        result = _video_scan_at_position()
         if result.get("target_visible") or result.get("object") not in ("clear", "unknown"):
             return {
                 "object":             result.get("object", "person"),
@@ -1365,6 +1438,14 @@ def _process_scan(scan, from_360=False):
     if reason:
         log.info(f"Cosmos: {reason}")
         _ui("log", f"Cosmos: {reason}")
+        
+    # ── Social intent + risk assessment (from Egocentric recipe) ─────────
+    social = scan.get("social_intent")
+    risk   = scan.get("risk_assessment")
+    if social:
+        _ui("log", f"👤 Social: {social}")
+    if risk:
+        _ui("log", f"⚠️  Risk: {risk}")
 
     if complete:
         if speak_tx: eric_say(speak_tx)

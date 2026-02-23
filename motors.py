@@ -73,9 +73,9 @@ class Motors:
             if left == 0 and right == 0:
                 _motor_state["direction"] = "stopped"
             elif left > 0 and right > 0:
-                _motor_state["direction"] = "forward"
-            elif left < 0 and right < 0:
                 _motor_state["direction"] = "backward"
+            elif left < 0 and right < 0:
+                _motor_state["direction"] = "forward"
             elif left < 0 and right > 0:
                 _motor_state["direction"] = "left"
             elif left > 0 and right < 0:
