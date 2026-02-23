@@ -27,7 +27,7 @@ from tts import speak, init_tts, piper_available
 from mission import (
     start_mission, stop_mission, resume_after_interaction,
     handle_character_response, register_ui_callbacks,
-    list_missions, get_briefing_from_file,
+    list_missions, get_briefing_from_file, get_mission_metadata,
     mission_active, mission_state, conversation_history
 )
 
@@ -327,9 +327,15 @@ def load_mission_choices():
     return missions if missions else ["(no missions found)"]
 
 
+_selected_mission_name = ""   # tracks which YAML was selected (for start_mission)
+
+
 def on_mission_select(name: str):
+    global _selected_mission_name
     if not name or name == "(no missions found)":
+        _selected_mission_name = ""
         return ""
+    _selected_mission_name = name
     briefing = get_briefing_from_file(name)
     return briefing or ""
 
@@ -358,7 +364,7 @@ def _default_mission_choice():
 def action_engage(briefing: str):
     if not briefing.strip():
         return "⚠ Enter a mission briefing first."
-    resp = start_mission(briefing.strip())
+    resp = start_mission(briefing.strip(), mission_name=_selected_mission_name)
     return resp
 
 
