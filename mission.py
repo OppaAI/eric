@@ -640,12 +640,13 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
         log.info(f"Auto-correcting target_visible=True (object={result['object']})")
         result["target_visible"] = True
 
-    # ── Consistency fix: action=stop requires an obstacle reason ─────────────
+    # ── Consistency fix: action=stop requires an obstacle OR void reason ─────
     if (result.get("action") == "stop"
             and not result.get("wall_ahead")
             and not result.get("obstacle_close")
-            and not result.get("in_my_path")):
-        log.info("Auto-correcting action: stop→forward (no obstacle present)")
+            and not result.get("in_my_path")
+            and not result.get("void_ahead")):
+        log.info("Auto-correcting action: stop→forward (no obstacle or void present)")
         result["action"] = "forward"
 
     # Stringify any remaining list/dict in string fields
@@ -683,26 +684,20 @@ def _sensor_context() -> str:
     Build a short sensor data summary to prepend to every Cosmos prompt.
 
     Pulls live readings from:
-      - D500 LiDAR  (lidar.py) — front arc minimum distance
-      - OAK-D Lite  (oakd.py)  — stereo depth at center-forward
+      - D500 LiDAR  (lidar.py) — front arc min distance + void/return-count check
+      - OAK-D Lite  (oakd.py)  — stereo depth at center-forward + floor-drop check
 
-    Returns a text block like:
-      SENSOR DATA (ground truth — trust this over visual estimates):
-      LiDAR front arc minimum distance: 0.42m
-      OAK-D depth center-forward: 0.38m
-      ⚠️  OAK-D: obstacle within caution range
-
-    This context is prepended to nav-check and scan prompts so Cosmos
-    gets real metric distances. Cosmos can then say "obstacle at 0.4m"
-    rather than guessing "close" from a wide-angle camera image.
+    Void detection is included: if either sensor detects a floor disappearing
+    (too few LiDAR returns, or OAK-D shows floor depth jumping) this context
+    will contain a hard VOID WARNING so Cosmos knows to stop.
 
     Fails silently — if both sensors are unavailable, returns "".
     """
     lines = []
 
-    # ── LiDAR ──────────────────────────────────────────────────────────────
+    # ── LiDAR obstacle + void ──────────────────────────────────────────────
     try:
-        from lidar import get_status as lidar_status, lidar_available
+        from lidar import get_status as lidar_status, lidar_available, lidar_void_ahead
         if lidar_available():
             ls = lidar_status()
             dist = ls.get("min_distance", 999)
@@ -712,12 +707,20 @@ def _sensor_context() -> str:
                 lines.append("⚠️  LIDAR STOP ZONE: obstacle within 0.30m — do NOT move forward")
             elif ls.get("obstacle_near"):
                 lines.append("⚠️  LiDAR caution: obstacle within 0.60m — slow or stop")
+
+            # Void check — sparse returns = floor disappeared
+            void = lidar_void_ahead()
+            if void["void_detected"]:
+                lines.append(
+                    f"🕳️  LIDAR VOID WARNING ({void['confidence']} confidence): "
+                    f"{void['reason']} — STOP, do NOT move forward"
+                )
     except Exception:
         pass
 
-    # ── OAK-D depth ────────────────────────────────────────────────────────
+    # ── OAK-D obstacle + floor-drop ───────────────────────────────────────
     try:
-        from oakd import get_front_depth, oakd_available
+        from oakd import get_front_depth, oakd_available, get_floor_drop
         if oakd_available():
             d = get_front_depth()
             if d is not None:
@@ -726,6 +729,19 @@ def _sensor_context() -> str:
                     lines.append("⚠️  OAK-D: obstacle VERY CLOSE (<0.30m) — stop immediately")
                 elif d < 0.60:
                     lines.append("⚠️  OAK-D: obstacle within caution range (<0.60m) — slow down")
+
+            # Floor-drop check — depth jump at bottom of frame = stairs/cliff
+            drop = get_floor_drop()
+            if drop["void_detected"]:
+                edge = drop["floor_edge_m"]
+                mid  = drop["floor_mid_m"]
+                edge_str = f"{edge:.1f}m" if edge is not None else "none"
+                mid_str  = f"{mid:.1f}m"  if mid  is not None else "none"
+                lines.append(
+                    f"🕳️  OAK-D FLOOR DROP WARNING ({drop['confidence']} confidence): "
+                    f"floor at mid={mid_str} but drops to {edge_str} at edge — "
+                    f"{drop['reason']} — STOP, do NOT move forward"
+                )
     except Exception:
         pass
 
@@ -733,7 +749,7 @@ def _sensor_context() -> str:
         return ""
 
     return (
-        "SENSOR DATA (ground truth — trust this over visual estimates):\n"
+        "SENSOR DATA (ground truth — trust these over visual estimates):\n"
         + "\n".join(lines)
         + "\n\n"
     )
@@ -741,20 +757,82 @@ def _sensor_context() -> str:
 
 # ─── Nav2 / Motor Movement Abstraction ───────────────────────────────────────
 
+def _void_check() -> dict:
+    """
+    Central void/drop safety gate. Checks both OAK-D floor-drop and LiDAR
+    return-sparsity before any forward movement.
+
+    Called by _move_forward() and _nav_check() BEFORE motors run.
+    Does NOT call Cosmos — purely hardware sensor based for instant reaction.
+
+    Returns:
+      {"void": bool, "confidence": str, "reason": str, "source": str}
+    """
+    results = []
+
+    # ── OAK-D floor-drop check ────────────────────────────────────────────
+    try:
+        from oakd import get_floor_drop, oakd_available
+        if oakd_available():
+            drop = get_floor_drop()
+            if drop["void_detected"]:
+                results.append({
+                    "void":       True,
+                    "confidence": drop["confidence"],
+                    "reason":     drop["reason"],
+                    "source":     "OAK-D",
+                })
+    except Exception:
+        pass
+
+    # ── LiDAR void check ─────────────────────────────────────────────────
+    try:
+        from lidar import lidar_void_ahead, lidar_available
+        if lidar_available():
+            void = lidar_void_ahead()
+            if void["void_detected"]:
+                results.append({
+                    "void":       True,
+                    "confidence": void["confidence"],
+                    "reason":     void["reason"],
+                    "source":     "LiDAR",
+                })
+    except Exception:
+        pass
+
+    if not results:
+        return {"void": False, "confidence": "low",
+                "reason": "no void signal", "source": "none"}
+
+    # Any sensor seeing a void = stop. Pick the highest-confidence report.
+    best = max(results, key=lambda r: {"high": 2, "medium": 1, "low": 0}[r["confidence"]])
+    return {
+        "void":       True,
+        "confidence": best["confidence"],
+        "reason":     best["reason"],
+        "source":     best["source"],
+        "sources":    [r["source"] for r in results],
+    }
+
+
 def _move_forward(duration_sec: float = 2.0, distance_m: float = 1.5):
     """
     Move Eric forward using Nav2 if available, else direct motor control.
-
-    Nav2 path:
-      - Compute a goal pose distance_m ahead of current pose in map frame
-      - send_goal() hands off to Nav2's planner — it avoids obstacles on its own
-      - Wait for Nav2 to reach goal or timeout
-
-    Direct path:
-      - motors.forward() for duration_sec, then stop
-
-    This abstraction means mission.py never needs to care which mode is active.
+    ALWAYS runs _void_check() first — will not move if a floor drop is detected.
     """
+    # ── Void gate — never move forward into a hole ────────────────────────
+    void = _void_check()
+    if void["void"]:
+        motors.stop()
+        log.warning(f"🕳️  _move_forward BLOCKED by void ({void['source']}): {void['reason']}")
+        log_action("VOID_BLOCK_MOVE", f"{void['source']}: {void['reason']}")
+        _ui("log", f"🕳️  VOID DETECTED — stopping! ({void['source']}: {void['reason']})")
+        _ui("status", "VOID DETECTED — STOPPED")
+        motors.oled(0, "VOID AHEAD!")
+        motors.oled(1, "STOP")
+        eric_say("I detect a drop or hole ahead. Stopping for safety.")
+        return
+
     from config import USE_NAV2
     if USE_NAV2:
         try:
@@ -952,6 +1030,13 @@ RULES:
 - ONLY set action=forward if path is clear for at least 1.5 meters
 - When unsure: obstacle_close=true, action=stop
 
+VOID / DROP DETECTION — CRITICAL:
+- Floor texture suddenly disappears ahead → void_ahead = true
+- You can see a stair edge, step edge, or ledge in the lower half of the frame → void_ahead = true
+- The floor ends and there is open space or a lower level visible → void_ahead = true
+- If sensor data includes a VOID WARNING → void_ahead = true, action = stop
+- NEVER set action=forward when void_ahead=true
+
 OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
 STRING fields must be a single word from the options listed — NOT a list, NOT a dict, NOT null.
 BOOLEAN fields must be true or false.
@@ -961,6 +1046,7 @@ Example output (copy this structure exactly, change values to match what you see
   "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
+  "void_ahead": false,
   "person_visible": false,
   "action": "forward",
   "physical_reasoning": "Path is clear ahead for at least two meters."
@@ -970,20 +1056,27 @@ Now analyze the frames and output ONLY the JSON object above. No markdown. No ex
 """
 
 SCAN_360_PROMPT = """
-You are a tracked ground robot. These images are from a full 360-degree scan — 4 body positions.
-At each position the camera tilted up (far view) and down (floor view). You are completely stopped.
+You are a tracked ground robot. These images are from a full 360-degree scan — pan-tilt sweep.
+At each position the camera tilted down (floor view) then mid-range. You are completely stopped.
 
-STEP 1 — SAFETY: Look at all floor-level frames. Which direction has the most open space?
-STEP 2 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts. Set target_visible=true if 30%+ confident.
-STEP 3 — SPEAK: If you see the target, set speak to an excited 1-sentence reaction. Otherwise null.
+STEP 1 — VOID/DROP CHECK (HIGHEST PRIORITY — look at ALL floor-level frames):
+- Stair edges, step edges, ledge lips, holes, gaps → void_ahead = true
+- Floor texture ends and open space / lower level is visible → void_ahead = true
+- Floor suddenly much further away or missing → void_ahead = true
+- If sensor data includes VOID WARNING → void_ahead = true
+- NEVER set clearest_direction toward a void
+
+STEP 2 — OBSTACLE SAFETY: Look at all floor-level frames. Which direction has the most open space?
+
+STEP 3 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts. Set target_visible=true if 30%+ confident.
+
+STEP 4 — SPEAK: If you see the target, set speak to an excited 1-sentence reaction. Otherwise null.
 
 OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
 "object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
-"object_name" must be a short string or null — NOT a list or dict.
-All other string fields: pick exactly one option from those shown.
 Boolean fields: true or false only.
 
-Example output (copy this structure exactly, change values to match what you see):
+Example output:
 {
   "object": "clear",
   "object_name": null,
@@ -992,6 +1085,7 @@ Example output (copy this structure exactly, change values to match what you see
   "in_my_path": false,
   "wall_ahead": false,
   "small_obstacle": false,
+  "void_ahead": false,
   "target_visible": false,
   "target_direction": "unknown",
   "clearest_direction": "front",
@@ -1007,47 +1101,50 @@ Now analyze the images and output ONLY the JSON object above. No markdown. No ex
 QUICK_SCAN_PROMPT = """
 You are a tracked ground robot. You are completely stopped. These frames are from your pan-tilt and webcam cameras.
 
-STEP 1 — OBSTACLE CHECK (lower half of every image):
+STEP 1 — VOID / DROP CHECK (CRITICAL — check before anything else):
+Look at the LOWER THIRD of every image for signs of floor disappearing:
+- Stair edges, step lips, ledge edges, trap doors, holes, gaps → void_ahead = true
+- Floor texture abruptly ends and you see open air, lower level, or distant ground → void_ahead = true
+- The ground is clearly lower ahead (you're at a stair top or cliff edge) → void_ahead = true
+- If sensor data above includes a VOID or FLOOR DROP WARNING → void_ahead = true
+When void_ahead = true: action = "stop", wall_ahead = true. NEVER forward into a void.
+
+STEP 2 — OBSTACLE CHECK (lower half of every image):
 - Anything filling/touching the bottom edge → wall_ahead = true
 - Object within ~60cm directly ahead → obstacle_close = true AND in_my_path = true
 - When in doubt → obstacle_close = true
 
-STEP 2 — MISSION TARGET CHECK:
+STEP 3 — MISSION TARGET CHECK:
 - If you set object to "slipper", "shoe", "person", or "robot" → you MUST set target_visible = true
 - Any slipper, shoe, person, or robot visible anywhere in any frame → target_visible = true
-- "far" distance does NOT mean target_visible = false — set it true even if far away
 - target_visible = false ONLY if none of those objects appear anywhere
 
-STEP 3 — ACTION:
-- action = "stop" is ONLY valid when wall_ahead=true OR obstacle_close=true
-- If path is clear and no obstacle: action = "forward"
-- If target visible and no obstacle blocking: action = "forward"
-
-CONSISTENCY RULE: If object is "slipper" or "shoe" or "person" or "robot", then target_visible MUST be true. These two fields must agree.
+STEP 4 — ACTION:
+- action = "stop" is ONLY valid when wall_ahead=true OR obstacle_close=true OR void_ahead=true
+- If path is clear and no obstacle or void: action = "forward"
 
 OUTPUT: A single JSON object. Every field is REQUIRED.
 "object": one word from: person, robot, slipper, shoe, obstacle, wall, clear, unknown
 "object_name": short string or null
 Boolean fields: true or false only.
 
-Example when target found:
+Example when void detected:
 {
-  "object": "slipper",
-  "object_name": "blue slipper",
+  "object": "clear",
+  "object_name": null,
   "terrain": "tiles",
   "distance": "far",
   "in_my_path": false,
-  "wall_ahead": false,
+  "wall_ahead": true,
   "obstacle_close": false,
   "small_obstacle": false,
-  "target_visible": true,
-  "target_direction": "front",
-  "clearest_direction": "front",
-  "action": "forward",
-  "speak": "I can see a slipper ahead!",
-  "physical_reasoning": "Slipper visible in frame — moving toward it.",
-  "social_intent": "any detected social cues or null",
-  "risk_assessment": "collision or hazard risk description or null"
+  "void_ahead": true,
+  "target_visible": false,
+  "target_direction": "unknown",
+  "clearest_direction": "back",
+  "action": "stop",
+  "speak": "I see a staircase edge ahead — stopping for safety.",
+  "physical_reasoning": "Floor ends at a stair edge in lower frame — void detected.",
   "mission_complete": false
 }
 
@@ -1061,6 +1158,7 @@ Example when path is clear:
   "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
+  "void_ahead": false,
   "target_visible": false,
   "target_direction": "unknown",
   "clearest_direction": "front",
@@ -1076,7 +1174,7 @@ Now analyze the frames and output ONLY the JSON object above. No markdown. No ex
 _SCAN_FALLBACK = {
     "object": "unknown", "object_name": None, "terrain": "clear",
     "distance": "far", "in_my_path": False, "wall_ahead": False,
-    "small_obstacle": False, "target_visible": False,
+    "small_obstacle": False, "void_ahead": False, "target_visible": False,
     "target_direction": "unknown", "clearest_direction": "front",
     "action": "stop", "speak": None,   # SAFE default — never forward on failure
     "physical_reasoning": "", "mission_complete": False
@@ -1084,7 +1182,7 @@ _SCAN_FALLBACK = {
 
 _NAV_FALLBACK = {
     "wall_ahead": False, "obstacle_close": False, "small_obstacle": False,
-    "person_visible": False,
+    "void_ahead": False, "person_visible": False,
     "action": "stop", "physical_reasoning": ""  # SAFE default — stop on nav failure
 }
 
@@ -1137,6 +1235,20 @@ def _nav_check() -> dict:
     except Exception:
         pass
 
+    # ── Hardware safety: void/drop check ──────────────────────────────────
+    void = _void_check()
+    if void["void"]:
+        motors.stop()
+        log.warning(f"🕳️  Nav check: void detected ({void['source']}): {void['reason']}")
+        log_action("VOID_BLOCK_NAV", f"{void['source']}: {void['reason']}")
+        _ui("log", f"🕳️  VOID/DROP detected — stopping! ({void['source']})")
+        _ui("status", "VOID DETECTED — STOPPED")
+        motors.oled(0, "VOID AHEAD!")
+        motors.oled(1, "STOP")
+        return {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
+                "action": "stop",
+                "physical_reasoning": f"Void/drop detected by {void['source']}: {void['reason']}"}
+
     frame = capture_frame(CAMERA_PANTILT, 320, 240)
     if not frame:
         return dict(_NAV_FALLBACK)
@@ -1145,33 +1257,40 @@ def _nav_check() -> dict:
 
     NAV_IMAGE_PROMPT = f"""{sensor_ctx}You are a tracked ground robot moving forward. This is a single frame from your forward camera.
 
-Check ONLY for immediate safety hazards:
+Check for immediate safety hazards in this order:
+
+VOID / DROP (HIGHEST PRIORITY — look at lower third of frame):
+- Stair edge, step lip, ledge, hole, gap, or floor texture abruptly ending → void_ahead = true
+- Open air or a lower level visible where the floor should be → void_ahead = true
+- If sensor data above includes a VOID or FLOOR DROP WARNING → void_ahead = true
+- When void_ahead = true: wall_ahead = true, action = stop, NEVER forward
+
+OBSTACLES:
 - Wall or large object filling the lower 40% of frame → wall_ahead = true
 - Any object within ~60cm directly ahead → obstacle_close = true
-- Small ground obstacle (cables, edges, steps) → small_obstacle = true
+- Small ground obstacle (cables, edges) → small_obstacle = true
+
+PEOPLE:
 - Person or robot visible anywhere → person_visible = true
 
-If sensor data above shows obstacle_close or LiDAR STOP ZONE, you MUST set wall_ahead=true and action=stop.
+If sensor data above shows LIDAR STOP ZONE or OAK-D OBSTACLE, set wall_ahead=true and action=stop.
 
-ACTION RULE: "action" must be EXACTLY one of these two words: "forward" or "stop"
-- Use "stop" ONLY if wall_ahead=true OR obstacle_close=true
-- Use "forward" in all other cases
-- NEVER use "move_forward", "continue", "go", or any other value
+ACTION RULE: "action" must be EXACTLY one of: "forward" or "stop"
+- "stop" if wall_ahead=true OR obstacle_close=true OR void_ahead=true
+- "forward" in all other cases
 
-OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
-BOOLEAN fields must be true or false.
-
-Example output (copy this structure exactly, change values to match what you see):
+OUTPUT: A single JSON object. Every field is REQUIRED.
 {{
   "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
+  "void_ahead": false,
   "person_visible": false,
   "action": "forward",
-  "physical_reasoning": "Path ahead is clear with no obstacles visible."
+  "physical_reasoning": "Path ahead is clear with no obstacles or drops visible."
 }}
 
-Now analyze the frame and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
+No markdown. No explanation. No extra fields.
 """
     try:
         payload = {
@@ -1189,6 +1308,17 @@ Now analyze the frame and output ONLY the JSON object above. No markdown. No exp
         response = r.json()["choices"][0]["message"]["content"].strip()
         log_ai(NAV_IMAGE_PROMPT[-200:], response, label="NAV_CHECK")
         result = _parse_json(response, dict(_NAV_FALLBACK), label="NAV CHECK")
+
+        # ── Void gate: Cosmos sees a drop — stop immediately ──────────────
+        if result.get("void_ahead"):
+            motors.stop()
+            log.warning(f"🕳️  NAV_CHECK: Cosmos sees void ahead — stopping")
+            log_action("VOID_COSMOS_NAV", result.get("physical_reasoning", ""))
+            _ui("log", f"🕳️  Cosmos: void/drop detected — stopping!")
+            _ui("status", "VOID DETECTED — STOPPED")
+            motors.oled(0, "VOID AHEAD!")
+            motors.oled(1, "STOP")
+            return {**result, "wall_ahead": True, "obstacle_close": True, "action": "stop"}
 
         # ── Eye-contact gate: only greet if person is close AND facing Eric ──
         if result.get("person_visible") and mission_active:
@@ -1265,14 +1395,45 @@ def _is_pitch_black(frame_b64: str, threshold: float = 20.0) -> bool:
 def _quick_scan() -> dict:
     """
     Dual camera stable scan while stopped.
-    Pan-tilt at ground-looking default (slight downward), then both cameras captured.
-    Sensor context prepended to prompt — Cosmos gets LiDAR + OAK-D metric readings.
-    LED only fires if frame is pitch black (luminance < 20).
+    Always runs a hardware void check first — if OAK-D or LiDAR detects a drop,
+    returns immediately without moving the pan-tilt or running Cosmos.
+    Then tilts steeply down to capture the floor edge (for both sensor void checks
+    and Cosmos visual void detection) before returning to normal scan tilt.
     """
-    motors.pantilt(0, 5)   # ground-looking default — sees objects on floor
-    motors.lights(0, 0)    # start with lights off
+    # ── Hardware void pre-check ────────────────────────────────────────────
+    hw_void = _void_check()
+    if hw_void["void"]:
+        log.warning(f"🕳️  _quick_scan pre-check: void ({hw_void['source']}): {hw_void['reason']}")
+        log_action("VOID_PRECHECK", hw_void["reason"])
+        return {
+            **_SCAN_FALLBACK,
+            "wall_ahead": True, "void_ahead": True, "action": "stop",
+            "physical_reasoning": f"Hardware void pre-check: {hw_void['reason']}"
+        }
+
+    # ── Floor-edge tilt: steep down to show stair lips / hole edges ────────
+    # TILT_FLOOR_EDGE = 30° down — shows ~0.5m in front of tracks at ground level.
+    # This is the frame most likely to reveal a stair edge or cliff lip.
+    motors.pantilt(0, 30)
+    motors.lights(0, 0)
     time.sleep(0.5)
+
     frames = []
+
+    # Capture floor-edge frame first (steep down)
+    floor_frame = capture_frame(CAMERA_PANTILT, 640, 480)
+    if floor_frame:
+        if _is_pitch_black(floor_frame):
+            motors.lights(base=180, head=255)
+            time.sleep(0.3)
+            floor_frame = capture_frame(CAMERA_PANTILT, 640, 480) or floor_frame
+            motors.lights(0, 0)
+        frames.append(floor_frame)
+
+    # Return to normal ground-looking tilt for the second frame
+    motors.pantilt(0, 5)
+    time.sleep(0.4)
+
     pt = capture_frame(CAMERA_PANTILT, 640, 480)
     if pt:
         if _is_pitch_black(pt):
@@ -1281,6 +1442,7 @@ def _quick_scan() -> dict:
             pt = capture_frame(CAMERA_PANTILT, 640, 480) or pt
             motors.lights(0, 0)
         frames.append(pt)
+
     wc = capture_frame(CAMERA_WEBCAM, 640, 480)
     if wc:
         if _is_pitch_black(wc):
@@ -1289,6 +1451,7 @@ def _quick_scan() -> dict:
             wc = capture_frame(CAMERA_WEBCAM, 640, 480) or wc
             motors.lights(0, 0)
         frames.append(wc)
+
     if not frames:
         return dict(_SCAN_FALLBACK)
 
@@ -1296,19 +1459,17 @@ def _quick_scan() -> dict:
     prompt = sensor_ctx + QUICK_SCAN_PROMPT if sensor_ctx else QUICK_SCAN_PROMPT
 
     try:
-        print(f"\n📷 QUICK SCAN — {len(frames)} frames to Cosmos...")
-        response = _cosmos_frames(frames, prompt, max_tokens=200, temp=0.3)
+        print(f"\n📷 QUICK SCAN — {len(frames)} frames to Cosmos (incl. floor-edge)...")
+        response = _cosmos_frames(frames, prompt, max_tokens=250, temp=0.3)
         result = _parse_json(response, dict(_SCAN_FALLBACK), label="QUICK SCAN RESULT")
 
-        # ── Sensor override ──────────────────────────────────────────────────
+        # ── Sensor overrides ─────────────────────────────────────────────
         try:
             from lidar import obstacle_close as lidar_close
             if lidar_close():
                 log.info("Quick scan: LiDAR override → wall_ahead=True")
                 log_action("LIDAR_OVERRIDE", "quick scan")
-                result["wall_ahead"]     = True
-                result["obstacle_close"] = True
-                result["action"]         = "stop"
+                result["wall_ahead"] = True; result["obstacle_close"] = True; result["action"] = "stop"
         except Exception:
             pass
 
@@ -1319,9 +1480,7 @@ def _quick_scan() -> dict:
                 if d is not None and d < 0.30:
                     log.info(f"Quick scan: OAK-D override at {d:.2f}m → wall_ahead=True")
                     log_action("OAKD_OVERRIDE", f"quick scan at {d:.2f}m")
-                    result["wall_ahead"]     = True
-                    result["obstacle_close"] = True
-                    result["action"]         = "stop"
+                    result["wall_ahead"] = True; result["obstacle_close"] = True; result["action"] = "stop"
         except Exception:
             pass
 
@@ -1470,9 +1629,10 @@ def _scan_360_pantilt() -> dict:
 
     # Pan positions: 7 stops covering -90° to +90° in 30° increments
     PAN_STEPS  = [-90, -60, -30, 0, 30, 60, 90]
-    TILT_LOW   =  10   # ground-looking (positive = down on UGV Beast pan-tilt)
-    TILT_MID   = -10   # mid-range / horizon
-    PAN_SETTLE = 0.35  # seconds after pantilt() before capture — motor settle time
+    TILT_STEEP = 30   # steep down — shows floor edge / stair lip ~0.5m ahead
+    TILT_LOW   = 10   # ground-looking
+    TILT_MID   = -10  # mid-range / horizon
+    PAN_SETTLE = 0.35  # seconds after pantilt() before capture
 
     def _pan_to_chassis_turn_sec(pan: int) -> float:
         """Estimate chassis turn duration to face a target spotted at pan angle pan."""
@@ -1491,7 +1651,21 @@ def _scan_360_pantilt() -> dict:
             _ui("log", f"{phase_label}: pan {pan:+d}°")
             motors.oled(1, f"Pan {pan:+d}d")
 
-            for tilt, tilt_label in [(TILT_LOW, "ground"), (TILT_MID, "mid")]:
+            for tilt, tilt_label in [(TILT_STEEP, "floor-edge"), (TILT_LOW, "ground"), (TILT_MID, "mid")]:
+                motors.pantilt(pan, tilt, speed=60)
+                time.sleep(PAN_SETTLE)
+
+                # ── Hardware void check at the steep-down position ────────────
+                # Only check at TILT_STEEP — that's when we're most likely to see a drop
+                if tilt == TILT_STEEP:
+                    hw_void = _void_check()
+                    if hw_void["void"]:
+                        log.warning(f"🕳️  Void during 360 scan at pan={pan}°: {hw_void['reason']}")
+                        log_action("VOID_360_SCAN", f"pan={pan}: {hw_void['reason']}")
+                        _ui("log", f"🕳️  VOID in that direction (pan {pan}°) — skipping, noting unsafe")
+                        # Don't stop the scan — just skip this direction and continue
+                        all_frames.append(capture_frame(CAMERA_PANTILT) or b"")
+                        continue  # skip to next tilt/pan
                 motors.pantilt(pan, tilt, speed=60)
                 time.sleep(PAN_SETTLE)
 
@@ -2034,6 +2208,7 @@ def _process_scan(scan, from_360=False):
     in_path        = scan.get("in_my_path", False)
     wall_ahead     = scan.get("wall_ahead", False)
     small_obs      = scan.get("small_obstacle", False)
+    void_ahead_f   = scan.get("void_ahead", False)
     action         = scan.get("action", "forward")
     speak_tx       = scan.get("speak")
     reason         = scan.get("physical_reasoning", "")
@@ -2046,8 +2221,8 @@ def _process_scan(scan, from_360=False):
     if reason:
         log.info(f"Cosmos: {reason}")
         _ui("log", f"Cosmos: {reason}")
-        
-    # ── Social intent + risk assessment (from Egocentric recipe) ─────────
+
+    # ── Social intent + risk assessment ──────────────────────────────────
     social = scan.get("social_intent")
     risk   = scan.get("risk_assessment")
     if social:
@@ -2058,6 +2233,37 @@ def _process_scan(scan, from_360=False):
     if complete:
         if speak_tx: eric_say(speak_tx)
         _execute_step_action(obj_name)
+        return
+
+    # ── Hardware void check — always run regardless of Cosmos result ──────
+    hw_void = _void_check()
+    if hw_void["void"] or void_ahead_f:
+        motors.stop()
+        source = hw_void["source"] if hw_void["void"] else "Cosmos vision"
+        reason_str = hw_void["reason"] if hw_void["void"] else reason
+        log.warning(f"🕳️  VOID in _process_scan ({source}): {reason_str}")
+        log_action("VOID_BLOCK_SCAN", f"{source}: {reason_str}")
+        _ui("log", f"🕳️  VOID/DROP ahead ({source}) — backing away")
+        _ui("status", "VOID — STOPPED")
+        motors.oled(0, "VOID AHEAD!")
+        motors.oled(1, "Back up!")
+        if speak_tx:
+            eric_say(speak_tx)
+        else:
+            eric_say("I detect a drop or void ahead. Backing away for safety.")
+        # Back up and turn away from the void
+        motors.backward(MOTOR_SPEED_SLOW)
+        time.sleep(1.5)
+        motors.stop()
+        time.sleep(0.3)
+        # Turn away — prefer the clearest direction reported by Cosmos
+        away = clear_dir if clear_dir not in ("front", "unknown", "") else "right"
+        if away in ("left", "left_side"):
+            motors.left(MOTOR_SPEED_SLOW); time.sleep(1.8); motors.stop()
+        else:
+            motors.right(MOTOR_SPEED_SLOW); time.sleep(1.8); motors.stop()
+        log_mission_event("void_avoided", f"backed + turned {away}")
+        mission_state = State.SEARCHING
         return
 
     obstacle_close = scan.get("obstacle_close", False)
