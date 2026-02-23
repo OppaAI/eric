@@ -30,10 +30,11 @@ def init_tts() -> bool:
         )
         engine = PiperEngine(
             piper_path=PIPER_BINARY,
-            voice=voice
+            voice=voice,
+            sample_rate=22050
         )
 
-        _talk_stream = TextToAudioStream(engine, frames_per_buffer=1024)
+        _talk_stream = TextToAudioStream(engine, frames_per_buffer=1024, output_sample_rate=22050)
 
         # Warm up — prevents first sentence being cut off
         _talk_stream.feed("warm up").play(muted=True)

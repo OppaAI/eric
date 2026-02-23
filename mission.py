@@ -100,9 +100,9 @@ def _parse_json(response, fallback, label="COSMOS"):
     try:
         clean = response.replace("```json", "").replace("```python", "").replace("```", "").strip()
 
-        # ── Handle JSON array — Cosmos sometimes returns [{...}, {...}] ───────
-        # Merge all items: pick the highest-priority object across all entries,
-        # collect all object_names, and OR all boolean flags together.
+        # ── Reject pure string lists — ["r2d2"], ["wall_ahead", ...] ─────────
+        # Cosmos nav check sometimes returns a Python list of strings instead of JSON.
+        # These parse fine as JSON arrays but contain no useful data — discard them.
         arr_start = clean.find("[")
         obj_start = clean.find("{")
         if arr_start >= 0 and (obj_start < 0 or arr_start < obj_start):
@@ -110,9 +110,13 @@ def _parse_json(response, fallback, label="COSMOS"):
             if arr_end > arr_start:
                 items = json.loads(clean[arr_start:arr_end])
                 if isinstance(items, list) and items:
-                    result = _merge_array_items(items, fallback)
-                    # skip to normalization below
-                    return _finalize_result(result, fallback, label)
+                    # If it's a list of dicts → merge them
+                    if isinstance(items[0], dict):
+                        result = _merge_array_items(items, fallback)
+                        return _finalize_result(result, fallback, label)
+                    # If it's a list of strings → Cosmos gave us garbage, treat as failure
+                    log.warning(f"Cosmos returned string list {items[:3]} — ignoring")
+                    raise ValueError("string list, not JSON object")
 
         # ── Normal single-object JSON ─────────────────────────────────────────
         s = clean.find("{")
@@ -236,12 +240,19 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
         matched       = [kw for kw in _target_keywords if kw in combined]
         if matched:
             log.info(f"🎯 Target keyword match '{matched}' in object_name — forcing target_visible=True")
-            result["target_visible"]   = True
-            result["in_my_path"]       = result.get("in_my_path", True)  # keep existing or default True
+            result["target_visible"] = True
             if result.get("target_direction", "unknown") == "unknown":
                 result["target_direction"] = "front"
             if not result.get("action") or result["action"] == "stop":
                 result["action"] = "forward"
+
+    # FIX: infer in_my_path — Cosmos almost never sets this to True even when target is right ahead.
+    # If target is visible, direction is front, and distance is close/nearby → it's in our path.
+    if result.get("target_visible"):
+        dist = str(result.get("distance", "")).lower()
+        tdir = str(result.get("target_direction", "front")).lower()
+        if dist in ("close", "nearby") or tdir == "front":
+            result["in_my_path"] = True
 
     # Stringify any remaining list/dict in string fields
     for field in ("terrain", "distance", "target_direction",
@@ -375,16 +386,15 @@ def resume_after_interaction():
 
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
-NAV_PROMPT = """Output ONLY this JSON, no markdown, no extra fields:
-{
-  "wall_ahead": false,
-  "obstacle_close": false,
-  "small_obstacle": false,
-  "person_visible": false,
-  "action": "forward",
-  "physical_reasoning": "one sentence"
-}
-Rules: wall_ahead=true if large object fills lower half. obstacle_close=true if anything within 60cm. person_visible=true if any human/robot visible. action must be forward/stop/slow."""
+NAV_PROMPT = """Analyze this camera frame and output ONLY the following JSON object. Do not output a list. Do not output markdown. Do not output any text before or after the JSON.
+
+{"wall_ahead":false,"obstacle_close":false,"small_obstacle":false,"person_visible":false,"action":"forward","physical_reasoning":"Path clear."}
+
+Replace the values based on what you see. Rules:
+- wall_ahead: true only if a wall/large object fills the lower half of frame
+- obstacle_close: true if any object is within 60cm directly ahead
+- person_visible: true if any person or robot is visible
+- action: must be exactly one of: forward, stop, slow"""
 
 SCAN_360_PROMPT = """Output ONLY this JSON, no markdown, no extra fields:
 {
@@ -875,6 +885,53 @@ def handle_character_response(character, said):
     return clean
 
 
+
+# ─── Approach Target ──────────────────────────────────────────────────────────
+
+def _approach_target():
+    """
+    Drive toward the target in 2-second steps, scanning after each step.
+    Stops when target is in_my_path at close/nearby distance, hits an obstacle,
+    or loses sight of the target.
+    Sets mission_state to INTERACTING when close enough.
+    """
+    global mission_state
+    _ui("log", "Approaching target...")
+    motors.oled(1, "Approaching...")
+
+    for attempt in range(12):       # max ~24s total approach
+        if not mission_active:
+            break
+
+        motors.forward(MOTOR_SPEED_SLOW)
+        time.sleep(2.0)
+        motors.stop()
+        time.sleep(0.4)
+
+        check = _quick_scan()
+        dist  = str(check.get("distance", "far")).lower()
+
+        if check.get("wall_ahead") or check.get("obstacle_close"):
+            _ui("log", "Obstacle during approach — arrived or blocked")
+            mission_state = State.INTERACTING
+            return
+
+        if check.get("in_my_path") or dist in ("close", "nearby"):
+            _ui("log", f"Close to target after {attempt+1} steps — INTERACTING")
+            mission_state = State.INTERACTING
+            return
+
+        if not check.get("target_visible", False):
+            _ui("log", "Lost sight of target — resuming search")
+            mission_state = State.SEARCHING
+            motors.forward(MOTOR_SPEED_SLOW)
+            return
+
+    # Ran out of steps — treat as arrived (may just be Cosmos underestimating distance)
+    _ui("log", "Approach complete — switching to INTERACTING")
+    mission_state = State.INTERACTING
+
+
 # ─── Process Scan Result ──────────────────────────────────────────────────────
 
 def _process_scan(scan, from_360=False):
@@ -939,39 +996,17 @@ def _process_scan(scan, from_360=False):
         motors.oled(1, f"Target {target_dir}!")
         _ui("status", "TARGET SPOTTED")
         _face_direction(target_dir)
+        _approach_target()
+        return
 
-        # FIX B1: approach loop — keep moving toward target until we're close enough to interact
-        _ui("log", "Approaching target...")
-        motors.oled(1, "Approaching...")
-        for attempt in range(12):   # max ~24s of approach time
-            if not mission_active:
-                break
-            motors.forward(MOTOR_SPEED_SLOW)
-            time.sleep(2.0)
-            motors.stop()
-            time.sleep(0.4)
-
-            check = _quick_scan()
-            dist = check.get("distance", "far")
-            close_enough = dist in ("close", "nearby") or check.get("in_my_path", False)
-
-            if check.get("wall_ahead") or check.get("obstacle_close"):
-                # Hit something — treat it as arrived or let avoidance handle it
-                _ui("log", "Obstacle during approach — stopping")
-                break
-
-            if close_enough:
-                _ui("log", f"Close to target after {attempt+1} steps — switching to INTERACTING")
-                mission_state = State.INTERACTING
-                break
-
-            if not check.get("target_visible", False):
-                _ui("log", "Lost sight of target during approach — resuming search")
-                mission_state = State.SEARCHING
-                motors.forward(MOTOR_SPEED_SLOW)
-                return
-
-        mission_state = State.SEARCHING
+    # Also trigger approach from a regular quick scan — target may be spotted while searching
+    if target_visible and not from_360:
+        _empty_scans = 0
+        _ui("log", f"Target spotted during scan — approaching")
+        _ui("status", "TARGET SPOTTED")
+        if target_dir and target_dir not in ("front", "unknown"):
+            _face_direction(target_dir)
+        _approach_target()
         return
 
     if in_path and obj in ["person", "robot"]:
