@@ -333,6 +333,7 @@ def ask_cosmos(prompt: str, image_b64: str = None,
     image_b64: single image
     frames: list of images for video reasoning
     stream=True → returns generator
+    All calls are logged via logger.log_ai().
     """
     content = []
 
@@ -370,6 +371,13 @@ def ask_cosmos(prompt: str, image_b64: str = None,
         r.raise_for_status()
         text = r.json()["choices"][0]["message"]["content"].strip()
         log.info(f"🧠 Cosmos: {text[:120]}")
+        # ── Log to eric_logger ───────────────────────────────────────────────
+        try:
+            from logger import log_ai as _log_ai
+            label = "COSMOS_IMAGE" if (image_b64 or frames) else "COSMOS_TEXT"
+            _log_ai(prompt[-400:], text, label=label)
+        except Exception:
+            pass
         return text
     except requests.exceptions.ConnectionError:
         msg = "Cannot connect to Cosmos. Is vLLM running? (bash launch/cosmos.sh)"
@@ -377,6 +385,11 @@ def ask_cosmos(prompt: str, image_b64: str = None,
         return msg
     except Exception as e:
         log.error(f"Cosmos error: {e}")
+        try:
+            from logger import log_exception as _log_exc
+            _log_exc("ask_cosmos", e)
+        except Exception:
+            pass
         return f"Cosmos error: {e}"
 
 
