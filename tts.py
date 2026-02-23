@@ -30,8 +30,7 @@ def init_tts() -> bool:
         )
         engine = PiperEngine(
             piper_path=PIPER_BINARY,
-            voice=voice,
-            sample_rate=22050
+            voice=voice
         )
 
         _talk_stream = TextToAudioStream(engine, frames_per_buffer=1024, output_sample_rate=22050)
