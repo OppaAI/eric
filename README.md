@@ -1,5 +1,30 @@
 # ERIC — Edge Robotics Innovation by Cosmos
 
+[![Repo](https://img.shields.io/badge/repo-OppaAI%2FAGi-darkcyan)](https://github.com/OppaAI/eric)
+![Build](https://img.shields.io/badge/build-prototype-lightgrey)
+![Status Experimental](https://img.shields.io/badge/status-experimental-orange.svg)
+[![License: GPL v3](https://img.shields.io/badge/License-MIT-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
+
+![ARM](https://img.shields.io/badge/ARM64-aarch64-0091BD?logo=arm)
+![LLM](https://img.shields.io/badge/Model-Cosmos%20Reason2%202B-76B900?logo=nvidia)
+![JetPack](https://img.shields.io/badge/JetPack-6.2.2-76B900?logo=nvidia)
+![CUDA](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia)
+
+![Platform Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg?logo=linux)
+![Ubuntu](https://img.shields.io/badge/ubuntu-22.04-E95420.svg?logo=ubuntu)
+![Python 3.10.12](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python)
+![ROS2 Humble](https://img.shields.io/badge/ROS-2%20Humble-blue.svg?logo=ros)
+
+![Started](https://img.shields.io/badge/Started-2026--02--20-darkcyan?&logo=github)
+![Release](https://img.shields.io/badge/Released-2026--03--05-darkcyan?&logo=github)
+![Version](https://img.shields.io/badge/Version-0.1.0-darkcyan?&logo=github)
+![Last Commit](https://img.shields.io/github/last-commit/OppaAI/eric?color=darkcyan&logo=github)
+
+![Owner](https://img.shields.io/badge/owner-OppaAI-salmon)
+![Maintainer](https://img.shields.io/badge/maintainer-OppaAI-salmon)
+![Contributors](https://img.shields.io/github/contributors/OppaAI/eric)
+![CS Credentials](https://img.shields.io/badge/Credentials-None-lightgrey)
+
 **NVIDIA Cosmos Cookoff 2026 Entry**
 
 ERIC is a search and rescue ground robot powered by NVIDIA Cosmos Reason 2, running fully at the edge on a ~$750 CAD Jetson Orin Nano Super 8GB. No cloud. No server. Just a tracked robot reasoning about the physical world in real time.
