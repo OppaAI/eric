@@ -16,18 +16,23 @@
 # - Characters are played by YOU in the GUI interaction box
 # - Eric cannot pick up objects or engage in combat (no arms)
 # - Keep terrain notes realistic to your actual space
+# - For multi-step missions, list steps clearly in the briefing:
+#   "First find X and deliver message Y, then find Z and photograph them"
+#   Eric parses these into sequential steps automatically.
+#
+# ALARM TYPES (new — pick one):
+#   none        — no alarm, just navigate and interact (default)
+#   hazard      — amber LED pulse + warning beep (safety / inspection)
+#   siren       — red strobe + siren tone (search and rescue)
+#   suspicious  — red strobe + alert beeps (security / anti-terror)
+#   nature      — gentle green pulse, no beep (wildlife / exploration)
 #
 # REQUIRED fields: name, briefing
-# OPTIONAL fields: everything else
+# OPTIONAL fields: everything else (all have safe defaults)
 # ═══════════════════════════════════════════════════════════════
 
-# Short display name shown in the GUI dropdown
 name: "My Mission Name"
-
-# One line description (shown in README/logs)
 description: "What this mission is about"
-
-# Who created this mission
 author: "Your name"
 
 
@@ -44,7 +49,10 @@ author: "Your name"
 #   - Any special rules or constraints
 #   - Emotional context if relevant (makes responses richer)
 #
-# Use the | character to write multi-line text (keep indentation)
+# MULTI-STEP EXAMPLE:
+#   "First, find R2-D2 and deliver the message 'Help me Obi-Wan'.
+#    Then, find Luke Skywalker and wait for his response.
+#    Finally, photograph Darth Vader from a safe distance and report."
 # ═══════════════════════════════════════════════════════════════
 
 briefing: |
@@ -63,11 +71,31 @@ briefing: |
 
 
 # ═══════════════════════════════════════════════════════════════
+# ALARM AND BEHAVIOUR FLAGS (new)
+# ═══════════════════════════════════════════════════════════════
+
+alarm_type: none     # none | hazard | siren | suspicious | nature
+
+# Objects/people that specifically trigger the alarm when found.
+# These extend the briefing — Cosmos watches for these in every frame.
+target_objects:
+  - person
+  - robot
+  # Add your specific targets here
+
+# What Eric does when a target is found:
+photo_on_find:     false   # save a timestamped photo to missions/photos/
+announce_location: false   # announce location out loud via TTS
+stay_with_target:  false   # SAR only: stay and repeat broadcast every 15s
+back_away_on_find: false   # security only: back 3m + turn 180° after alerting
+generate_report:   false   # at mission end: summarise all finds
+
+
+# ═══════════════════════════════════════════════════════════════
 # CHARACTERS — People/robots Eric will encounter
 # ═══════════════════════════════════════════════════════════════
 # These are played by YOU in the Gradio character interaction box.
 # The hints tell Eric how to interpret their responses.
-# You don't have to list every character — just the main ones.
 # ═══════════════════════════════════════════════════════════════
 
 characters:
@@ -77,26 +105,19 @@ characters:
   - name: "Character Two"
     hint: "How they behave and what they know"
 
-  # Add as many as you need:
-  # - name: "Character Three"
-  #   hint: "..."
-
 
 # ═══════════════════════════════════════════════════════════════
 # MISSION STAGES — Optional step-by-step goals
 # ═══════════════════════════════════════════════════════════════
-# These are informational — Eric reasons from the briefing,
-# not from these stages directly. But they help you as the
-# game master know what to set up and when to play each character.
+# Informational — Eric reasons from the briefing, not these stages.
+# They help YOU as game master know what to set up and when.
 # ═══════════════════════════════════════════════════════════════
 
 mission_stages:
   - stage: 1
     goal: "First thing Eric should do"
-
   - stage: 2
     goal: "Second goal"
-
   - stage: 3
     goal: "Final objective"
 
@@ -105,7 +126,10 @@ mission_stages:
 # TERRAIN — What surfaces Eric will encounter
 # ═══════════════════════════════════════════════════════════════
 # Cosmos uses these to decide speed and caution level.
-# Describe what is actually in your physical space.
+# Impassable: stairs, gap, cliff, water, wall
+# Slow:       carpet, rug, rocks, slope, mud, gravel, ramp
+# Normal:     tile, floor, concrete, wood
+# Fast:       road, pavement, smooth open space
 # ═══════════════════════════════════════════════════════════════
 
 terrain:
@@ -116,16 +140,13 @@ terrain:
 
 
 # ═══════════════════════════════════════════════════════════════
-# NOTES — Optional extra context or GM notes
-# ═══════════════════════════════════════════════════════════════
-# Use this for your own reminders as game master.
-# Eric does NOT read this section.
+# NOTES — Game master notes (Eric does NOT read this section)
 # ═══════════════════════════════════════════════════════════════
 
 notes: |
-  Game master notes here — Eric ignores this section.
-  Use it to remind yourself:
-  - Which Lego figures to place where
-  - What to type as each character when Eric stops
+  Use this for your own reminders as game master.
+  Eric ignores this section entirely.
+  - Which figures/props to place where before starting
+  - What to type as each character when Eric stops to talk
   - How you want the story to end
   - Props or terrain changes to set up mid-mission

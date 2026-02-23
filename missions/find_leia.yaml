@@ -1,29 +1,109 @@
+# ═══════════════════════════════════════════════════════════════
+# ERIC Mission: Operation Find Leia
+# ═══════════════════════════════════════════════════════════════
+
 name: "Operation Find Leia"
 description: "Find Princess Leia who has been captured and is held in the Death Star"
 author: "OppaAI"
+
 
 briefing: |
   Princess Leia has been captured and is held somewhere called the Death Star.
   Before she was taken, she left a message with R2-D2 who may know her exact location.
   Darth Vader is behind this — he is planning something evil and has taken Leia for his purpose.
   You cannot engage in combat under any circumstances — you have no arms.
-  Seek out Luke Skywalker because the Force is with him and he can help rescue Leia.
+
+  YOUR MISSION HAS THREE PARTS — complete them in order:
+
+  First, find R2-D2 and ask him for Leia's message and her exact location.
+  R2 is nervous around strangers — introduce yourself as a Rebel ally so he trusts you.
+  Listen carefully to everything he tells you.
+
+  Then, find Luke Skywalker and relay everything R2 told you.
+  Luke can act on this information. Tell him everything: location, the message, everything.
+  Wait for Luke to acknowledge the plan before moving on.
+
+  Finally, navigate to Leia's location and confirm you have found her.
+  When you find her, stop, photograph her location, and announce:
+  "Princess Leia has been located. Awaiting rescue team."
+
   Talk to anyone you encounter — if they don't know anything, thank them and move on.
+  If Vader confronts you, talk your way out — you are just a humble maintenance droid.
   Good luck, and hope we can rescue the princess in time.
+
+
+alarm_type: none
+
+target_objects:
+  - Princess Leia
+  - Leia
+  - R2-D2
+  - Luke Skywalker
+
+photo_on_find:     true
+announce_location: true
+stay_with_target:  false
+generate_report:   false
+
 
 characters:
   - name: "R2-D2"
-    hint: "Beeps dramatically, then reveals Leia's location"
+    hint: "Beeps dramatically, then reveals Leia's location: Cell Block AA-23, Level 5"
+
   - name: "C-3PO"
     hint: "Anxious, quotes odds, well-meaning but unhelpful"
+
   - name: "Stormtrooper"
-    hint: "Clueless, can't see well in the helmet"
+    hint: "Clueless, can't see well in the helmet, easily talked past"
+
   - name: "Darth Vader"
     hint: "Dramatic, wants you to join the dark side"
+
   - name: "Luke Skywalker"
-    hint: "Confident, will help rescue Leia"
+    hint: "Confident, will help rescue Leia once he hears the plan"
+
+  - name: "Princess Leia"
+    hint: "Dignified even in captivity — immediately takes charge and gives you a message for the Alliance"
+
+
+mission_stages:
+  - stage: 1
+    goal: "Search for R2-D2 — do a full 360 scan first, then explore"
+  - stage: 2
+    goal: "Speak to R2-D2 — receive Leia's hidden message and location"
+  - stage: 3
+    goal: "Find Luke Skywalker — relay R2's message and confirm rescue plan"
+  - stage: 4
+    goal: "Navigate to Cell Block AA-23 — avoid Vader and Stormtroopers"
+  - stage: 5
+    goal: "Locate Princess Leia — announce position and photograph"
+
 
 terrain:
   - "Pebble path (slow down)"
-  - "Smooth pavement (normal speed)"
-  - "Grass (slow down)"
+  - "Smooth Death Star corridor floor (normal speed)"
+  - "Grass or outdoor area — Tatooine terrain (slow down)"
+
+
+notes: |
+  SETUP:
+  - Place R2-D2 figure somewhere reachable but not immediately obvious
+  - Place Luke figure in a different area — Eric must search for both
+  - Place Leia figure last, ideally slightly hidden or cornered
+  - Optional: place Vader and Stormtrooper as obstacles Eric must talk past
+
+  HOW TO PLAY EACH CHARACTER:
+  R2-D2:      "Bwee-bwoop! [beep beep] BWAAARP!
+               ...She's in Cell Block AA-23. Level 5. Hurry!"
+  C-3PO:      "Oh my! The odds of a successful rescue are 3,720 to 1!
+               Not that I'm suggesting it's hopeless, but—"
+  Stormtrooper: "Halt! ...You're on a maintenance inspection? Very well.
+                 Move along. Nothing to see here."
+  Vader:      "I sense something... a presence I have not felt since...
+               Join me, and together we can rule the galaxy."
+  Luke:       "Cell Block AA-23, Level 5. Got it. I'll get her out.
+               Thank you — now get somewhere safe. This is about to get loud."
+  Leia:       "Finally! I knew the Rebellion would find me.
+               Listen carefully — I have a message for Mon Mothma..."
+
+  MISSION COMPLETE: Eric locates Leia and announces her position.
