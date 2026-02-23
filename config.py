@@ -16,9 +16,9 @@ COSMOS_MODEL = os.getenv("COSMOS_MODEL", "embedl/Cosmos-Reason2-2B-W4A16")
 # ─── Serial (Waveshare ESP32 via Jetson UART) ─────────────────────────────────
 SERIAL_PORT        = os.getenv("SERIAL_PORT", "/dev/ttyTHS1")
 SERIAL_BAUD        = 115200
-MOTOR_SPEED_SLOW   = 0.15   # m/s
-MOTOR_SPEED_NORMAL = 0.30   # m/s
-MOTOR_SPEED_FAST   = 0.50   # m/s
+MOTOR_SPEED_SLOW   = float(os.getenv("MOTOR_SPEED_SLOW",   "0.22"))
+MOTOR_SPEED_NORMAL = float(os.getenv("MOTOR_SPEED_NORMAL", "0.30"))
+MOTOR_SPEED_FAST   = float(os.getenv("MOTOR_SPEED_FAST",   "0.50"))
 
 # ─── Camera ───────────────────────────────────────────────────────────────────
 CAMERA_WEBCAM  = int(os.getenv("CAMERA_WEBCAM",  "2"))
