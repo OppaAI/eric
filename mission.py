@@ -1184,12 +1184,30 @@ def _face_direction(direction: str):
 
 
 # ─── Obstacle Avoidance ───────────────────────────────────────────────────────
+# Full avoidance logic (back up → LiDAR arc scan → Cosmos reason → turn → verify)
+# lives in avoidance.py. This is just a thin shim so existing call sites work.
 
-def _avoid_obstacle(wall_ahead, small_obstacle) -> bool:
+def _avoid_obstacle(wall_ahead: bool, small_obstacle: bool) -> bool:
     """
-    Obstacle avoidance. Returns True if 360 scan should be forced.
-    Always re-scans after turning to confirm the new path is clear.
-    Uses _turn_nav2_or_direct() so Nav2 handles turning when available.
+    Delegate to avoidance.py's smart pipeline:
+      1. Instant backup
+      2. LiDAR full-arc scan → pick clearest direction
+      3. Cosmos Reason 2 (camera + sensor data) → refine direction + turn_sec
+      4. Execute turn → verify path clear → retry or force 360
+
+    Returns True if a full 360° scan should be forced.
+    """
+    try:
+        from avoidance import avoid_obstacle
+        return avoid_obstacle(wall_ahead=wall_ahead, small_obstacle=small_obstacle)
+    except ImportError:
+        log.error("avoidance.py not found — using legacy inline avoidance")
+        return _avoid_obstacle_legacy(wall_ahead, small_obstacle)
+
+
+def _avoid_obstacle_legacy(wall_ahead: bool, small_obstacle: bool) -> bool:
+    """
+    Fallback if avoidance.py is missing. Mirrors original behaviour.
     """
     global _avoid_attempts, mission_state
     _avoid_attempts += 1
@@ -1200,29 +1218,19 @@ def _avoid_obstacle(wall_ahead, small_obstacle) -> bool:
         _ui("log", f"Wall — attempt {_avoid_attempts}")
         motors.oled(1, "Wall! Back up...")
         motors.stop(); time.sleep(0.3)
-
-        # Back up more decisively
         motors.backward(MOTOR_SPEED_SLOW); time.sleep(1.5)
         motors.stop(); time.sleep(0.3)
-
-        # Alternate left/right turns, increasing duration each attempt
         turn_sec = min(1.8 + (_avoid_attempts * 0.4), 3.5)
         direction = "right" if _avoid_attempts % 2 == 1 else "left"
         _turn_nav2_or_direct(direction, turn_sec)
         motors.stop(); time.sleep(0.5)
-
         if _avoid_attempts >= MAX_AVOID_ATTEMPTS:
             _avoid_attempts = 0
             eric_say("Too many obstacles. Let me scan the full area.")
-            return True  # trigger 360
-
-        # Re-scan after turning — confirm new path is clear before moving
-        _ui("log", "Re-scanning after avoidance...")
+            return True
         rescan = _quick_scan()
         if rescan.get("wall_ahead") or rescan.get("obstacle_close"):
-            _ui("log", "Still blocked after turn — trying again")
-            return _avoid_obstacle(wall_ahead=True, small_obstacle=False)
-
+            return _avoid_obstacle_legacy(wall_ahead=True, small_obstacle=False)
     elif small_obstacle:
         _ui("log", "Small obstacle — stepping around")
         motors.oled(1, "Step around...")
@@ -1233,12 +1241,9 @@ def _avoid_obstacle(wall_ahead, small_obstacle) -> bool:
         motors.stop(); time.sleep(0.2)
         motors.left(MOTOR_SPEED_SLOW);   time.sleep(1.1)
         motors.stop(); time.sleep(0.4)
-
-        # Quick check after step-around
         rescan = _quick_scan()
         if rescan.get("wall_ahead") or rescan.get("obstacle_close"):
-            return _avoid_obstacle(wall_ahead=True, small_obstacle=False)
-
+            return _avoid_obstacle_legacy(wall_ahead=True, small_obstacle=False)
     return False
 
 
@@ -1477,6 +1482,11 @@ def _process_scan(scan, from_360=False):
 
     if not wall_ahead and not obstacle_close and not small_obs:
         _avoid_attempts = 0
+        try:
+            from avoidance import reset_avoid_counter
+            reset_avoid_counter()
+        except ImportError:
+            pass
 
     if speak_tx:
         eric_say(speak_tx)

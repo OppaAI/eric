@@ -34,6 +34,10 @@ _node           = None
 _sub            = None
 _ros_thread     = None
 
+# Raw scan message — exposed for avoidance.py arc distance calculations
+# avoidance.py reads this to get per-direction clearances (front/left/right/rear)
+_last_scan_msg  = None
+
 # Lock for thread-safe distance reads
 _lock = threading.Lock()
 
@@ -140,8 +144,13 @@ def _scan_callback(msg):
     D500 outputs 360° scan. We care about front arc only.
     angle_min is usually -π, angle_max is +π, angle_increment is small.
     Index 0 = directly behind on most LiDARs — check your D500 config.
+
+    The raw scan message is stored in _last_scan_msg so avoidance.py can
+    read per-direction arc distances (front/left/right/rear) for smart
+    manoeuvring decisions. The instant stop/slow still fires here for safety —
+    avoidance.py takes over the full manoeuvre from mission.py.
     """
-    global _obstacle_close, _obstacle_near, _min_distance
+    global _obstacle_close, _obstacle_near, _min_distance, _last_scan_msg
 
     import math
 
@@ -149,6 +158,10 @@ def _scan_callback(msg):
         n         = len(msg.ranges)
         angle_inc = msg.angle_increment
         angle_min = msg.angle_min
+
+        # Store raw message for avoidance.py arc distance calculations
+        with _lock:
+            _last_scan_msg = msg
 
         # Find indices covering front arc (±FRONT_ARC_DEG degrees)
         arc_rad   = math.radians(FRONT_ARC_DEG)
@@ -172,12 +185,16 @@ def _scan_callback(msg):
             _obstacle_close = min_dist < STOP_DIST
             _obstacle_near  = min_dist < SLOW_DIST
 
-        # Safety action — independent of Cosmos
+        # ── Instant safety reaction — independent of Cosmos and avoidance.py ──
+        # motors.stop() / motors.slow() fire here immediately (no latency).
+        # Full manoeuvring (backup + turn + retry) is handled by avoidance.py
+        # which is called from mission.py when it detects _obstacle_close.
         if _safety_active:
             if _obstacle_close:
                 from motors import motors
                 motors.stop()
                 log.warning(f"🚧 LIDAR STOP — obstacle at {min_dist:.2f}m")
+                # avoidance.py reads _obstacle_close and runs the full manoeuvre
             elif _obstacle_near:
                 from motors import motors
                 motors.slow()
