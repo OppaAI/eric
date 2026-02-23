@@ -4,7 +4,8 @@ ERIC — Mission Logic
 Camera strategy:
   Navigation (moving):  pan-tilt only, single frame, fast NAV_PROMPT
   Scanning  (stopped):  dual camera (pan-tilt + webcam), single stable frame each
-  360° scan (stopped):  body rotates, pan-tilt tilts up/down, dual stable frames at each stop
+  360° scan (stopped):  pan-tilt sweeps ±90° in 30° steps + ONE 180° chassis turn
+                        (finer coverage, far less chassis movement than old 8×45° rotation)
   Face/robot centering: pan-tilt only, settle before capture
 
 Stabilization rule:
@@ -23,6 +24,26 @@ Sensor integration:
 Nav2 integration:
   _move_forward() uses Nav2 send_goal() when available, falling back to direct
   motor control. Cosmos still decides WHERE to go — Nav2 handles HOW.
+
+Async Cosmos:
+  _cosmos_frames_async() submits Cosmos calls to a ThreadPoolExecutor so the
+  mission loop can keep doing sensor checks while Cosmos is thinking.
+
+Multi-step missions:
+  Briefing is parsed by Cosmos into MissionStep objects at start.
+  Each step has a target + action type (find_and_approach, deliver_message,
+  speak_to, wait_for_response, photograph). Steps advance sequentially.
+  Mission only ends after ALL steps are complete.
+
+Eye-contact greeting:
+  Persons are only greeted when Cosmos confirms they are close AND facing Eric.
+
+Terrain speed control:
+  TERRAIN_SPEED_MAP maps terrain strings to motor speeds. Impassable terrain
+  (stairs, gaps, walls) triggers the full avoidance pipeline.
+
+Logging:
+  All AI calls, motor actions, and mission events are logged via logger.
 """
 
 import time
@@ -30,18 +51,35 @@ import threading
 import logging
 import json
 import math
+import pathlib
+import datetime
+import dataclasses
+import concurrent.futures
 import requests
 
-from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR, VLLM_URL, COSMOS_MODEL
+from typing import Optional
+
+from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MOTOR_SPEED_FAST, MISSIONS_DIR, VLLM_URL, COSMOS_MODEL
 from motors import motors
 from cosmos import (
-    ask_cosmos, set_mission_briefing,
+    ask_cosmos, set_mission_briefing, get_mission_briefing,
     capture_frame, capture_frames_video,
     CAMERA_WEBCAM, CAMERA_PANTILT
 )
 from tts import speak
+from logger import (
+    log_ai, log_action, log_mission_event,
+    start_mission_log, end_mission_log, log_exception
+)
 
 log = logging.getLogger("eric.mission")
+
+# ─── Async Cosmos executor ────────────────────────────────────────────────────
+# Max 2 workers: one for nav checks, one for scan analysis.
+# This lets the mission loop keep running sensor checks while Cosmos is thinking.
+_cosmos_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=2, thread_name_prefix="cosmos"
+)
 
 
 class State:
@@ -57,16 +95,122 @@ mission_state        = State.IDLE
 mission_active       = False
 conversation_history = []
 
-_empty_scans       = 0
-_avoid_attempts    = 0
-_scans_since_360   = 0
+_empty_scans          = 0
+_avoid_attempts       = 0
+_scans_since_360      = 0
 _target_spotted_count = 0   # consecutive scans that saw the target — resets on miss
-EMPTY_SCAN_LIMIT   = 1   # trigger 360 after just 1 empty scan (was 2)
-SCANS_BEFORE_360   = 2   # periodic 360 every 2 quick scans (was 4)
-MAX_AVOID_ATTEMPTS = 3   # force 360 sooner (was 4)
-TARGET_CONFIRM_NEEDED = 1  # only needs 1 positive scan to approach (Cosmos is inconsistent)
+EMPTY_SCAN_LIMIT      = 1   # trigger 360 after just 1 empty scan
+SCANS_BEFORE_360      = 2   # periodic 360 every 2 quick scans
+MAX_AVOID_ATTEMPTS    = 3   # force 360 after this many avoid failures
+TARGET_CONFIRM_NEEDED = 1   # only needs 1 positive scan to approach
 
 _ui_callbacks = {"eric_says": None, "status": None, "log": None}
+
+
+# ─── Terrain Speed Map ────────────────────────────────────────────────────────
+# None = impassable → triggers full avoidance pipeline + spoken warning
+TERRAIN_SPEED_MAP: dict[str, float | None] = {
+    # Fast — smooth flat surfaces
+    "road":         MOTOR_SPEED_FAST,
+    "floor":        MOTOR_SPEED_FAST,
+    "tile":         MOTOR_SPEED_FAST,
+    "tiles":        MOTOR_SPEED_FAST,
+    "pavement":     MOTOR_SPEED_FAST,
+    "concrete":     MOTOR_SPEED_FAST,
+    "asphalt":      MOTOR_SPEED_FAST,
+    "hardwood":     MOTOR_SPEED_FAST,
+    "linoleum":     MOTOR_SPEED_FAST,
+    "wood":         MOTOR_SPEED_FAST,
+    "smooth":       MOTOR_SPEED_FAST,
+
+    # Medium — outdoor traversable ground
+    "grass":        MOTOR_SPEED_NORMAL,
+    "lawn":         MOTOR_SPEED_NORMAL,
+    "gravel":       MOTOR_SPEED_NORMAL,
+    "dirt":         MOTOR_SPEED_NORMAL,
+    "soil":         MOTOR_SPEED_NORMAL,
+    "sand":         MOTOR_SPEED_NORMAL,
+    "path":         MOTOR_SPEED_NORMAL,
+    "clear":        MOTOR_SPEED_NORMAL,
+    "flat":         MOTOR_SPEED_NORMAL,
+    "ground":       MOTOR_SPEED_NORMAL,
+
+    # Slow — rough, soft, or mildly risky
+    "carpet":       MOTOR_SPEED_SLOW,
+    "rug":          MOTOR_SPEED_SLOW,
+    "mat":          MOTOR_SPEED_SLOW,
+    "mud":          MOTOR_SPEED_SLOW,
+    "wet":          MOTOR_SPEED_SLOW,
+    "rocks":        MOTOR_SPEED_SLOW,
+    "rocky":        MOTOR_SPEED_SLOW,
+    "pebbles":      MOTOR_SPEED_SLOW,
+    "slope":        MOTOR_SPEED_SLOW,   # shallow slope / ramp
+    "ramp":         MOTOR_SPEED_SLOW,
+    "step":         MOTOR_SPEED_SLOW,   # single small step / curb
+    "curb":         MOTOR_SPEED_SLOW,
+    "leaves":       MOTOR_SPEED_SLOW,
+    "threshold":    MOTOR_SPEED_SLOW,
+    "uneven":       MOTOR_SPEED_SLOW,
+    "rough":        MOTOR_SPEED_SLOW,
+    "bumpy":        MOTOR_SPEED_SLOW,
+
+    # Impassable — stop and navigate around
+    "stairs":       None,
+    "staircase":    None,
+    "steps":        None,
+    "wall":         None,
+    "fence":        None,
+    "water":        None,
+    "gap":          None,
+    "cliff":        None,
+    "ledge":        None,
+    "deep_slope":   None,
+    "steep":        None,
+    "blockade":     None,
+    "barrier":      None,
+    "curbs":        None,   # plural = raised road barrier
+}
+
+
+def _speed_for_terrain(terrain: str) -> float | None:
+    """
+    Return target speed for a terrain string, or None if impassable.
+    Fuzzy-matches Cosmos inventions like 'rough_grass' or 'wet tiles'.
+    Falls back to MOTOR_SPEED_NORMAL for genuinely unknown terrain.
+    """
+    t = str(terrain).lower().strip() if terrain else "clear"
+    if t in TERRAIN_SPEED_MAP:
+        return TERRAIN_SPEED_MAP[t]
+    # Partial keyword scan — longer keys first to avoid spurious short matches
+    for key in sorted(TERRAIN_SPEED_MAP, key=len, reverse=True):
+        if key in t:
+            log.debug(f"Terrain '{t}' → fuzzy match '{key}'")
+            return TERRAIN_SPEED_MAP[key]
+    log.debug(f"Unknown terrain '{t}' — defaulting to NORMAL speed")
+    return MOTOR_SPEED_NORMAL
+
+
+# ─── Mission Step Engine ──────────────────────────────────────────────────────
+
+@dataclasses.dataclass
+class MissionStep:
+    step_num:    int
+    target:      str          # e.g. "Princess Leia", "R2-D2", "deer"
+    action:      str          # see ACTION_TYPES below
+    message:     str = ""     # text for deliver_message / speak_to
+    photo_count: int = 1      # number of sharp photos to capture
+    wait_sec:    int = 20     # seconds to wait for a response
+    completed:   bool = False
+
+# Valid action types:
+#   find_and_approach  — get close, mark done (default)
+#   deliver_message    — speak step.message to target, then advance
+#   speak_to           — initiate conversation, wait wait_sec for reply
+#   wait_for_response  — just wait wait_sec for target to say something
+#   photograph         — save photo_count sharp close-range photos to disk
+
+_mission_steps:     list[MissionStep] = []
+_current_step_idx:  int = 0
 
 
 def register_ui_callbacks(**cbs):
@@ -82,6 +226,7 @@ def _ui(key, text):
 
 def eric_say(text):
     _ui("eric_says", text)
+    log_mission_event("eric_say", text[:120])
     # Truncate to 2 sentences max — long Cosmos responses block TTS for too long
     sentences = [s.strip() for s in text.replace("!", ".").replace("?", ".").split(".") if s.strip()]
     short = ". ".join(sentences[:2])
@@ -90,7 +235,10 @@ def eric_say(text):
     speak(short or text)
 
 
+# ─── Async Cosmos Wrapper ─────────────────────────────────────────────────────
+
 def _cosmos_frames(frames, prompt, max_tokens=250, temp=0.3):
+    """Synchronous Cosmos call with logging. Used directly or via async wrapper."""
     from cosmos import _system_prompt as sys_prompt
     content = [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}}
@@ -109,7 +257,210 @@ def _cosmos_frames(frames, prompt, max_tokens=250, temp=0.3):
     }
     r = requests.post(VLLM_URL, json=payload, timeout=120)
     r.raise_for_status()
-    return r.json()["choices"][0]["message"]["content"].strip()
+    response = r.json()["choices"][0]["message"]["content"].strip()
+    log_ai(prompt[-400:], response, label="COSMOS_FRAMES")
+    return response
+
+
+def _cosmos_frames_async(frames, prompt, max_tokens=250, temp=0.3) -> concurrent.futures.Future:
+    """
+    Submit Cosmos vision call to thread pool. Returns a Future immediately.
+    Call future.result(timeout=60) when you actually need the answer.
+    This lets the mission loop keep doing sensor checks while Cosmos is thinking.
+    """
+    return _cosmos_executor.submit(_cosmos_frames, frames, prompt, max_tokens, temp)
+
+
+# ─── Mission Step Helpers ─────────────────────────────────────────────────────
+
+def _parse_mission_steps(briefing: str) -> list[MissionStep]:
+    """
+    Ask Cosmos to parse the mission briefing into an ordered list of MissionStep objects.
+    Falls back to a single find_and_approach step if parsing fails.
+    """
+    prompt = f"""You are parsing a robot mission briefing into structured, ordered steps.
+
+BRIEFING:
+\"\"\"{briefing}\"\"\"
+
+Extract each discrete task as a step. Return ONLY a JSON array.
+
+Valid action types:
+  "find_and_approach"  — find the target and get within close range
+  "deliver_message"    — speak a specific message to the target when close
+  "speak_to"           — start a conversation with the target, wait for reply
+  "wait_for_response"  — wait for the target to say something (use wait_sec)
+  "photograph"         — take sharp close-range photos of the target (use photo_count)
+
+JSON schema per step:
+{{
+  "step_num":    1,
+  "target":      "Princess Leia",
+  "action":      "deliver_message",
+  "message":     "Help me Obi-Wan, you're my only hope",
+  "photo_count": 1,
+  "wait_sec":    20
+}}
+
+Example for multi-step mission:
+[
+  {{"step_num": 1, "target": "Princess Leia", "action": "deliver_message",
+    "message": "Help me Obi-Wan, you're my only hope", "photo_count": 1, "wait_sec": 20}},
+  {{"step_num": 2, "target": "R2-D2", "action": "speak_to",
+    "message": "", "photo_count": 1, "wait_sec": 30}},
+  {{"step_num": 3, "target": "deer", "action": "photograph",
+    "message": "", "photo_count": 3, "wait_sec": 10}}
+]
+
+Return ONLY the JSON array. No markdown. No explanation. No extra text.
+"""
+    try:
+        raw   = ask_cosmos(prompt, max_tokens=500)
+        log_ai(prompt[-300:], raw, label="STEP_PARSE")
+        clean = raw.replace("```json", "").replace("```", "").strip()
+        s = clean.find("["); e = clean.rfind("]") + 1
+        items = json.loads(clean[s:e])
+        steps = []
+        for i, it in enumerate(items):
+            steps.append(MissionStep(
+                step_num    = int(it.get("step_num",    i + 1)),
+                target      = str(it.get("target",      "target")),
+                action      = str(it.get("action",      "find_and_approach")),
+                message     = str(it.get("message",     "")),
+                photo_count = int(it.get("photo_count", 1)),
+                wait_sec    = int(it.get("wait_sec",    20)),
+            ))
+        log.info(f"Parsed {len(steps)} mission steps: {[s.target for s in steps]}")
+        return steps
+    except Exception as e:
+        log_exception("_parse_mission_steps", e)
+        return [MissionStep(step_num=1, target="target", action="find_and_approach")]
+
+
+def _current_step() -> Optional[MissionStep]:
+    if _mission_steps and _current_step_idx < len(_mission_steps):
+        return _mission_steps[_current_step_idx]
+    return None
+
+
+def _advance_step():
+    """Mark the current step complete and move to the next, or end the mission."""
+    global _current_step_idx
+    step = _current_step()
+    if step:
+        step.completed = True
+        log_mission_event(f"step_{step.step_num}_complete", f"{step.target} — {step.action}")
+
+    _current_step_idx += 1
+
+    if _current_step_idx >= len(_mission_steps):
+        # All steps done
+        last_target = step.target if step else "all targets"
+        _handle_mission_complete(last_target)
+    else:
+        nxt = _current_step()
+        msg = f"Step {_current_step_idx} complete. Now finding {nxt.target}."
+        eric_say(msg)
+        _ui("status", f"STEP {nxt.step_num}: {nxt.target.upper()}")
+        _ui("log", msg)
+        # Update Cosmos system prompt so it searches for the next target
+        set_mission_briefing(
+            f"CURRENT STEP {nxt.step_num} of {len(_mission_steps)}: "
+            f"Find {nxt.target} and {nxt.action.replace('_', ' ')}.\n"
+            f"Original mission: {get_mission_briefing()}"
+        )
+        # Resume searching
+        global mission_state, _empty_scans, _avoid_attempts, _scans_since_360, _target_spotted_count
+        _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
+        mission_state = State.SEARCHING
+        motors.forward(MOTOR_SPEED_SLOW)
+
+
+def _execute_step_action(obj_name: str):
+    """
+    Called when Eric arrives at the current step's target.
+    Executes the required action (speak, photograph, wait, etc.) then advances.
+    """
+    global mission_state
+    step = _current_step()
+    if not step:
+        _handle_mission_complete(obj_name)
+        return
+
+    mission_state = State.INTERACTING
+    motors.stop()
+    log_mission_event("step_arrived", f"step={step.step_num} target={step.target} action={step.action}")
+    log.info(f"Executing step {step.step_num}: {step.action} for {step.target}")
+
+    if step.action == "find_and_approach":
+        _advance_step()
+
+    elif step.action == "deliver_message":
+        msg = step.message or f"Message delivered to {step.target}."
+        eric_say(msg)
+        log_mission_event("message_delivered", f"to={step.target}: {msg}")
+        motors.oled(0, "Delivering msg")
+        motors.oled(1, step.target[:16])
+        time.sleep(min(step.wait_sec, 10))
+        _advance_step()
+
+    elif step.action == "speak_to":
+        greeting = ask_cosmos(
+            f"You have found {step.target}. "
+            + (f"Your mission: {step.message}. " if step.message else "")
+            + "Greet them warmly and start the conversation. 2 sentences.",
+            max_tokens=120
+        )
+        eric_say(greeting)
+        log_mission_event("spoke_to", f"{step.target}: {greeting[:80]}")
+        motors.oled(0, f"Talking to")
+        motors.oled(1, step.target[:16])
+        _ui("log", f"Waiting {step.wait_sec}s for {step.target} to respond...")
+        time.sleep(step.wait_sec)
+        _advance_step()
+
+    elif step.action == "wait_for_response":
+        eric_say(f"Waiting for {step.target} to respond.")
+        motors.oled(0, "Waiting...")
+        motors.oled(1, step.target[:16])
+        _ui("log", f"Waiting up to {step.wait_sec}s for {step.target} to speak...")
+        time.sleep(step.wait_sec)
+        _advance_step()
+
+    elif step.action == "photograph":
+        eric_say(f"I will take {step.photo_count} photo{'s' if step.photo_count > 1 else ''} of {step.target}.")
+        motors.oled(0, "Taking photos")
+        motors.oled(1, step.target[:16])
+        photos_taken = 0
+        max_attempts = step.photo_count * 4
+
+        for attempt in range(max_attempts):
+            if photos_taken >= step.photo_count:
+                break
+            frame = capture_frame(CAMERA_PANTILT, 1280, 720)
+            if frame and not _is_blurry(frame):
+                import base64 as _b64
+                ts    = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")[:19]
+                fname = f"photo_{step.target.replace(' ', '_')}_{photos_taken + 1}_{ts}.jpg"
+                out   = pathlib.Path("missions/photos") / fname
+                out.parent.mkdir(parents=True, exist_ok=True)
+                out.write_bytes(_b64.b64decode(frame))
+                photos_taken += 1
+                _ui("log", f"📸 Photo {photos_taken}/{step.photo_count} saved: {fname}")
+                log_mission_event("photo_saved", fname)
+                motors.oled(1, f"Photo {photos_taken}/{step.photo_count}")
+                time.sleep(0.8)
+            else:
+                time.sleep(0.4)
+
+        completion_msg = f"Captured {photos_taken} of {step.photo_count} photo(s) of {step.target}."
+        eric_say(completion_msg)
+        log_mission_event("photograph_done", completion_msg)
+        _advance_step()
+
+    else:
+        log.warning(f"Unknown step action '{step.action}' — advancing")
+        _advance_step()
 
 
 def _parse_json(response, fallback, label="COSMOS"):
@@ -494,6 +845,7 @@ def get_briefing_from_file(name):
 def start_mission(briefing):
     global mission_active, mission_state, conversation_history
     global _empty_scans, _avoid_attempts, _scans_since_360
+    global _mission_steps, _current_step_idx
 
     if mission_active:
         return "Mission already active. Disengage first."
@@ -502,18 +854,43 @@ def start_mission(briefing):
 
     conversation_history = []
     _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
-    set_mission_briefing(briefing)
+
+    # ── Parse mission into steps ──────────────────────────────────────────────
+    _mission_steps    = _parse_mission_steps(briefing)
+    _current_step_idx = 0
+    step_summaries    = [f"[{s.step_num}] {s.target} → {s.action}" for s in _mission_steps]
+
+    # ── Start mission log ─────────────────────────────────────────────────────
+    start_mission_log(briefing[:60], steps=step_summaries)
+    log_mission_event("mission_start", briefing[:200])
+
+    # ── Update Cosmos system prompt with first step ───────────────────────────
+    first_step = _current_step()
+    if first_step and first_step.target != "target":
+        set_mission_briefing(
+            f"CURRENT STEP 1 of {len(_mission_steps)}: "
+            f"Find {first_step.target} and {first_step.action.replace('_', ' ')}.\n"
+            f"Original mission: {briefing}"
+        )
+    else:
+        set_mission_briefing(briefing)
 
     motors.pantilt(0, 5)   # slight downward tilt — see ground objects at normal range
     motors.lights(0, 0)    # LEDs off — only turn on if scene is pitch black
     time.sleep(0.5)
 
+    step_info = f"I have {len(_mission_steps)} step{'s' if len(_mission_steps) > 1 else ''}: {', '.join(step_summaries)}." if len(_mission_steps) > 1 else ""
     ack = ask_cosmos(
         f"Mission briefing:\n\"{briefing}\"\n\n"
-        "Acknowledge in 2-3 sentences. State your first action. Be concise.",
+        + (f"Parsed steps: {step_info}\n\n" if step_info else "")
+        + "Acknowledge in 2-3 sentences. State your first action. Be concise.",
         max_tokens=150
     )
     eric_say(ack)
+    log_mission_event("mission_acknowledged", ack[:150])
+
+    if len(_mission_steps) > 1:
+        _ui("log", f"Multi-step mission: {' → '.join(s.target for s in _mission_steps)}")
 
     mission_active = True
     mission_state  = State.SEARCHING
@@ -544,6 +921,8 @@ def stop_mission():
     motors.oled(0, "ERIC STOPPED")
     motors.oled(1, "")
     eric_say("Mission disengaged. All systems halted.")
+    log_mission_event("mission_stopped", "operator abort")
+    end_mission_log(completed=False)
     _ui("status", "IDLE")
 
 
@@ -723,23 +1102,25 @@ def _nav_check() -> dict:
     Single pan-tilt frame + live sensor data every NAV_IMAGE_INTERVAL seconds.
     LiDAR and OAK-D readings are prepended to the prompt as ground-truth context.
     Much faster than 10s video clip — allows more frequent obstacle checks.
+
+    Eye-contact gate: persons are only greeted when Cosmos confirms they are
+    CLOSE (within ~1.5m) AND facing Eric. Eliminates random greetings at people
+    across the room who happen to be in frame.
     """
     _ui("log", "📷 Nav check...")
     motors.oled(1, "Nav check...")
 
     # ── Hardware safety check BEFORE asking Cosmos ──────────────────────────
-    # If LiDAR already sees something too close, stop immediately —
-    # no need to wait for Cosmos inference (which takes 5-9s).
     try:
         from lidar import obstacle_close as lidar_close, obstacle_near as lidar_near
         if lidar_close():
             log.info("Nav check: LiDAR STOP — returning obstacle result immediately")
+            log_action("LIDAR_STOP", "obstacle within 0.30m stop zone")
             return {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
                     "action": "stop",
                     "physical_reasoning": "LiDAR: obstacle within 0.30m stop zone"}
         if lidar_near():
             log.info("Nav check: LiDAR near — slowing")
-            # Don't abort — let Cosmos decide with the sensor context
     except Exception:
         pass
 
@@ -749,6 +1130,7 @@ def _nav_check() -> dict:
             d = get_front_depth()
             if d is not None and d < 0.30:
                 log.info(f"Nav check: OAK-D STOP at {d:.2f}m")
+                log_action("OAKD_STOP", f"obstacle at {d:.2f}m")
                 return {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
                         "action": "stop",
                         "physical_reasoning": f"OAK-D: obstacle at {d:.2f}m — within stop distance"}
@@ -759,10 +1141,8 @@ def _nav_check() -> dict:
     if not frame:
         return dict(_NAV_FALLBACK)
 
-    # Build sensor context to prepend — gives Cosmos real metric distances
     sensor_ctx = _sensor_context()
 
-    # Simplified nav prompt for single image
     NAV_IMAGE_PROMPT = f"""{sensor_ctx}You are a tracked ground robot moving forward. This is a single frame from your forward camera.
 
 Check ONLY for immediate safety hazards:
@@ -794,8 +1174,6 @@ Example output (copy this structure exactly, change values to match what you see
 Now analyze the frame and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
 """
     try:
-        # Raw request with NO system prompt — prevents mission briefing bleeding
-        # into nav responses (hallucination suppression for 2B model)
         payload = {
             "model": COSMOS_MODEL,
             "messages": [{"role": "user", "content": [
@@ -809,22 +1187,61 @@ Now analyze the frame and output ONLY the JSON object above. No markdown. No exp
         r = requests.post(VLLM_URL, json=payload, timeout=30)
         r.raise_for_status()
         response = r.json()["choices"][0]["message"]["content"].strip()
+        log_ai(NAV_IMAGE_PROMPT[-200:], response, label="NAV_CHECK")
         result = _parse_json(response, dict(_NAV_FALLBACK), label="NAV CHECK")
 
+        # ── Eye-contact gate: only greet if person is close AND facing Eric ──
         if result.get("person_visible") and mission_active:
             motors.stop()
-            _ui("log", "👤 Person spotted during nav — stopping")
-            _ui("status", "PERSON SPOTTED")
-            greeting = ask_cosmos(
-                "You spotted someone ahead while navigating. "
-                "Greet them and ask if they can help with your mission. 1-2 sentences.",
-                max_tokens=60
-            )
-            eric_say(greeting)
+            _ui("log", "👤 Person spotted — checking proximity and eye contact...")
+
+            ec_prompt = """Is there a person in this frame who is BOTH:
+1. CLOSE to you (within approximately 1.5 meters), AND
+2. FACING toward you (their face or body is oriented toward the camera)?
+
+Answer ONLY with this JSON — no markdown, no extra text:
+{"close_and_facing": true_or_false, "reasoning": "one sentence"}
+
+Set close_and_facing=false if the person is far away, looking away, or has their back to you.
+"""
+            ec_frame = capture_frame(CAMERA_PANTILT, 320, 240)
+            ec_result = {"close_and_facing": False}
+            if ec_frame:
+                try:
+                    ec_payload = {
+                        "model": COSMOS_MODEL,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
+                            {"type": "text", "text": ec_prompt}
+                        ]}],
+                        "max_tokens": 60,
+                        "temperature": 0.1,
+                    }
+                    ec_r = requests.post(VLLM_URL, json=ec_payload, timeout=20)
+                    ec_r.raise_for_status()
+                    ec_raw = ec_r.json()["choices"][0]["message"]["content"].strip()
+                    log_ai(ec_prompt, ec_raw, label="EYE_CONTACT")
+                    ec_result = _parse_json(ec_raw, {"close_and_facing": False}, "EYE CONTACT")
+                except Exception as e:
+                    log_exception("eye_contact_check", e)
+
+            if ec_result.get("close_and_facing"):
+                _ui("log", f"👁️  Eye contact confirmed — greeting! ({ec_result.get('reasoning','')})")
+                _ui("status", "PERSON SPOTTED")
+                log_mission_event("person_greeted", ec_result.get("reasoning", ""))
+                greeting = ask_cosmos(
+                    "Someone is looking at you from close range. "
+                    "Greet them warmly and ask if they can help with your mission. 1-2 sentences.",
+                    max_tokens=60
+                )
+                eric_say(greeting)
+            else:
+                _ui("log", f"Person spotted but not close/facing ({ec_result.get('reasoning','')}) — continuing")
+                motors.forward(MOTOR_SPEED_SLOW)
 
         return result
     except Exception as e:
-        log.error(f"Nav check error: {e}")
+        log_exception("_nav_check", e)
         return dict(_NAV_FALLBACK)
 
 
@@ -875,7 +1292,6 @@ def _quick_scan() -> dict:
     if not frames:
         return dict(_SCAN_FALLBACK)
 
-    # Build sensor context — prepend to prompt so Cosmos sees real distances
     sensor_ctx = _sensor_context()
     prompt = sensor_ctx + QUICK_SCAN_PROMPT if sensor_ctx else QUICK_SCAN_PROMPT
 
@@ -884,12 +1300,12 @@ def _quick_scan() -> dict:
         response = _cosmos_frames(frames, prompt, max_tokens=200, temp=0.3)
         result = _parse_json(response, dict(_SCAN_FALLBACK), label="QUICK SCAN RESULT")
 
-        # ── Sensor override: if sensors say stop, override Cosmos action ──────
-        # Cosmos vision can lag behind reality on fast approach — sensors are instant.
+        # ── Sensor override ──────────────────────────────────────────────────
         try:
             from lidar import obstacle_close as lidar_close
             if lidar_close():
                 log.info("Quick scan: LiDAR override → wall_ahead=True")
+                log_action("LIDAR_OVERRIDE", "quick scan")
                 result["wall_ahead"]     = True
                 result["obstacle_close"] = True
                 result["action"]         = "stop"
@@ -902,6 +1318,7 @@ def _quick_scan() -> dict:
                 d = get_front_depth()
                 if d is not None and d < 0.30:
                     log.info(f"Quick scan: OAK-D override at {d:.2f}m → wall_ahead=True")
+                    log_action("OAKD_OVERRIDE", f"quick scan at {d:.2f}m")
                     result["wall_ahead"]     = True
                     result["obstacle_close"] = True
                     result["action"]         = "stop"
@@ -910,7 +1327,7 @@ def _quick_scan() -> dict:
 
         return result
     except Exception as e:
-        log.error(f"Quick scan error: {e}")
+        log_exception("_quick_scan", e)
         return dict(_SCAN_FALLBACK)
 
 
@@ -1025,18 +1442,165 @@ def _video_scan_at_position() -> dict:
         return _quick_scan()
 
 
-def _scan_360_smart() -> dict:
+def _scan_360_pantilt() -> dict:
     """
-    Full 360° scan: 8 body positions × 45° (finer than 4×90°, less overshoot).
-    At each position: tilt down to ground level (5°) then up to mid-range (-15°).
-    LED only on if pitch black.
-    Sensor context injected into the final overview prompt.
+    Full 360° scan: pan-tilt sweeps from -90° to +90° in 30° steps (7 positions)
+    while chassis stays still, then ONE 180° chassis turn, then sweeps again.
+
+    Coverage:
+      Phase 1 — chassis 0°:   pan = -90, -60, -30, 0, +30, +60, +90  (7 stops)
+      Phase 2 — chassis 180°: chassis turns 180°
+      Phase 3 — chassis 180°: pan = -90, -60, -30, 0, +30, +60, +90  (7 stops)
+    = 14 positions × 2 tilts = 28 frames maximum; chassis only rotates once.
+
+    At each pan position: tilt to ground level (TILT_LOW) then mid-range (TILT_MID).
+    If target found mid-scan, chassis is turned to face it and scan returns immediately.
+    One final Cosmos overview pass is run over all collected frames if no target found.
     """
     global mission_state
     mission_state = State.SCANNING_360
     _ui("status", "360 SCANNING")
     motors.oled(0, "360 Scan")
-    log.info("Starting smart 360 image scan (8×45°)")
+    motors.stop()
+    time.sleep(0.3)
+    log.info("Starting pan-tilt 360 scan (7×30° steps + 180° chassis turn)")
+    log_mission_event("scan_360_start", "pan-tilt sweep 7×30° + 180° chassis")
+
+    all_frames: list[str] = []
+
+    # Pan positions: 7 stops covering -90° to +90° in 30° increments
+    PAN_STEPS  = [-90, -60, -30, 0, 30, 60, 90]
+    TILT_LOW   =  10   # ground-looking (positive = down on UGV Beast pan-tilt)
+    TILT_MID   = -10   # mid-range / horizon
+    PAN_SETTLE = 0.35  # seconds after pantilt() before capture — motor settle time
+
+    def _pan_to_chassis_turn_sec(pan: int) -> float:
+        """Estimate chassis turn duration to face a target spotted at pan angle pan."""
+        # At ±90° the robot needs a full 90° chassis turn to face forward.
+        # We already know TURN_90_SEC for 90° at MOTOR_SPEED_SLOW.
+        return abs(pan) / 90.0 * TURN_90_SEC
+
+    def _sweep(phase_label: str) -> dict | None:
+        """
+        Sweep all PAN_STEPS. Returns target result dict if found, else None.
+        Appends captured frames to all_frames.
+        """
+        for pan in PAN_STEPS:
+            if not mission_active:
+                return None
+            _ui("log", f"{phase_label}: pan {pan:+d}°")
+            motors.oled(1, f"Pan {pan:+d}d")
+
+            for tilt, tilt_label in [(TILT_LOW, "ground"), (TILT_MID, "mid")]:
+                motors.pantilt(pan, tilt, speed=60)
+                time.sleep(PAN_SETTLE)
+
+                # ── Adaptive LED ─────────────────────────────────────────────
+                frame = _capture_sharp(CAMERA_PANTILT)
+                if not frame:
+                    continue
+                if _is_pitch_black(frame):
+                    motors.lights(base=180, head=255)
+                    time.sleep(0.2)
+                    frame = _capture_sharp(CAMERA_PANTILT) or frame
+                    motors.lights(0, 0)
+                all_frames.append(frame)
+
+                # ── Quick video scan at this position ────────────────────────
+                result = _video_scan_at_position()
+
+                if result.get("target_visible"):
+                    log.info(f"🎯 Target at {phase_label} pan={pan:+d}° tilt={tilt_label}")
+                    _ui("log", f"Target visible at pan {pan:+d}° — turning chassis to face it!")
+                    log_mission_event("target_found_mid_scan", f"pan={pan} tilt={tilt_label}")
+                    motors.oled(1, "TARGET FOUND!")
+                    motors.stop()
+                    time.sleep(0.2)
+
+                    # Turn chassis to face the target (pan angle → chassis turn)
+                    if pan < -15:
+                        turn_sec = _pan_to_chassis_turn_sec(pan)
+                        _ui("log", f"Turning left {turn_sec:.1f}s to face target at pan {pan}°")
+                        motors.left(MOTOR_SPEED_SLOW)
+                        time.sleep(turn_sec)
+                        motors.stop()
+                    elif pan > 15:
+                        turn_sec = _pan_to_chassis_turn_sec(pan)
+                        _ui("log", f"Turning right {turn_sec:.1f}s to face target at pan {pan}°")
+                        motors.right(MOTOR_SPEED_SLOW)
+                        time.sleep(turn_sec)
+                        motors.stop()
+
+                    # Re-centre pan after chassis has turned to face target
+                    motors.pantilt(0, 5)
+                    time.sleep(0.3)
+
+                    return {
+                        **result,
+                        "target_visible":     True,
+                        "target_direction":   "front",
+                        "in_my_path":         True,
+                        "action":             "forward",
+                        "physical_reasoning": f"Target found at pan={pan}° during pantilt scan; chassis turned to face it.",
+                        "mission_complete":   False,
+                    }
+        return None
+
+    # ── Phase 1: Forward-facing 180° arc ─────────────────────────────────────
+    found = _sweep("Front arc")
+    if found:
+        return found
+
+    # ── Phase 2: Single 180° chassis turn ────────────────────────────────────
+    _ui("log", "Turning chassis 180° for rear sweep...")
+    motors.oled(1, "Turning 180...")
+    motors.pantilt(0, 5)   # centre pan-tilt before chassis turn
+    time.sleep(0.3)
+    motors.right(MOTOR_SPEED_SLOW)
+    time.sleep(TURN_90_SEC * 2.0)   # 180° ≈ 2× the calibrated 90° time
+    motors.stop()
+    time.sleep(0.5)
+    log_action("CHASSIS_180", "rear sweep phase")
+
+    # ── Phase 3: Rear (now forward-facing) 180° arc ───────────────────────────
+    found = _sweep("Rear arc")
+    if found:
+        return found
+
+    # ── No target found — Cosmos overview of all collected frames ─────────────
+    motors.pantilt(0, 5)
+    _ui("log", f"360 scan done — {len(all_frames)} frames → Cosmos overview")
+    motors.oled(1, "Analyzing...")
+    log_mission_event("scan_360_complete", f"{len(all_frames)} frames, no target found")
+
+    if not all_frames:
+        return dict(_SCAN_FALLBACK)
+
+    sensor_ctx = _sensor_context()
+    prompt_360 = sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT
+
+    try:
+        # Use async future so we can do sensor checks while Cosmos is thinking
+        future = _cosmos_frames_async(all_frames, prompt_360, max_tokens=300, temp=0.2)
+        response = future.result(timeout=90)
+        log_ai(prompt_360[-300:], response, label="360_OVERVIEW")
+        return _parse_json(response, dict(_SCAN_FALLBACK), label="360° PAN-TILT OVERVIEW")
+    except Exception as e:
+        log_exception("_scan_360_pantilt_overview", e)
+        return dict(_SCAN_FALLBACK)
+
+
+def _scan_360_smart() -> dict:
+    """
+    Legacy chassis-rotation 360° scan (8×45° body turns).
+    Kept as fallback if pan-tilt hardware is unavailable.
+    Prefer _scan_360_pantilt() for normal operation.
+    """
+    global mission_state
+    mission_state = State.SCANNING_360
+    _ui("status", "360 SCANNING (chassis)")
+    motors.oled(0, "360 Scan")
+    log.info("Starting legacy chassis 360 scan (8×45°)")
 
     motors.stop()
     motors.lights(0, 0)
@@ -1045,19 +1609,17 @@ def _scan_360_smart() -> dict:
     all_frames   = []
     best_spot    = None
 
-    TURN_45_SEC = TURN_90_SEC / 2   # half the 90° time
+    TURN_45_SEC = TURN_90_SEC / 2
 
     for pos in range(8):
         deg = pos * 45
         _ui("log", f"Scanning {deg}°...")
         motors.oled(1, f"Scan {deg}deg")
 
-        # Ground level first (see objects on floor), then mid-range
         for tilt, label in [(5, "ground"), (-15, "mid")]:
             motors.pantilt(0, tilt, 40)
             time.sleep(0.4)
 
-            # Wide frame for overview collection — adaptive LED only if pitch black
             f_pt = _capture_sharp(CAMERA_PANTILT)
             if f_pt:
                 if _is_pitch_black(f_pt):
@@ -1067,17 +1629,14 @@ def _scan_360_smart() -> dict:
                     motors.lights(0, 0)
                 all_frames.append(f_pt)
 
-            # Video scan at this position — Eric is stopped so no crawl penalty
             result = _video_scan_at_position()
 
-            # ── Target found mid-scan — turn to face it, then stop early ─────
             if result.get("target_visible"):
                 log.info(f"🎯 Target VISIBLE at {deg}° tilt={label} — stopping scan early!")
                 _ui("log", f"Target visible at {deg}° — stopping scan!")
                 motors.oled(1, "TARGET FOUND!")
                 motors.stop()
                 time.sleep(0.2)
-
                 return {
                     "object":             result.get("object", "person"),
                     "object_name":        result.get("object_name"),
@@ -1088,7 +1647,7 @@ def _scan_360_smart() -> dict:
                     "obstacle_close":     False,
                     "small_obstacle":     False,
                     "target_visible":     True,
-                    "target_direction":   "front",   # robot is already facing it
+                    "target_direction":   "front",
                     "clearest_direction": "front",
                     "action":             "forward",
                     "speak":              result.get("speak"),
@@ -1096,16 +1655,13 @@ def _scan_360_smart() -> dict:
                     "mission_complete":   False
                 }
 
-            # ── Remember best non-empty result for re-visit ───────────────
             if result.get("object") not in ("clear", "unknown", None):
                 if best_spot is None:
                     best_spot = (deg, result)
-                    log.info(f"Potential target ({result.get('object')}) at {deg}° — continuing scan")
 
             if result.get("wall_ahead") or result.get("obstacle_close"):
                 log.info(f"Obstacle at {deg}° during 360 scan")
 
-        # Re-centre pan-tilt to ground default before body rotation
         motors.pantilt(0, 5)
         time.sleep(0.3)
 
@@ -1115,7 +1671,6 @@ def _scan_360_smart() -> dict:
             motors.stop()
             time.sleep(0.4)
 
-    # ── Re-visit best potential target for a second look ─────────────────────
     if best_spot:
         deg, spot = best_spot
         _ui("log", f"Re-visiting best potential target at {deg}°...")
@@ -1139,13 +1694,12 @@ def _scan_360_smart() -> dict:
                 "target_visible":     True,
                 "target_direction":   "front",
                 "clearest_direction": "front",
-                "action":             "forward",  # must not be "stop"
+                "action":             "forward",
                 "speak":              result.get("speak"),
                 "physical_reasoning": "Target confirmed on second look",
                 "mission_complete":   False
             }
 
-    # ── No target found — send overview frames to Cosmos for direction ────────
     log.info(f"No target confirmed — sending {len(all_frames)} overview frames to Cosmos")
     _ui("log", f"360 done — {len(all_frames)} frames → Cosmos overview")
     motors.oled(1, "Analyzing...")
@@ -1153,7 +1707,6 @@ def _scan_360_smart() -> dict:
     if not all_frames:
         return dict(_SCAN_FALLBACK)
 
-    # Prepend sensor context to 360 overview prompt
     sensor_ctx = _sensor_context()
     prompt_360 = sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT
 
@@ -1161,8 +1714,20 @@ def _scan_360_smart() -> dict:
         response = _cosmos_frames(all_frames, prompt_360, max_tokens=300, temp=0.2)
         return _parse_json(response, dict(_SCAN_FALLBACK), label="360° OVERVIEW")
     except Exception as e:
-        log.error(f"360 overview Cosmos error: {e}")
+        log_exception("_scan_360_smart", e)
         return dict(_SCAN_FALLBACK)
+
+
+def _best_360_scan() -> dict:
+    """
+    Use pan-tilt 360 scan by default. Falls back to chassis rotation if pan-tilt fails.
+    """
+    try:
+        return _scan_360_pantilt()
+    except Exception as e:
+        log_exception("_scan_360_pantilt", e)
+        log.warning("Pan-tilt scan failed — falling back to chassis rotation")
+        return _scan_360_smart()
 
 
 # ─── Direction Control ────────────────────────────────────────────────────────
@@ -1252,6 +1817,7 @@ def _avoid_obstacle_legacy(wall_ahead: bool, small_obstacle: bool) -> bool:
 def _handle_mission_complete(obj_name):
     global mission_active, mission_state
     log.info(f"MISSION COMPLETE — {obj_name}")
+    log_mission_event("mission_complete", obj_name or "target")
     mission_state = State.COMPLETE
     motors.stop()
     # Cancel any active Nav2 goal
@@ -1283,6 +1849,9 @@ def _handle_mission_complete(obj_name):
     eric_say(announcement)
     _ui("eric_says", announcement)
     _ui("log", f"COMPLETE: {announcement}")
+    log_mission_event("announcement", announcement[:150])
+
+    end_mission_log(completed=True)
 
     mission_active = False
     _ui("status", "MISSION COMPLETE")
@@ -1322,11 +1891,13 @@ def _approach_target():
     Drive toward target in 2-second steps, scanning after each.
     Uses _move_forward() so Nav2 is used when available.
     Stops when: close enough, obstacle hit, person seen, or 3 consecutive invisible scans.
+    On arrival, calls _execute_step_action() so multi-step missions advance properly.
     """
     global mission_state
     _ui("log", "Approaching target...")
     motors.oled(1, "Approaching...")
     _ui("status", "APPROACHING")
+    log_mission_event("approach_start", "driving toward target")
     invisible_count = 0
 
     _NEAR_DISTANCES = {"close", "near", "nearby", "very_close", "very close", "right there"}
@@ -1343,9 +1914,10 @@ def _approach_target():
         obj   = check.get("object", "unknown")
         tdir  = str(check.get("target_direction", "front")).lower().strip()
 
-        # ── Obstacle → avoid and continue approach, don't just stop ──────────
+        # ── Obstacle → avoid and continue approach ───────────────────────────
         if check.get("wall_ahead") or check.get("obstacle_close"):
             _ui("log", "Obstacle during approach — avoiding")
+            log_action("AVOID_DURING_APPROACH", f"obj={obj}")
             force_360 = _avoid_obstacle(
                 wall_ahead=check.get("wall_ahead", False),
                 small_obstacle=check.get("small_obstacle", False)
@@ -1353,22 +1925,22 @@ def _approach_target():
             if force_360:
                 mission_state = State.SEARCHING
                 return
-            continue  # resume approach after avoidance
+            continue
 
         if check.get("mission_complete"):
-            _handle_mission_complete(check.get("object_name"))
+            _execute_step_action(check.get("object_name"))
             return
 
-        # ── Mission complete: confirmed close to target ───────────────────────
+        # ── Close enough — execute the step action ───────────────────────────
         if check.get("target_visible") and obj in _TARGET_OBJECTS and dist in _NEAR_DISTANCES:
-            _ui("log", f"Target confirmed close ({dist}) — MISSION COMPLETE")
-            _handle_mission_complete(check.get("object_name") or obj)
+            _ui("log", f"Target confirmed close ({dist}) — executing step action")
+            log_mission_event("target_reached", f"obj={obj} dist={dist}")
+            _execute_step_action(check.get("object_name") or obj)
             return
 
-        # ── Close enough to interact ──────────────────────────────────────────
         if dist in _NEAR_DISTANCES or check.get("in_my_path"):
-            _ui("log", f"Target close ({dist}) — INTERACTING")
-            mission_state = State.INTERACTING
+            _ui("log", f"Close to target ({dist}) — executing step action")
+            _execute_step_action(check.get("object_name") or obj)
             return
 
         # ── Target dropped below camera → already on top of it ───────────────
@@ -1376,10 +1948,10 @@ def _approach_target():
             _ui("log", "Target below camera — arrived!")
             motors.pantilt(0, 20)
             time.sleep(0.3)
-            _handle_mission_complete(check.get("object_name") or obj)
+            _execute_step_action(check.get("object_name") or obj)
             return
 
-        # ── Lateral steering: brief corrective turn to stay aimed at target ───
+        # ── Lateral steering ─────────────────────────────────────────────────
         if tdir in ("left", "left_side"):
             _ui("log", "Target drifted left — correcting")
             motors.left(MOTOR_SPEED_SLOW); time.sleep(0.4); motors.stop()
@@ -1387,30 +1959,61 @@ def _approach_target():
             _ui("log", "Target drifted right — correcting")
             motors.right(MOTOR_SPEED_SLOW); time.sleep(0.4); motors.stop()
 
-        # ── Pan-tilt vertical tracking: tilt down as we get closer ───────────
+        # ── Pan-tilt vertical tracking ────────────────────────────────────────
         tilt_map = {"far": 5, "medium": 10, "mid": 10,
                     "close": 15, "near": 18, "nearby": 18, "very_close": 22}
         motors.pantilt(0, tilt_map.get(dist, 5), 60)
 
-        # ── Person nearby → stop and greet ───────────────────────────────────
+        # ── Person nearby → eye-contact gate before greeting ─────────────────
         if obj == "person" and (dist in _NEAR_DISTANCES or check.get("in_my_path")):
             name = check.get("object_name") or "person"
-            _ui("log", "Person nearby during approach — stopping to interact")
+            _ui("log", "Person nearby during approach — checking eye contact...")
             motors.oled(1, "Person!")
-            _ui("status", f"FOUND — {name}")
-            greeting = ask_cosmos(
-                f"You see {name} nearby. Greet them and ask if they can help with your mission. 1-2 sentences.",
-                max_tokens=80
-            )
-            eric_say(greeting)
-            mission_state = State.INTERACTING
-            return
+
+            # Eye-contact check
+            ec_frame = capture_frame(CAMERA_PANTILT, 320, 240)
+            greet    = True
+            if ec_frame:
+                try:
+                    ec_payload = {
+                        "model": COSMOS_MODEL,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
+                            {"type": "text", "text":
+                                '{"close_and_facing": true_or_false, "reasoning": "one sentence"} '
+                                '— Is the person within 1.5m AND facing/looking toward you?'}
+                        ]}],
+                        "max_tokens": 50,
+                        "temperature": 0.1,
+                    }
+                    ec_r = requests.post(VLLM_URL, json=ec_payload, timeout=15)
+                    ec_r.raise_for_status()
+                    ec_raw = ec_r.json()["choices"][0]["message"]["content"].strip()
+                    log_ai("eye_contact_approach", ec_raw, label="EYE_CONTACT")
+                    ec    = _parse_json(ec_raw, {"close_and_facing": True}, "EYE CONTACT APPROACH")
+                    greet = ec.get("close_and_facing", True)
+                    if not greet:
+                        _ui("log", f"Person not facing Eric — skipping greeting ({ec.get('reasoning','')})")
+                except Exception as e:
+                    log_exception("eye_contact_approach", e)
+
+            if greet:
+                _ui("status", f"FOUND — {name}")
+                greeting = ask_cosmos(
+                    f"You see {name} nearby. Greet them and ask if they can help with your mission. 1-2 sentences.",
+                    max_tokens=80
+                )
+                eric_say(greeting)
+                log_mission_event("person_greeted_approach", name)
+                mission_state = State.INTERACTING
+                return
 
         if not check.get("target_visible", False):
             invisible_count += 1
             _ui("log", f"Target not visible ({invisible_count}/3)")
             if invisible_count >= 3:
                 _ui("log", "Lost target — resuming search")
+                log_mission_event("target_lost", "resuming search after 3 invisible scans")
                 mission_state = State.SEARCHING
                 motors.forward(MOTOR_SPEED_SLOW)
                 return
@@ -1454,7 +2057,7 @@ def _process_scan(scan, from_360=False):
 
     if complete:
         if speak_tx: eric_say(speak_tx)
-        _handle_mission_complete(obj_name)
+        _execute_step_action(obj_name)
         return
 
     obstacle_close = scan.get("obstacle_close", False)
@@ -1468,6 +2071,7 @@ def _process_scan(scan, from_360=False):
         motors.stop()
         if speak_tx: eric_say(speak_tx)
         is_wall = wall_ahead or (obj == "wall")
+        log_action("AVOID", f"wall={wall_ahead} obstacle_close={obstacle_close} obj={obj}")
         force_360 = _avoid_obstacle(wall_ahead=is_wall, small_obstacle=small_obs)
         if force_360:
             _scans_since_360 = SCANS_BEFORE_360
@@ -1511,7 +2115,7 @@ def _process_scan(scan, from_360=False):
             motors.stop()
             motors.pantilt(0, 20)
             time.sleep(0.5)
-            _handle_mission_complete(obj_name)
+            _execute_step_action(obj_name)
             return
 
         if from_360:
@@ -1520,6 +2124,7 @@ def _process_scan(scan, from_360=False):
         else:
             _ui("log", "Target spotted during scan — approaching")
         _ui("status", "TARGET SPOTTED")
+        log_mission_event("target_spotted", f"direction={direction} obj={obj} name={obj_name}")
         if direction not in ("front", "ahead", "unknown", ""):
             _face_direction(direction)
         _approach_target()
@@ -1539,13 +2144,46 @@ def _process_scan(scan, from_360=False):
             _ui("status", f"FOUND — {name}")
             motors.pantilt(0, 5)
             time.sleep(0.5)
-            greeting = ask_cosmos(
-                f"You see {name} {'ahead' if in_path else 'nearby'} ({dist_str} away). "
-                "Greet them and ask about your mission. 1-2 sentences.",
-                max_tokens=80
-            )
-            eric_say(greeting)
-            _ui("status", f"TALKING — {name}")
+
+            # ── Eye-contact gate before greeting ─────────────────────────────
+            ec_frame = capture_frame(CAMERA_PANTILT, 320, 240)
+            should_greet = True
+            if ec_frame:
+                try:
+                    ec_payload = {
+                        "model": COSMOS_MODEL,
+                        "messages": [{"role": "user", "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
+                            {"type": "text", "text":
+                                '{"close_and_facing": true_or_false, "reasoning": "one sentence"} '
+                                '— Is the person within 1.5m AND facing/looking toward you?'}
+                        ]}],
+                        "max_tokens": 50,
+                        "temperature": 0.1,
+                    }
+                    ec_r = requests.post(VLLM_URL, json=ec_payload, timeout=15)
+                    ec_r.raise_for_status()
+                    ec_raw = ec_r.json()["choices"][0]["message"]["content"].strip()
+                    log_ai("eye_contact_scan", ec_raw, label="EYE_CONTACT")
+                    ec = _parse_json(ec_raw, {"close_and_facing": True}, "EYE CONTACT SCAN")
+                    should_greet = ec.get("close_and_facing", True)
+                    if not should_greet:
+                        _ui("log", f"Person near but not facing Eric — not greeting ({ec.get('reasoning','')})")
+                        mission_state = State.SEARCHING
+                        motors.forward(MOTOR_SPEED_SLOW)
+                        return
+                except Exception as e:
+                    log_exception("eye_contact_scan", e)
+
+            if should_greet:
+                greeting = ask_cosmos(
+                    f"You see {name} {'ahead' if in_path else 'nearby'} ({dist_str} away). "
+                    "Greet them and ask about your mission. 1-2 sentences.",
+                    max_tokens=80
+                )
+                eric_say(greeting)
+                log_mission_event("person_greeted_scan", name)
+                _ui("status", f"TALKING — {name}")
             return
         else:
             _ui("log", f"Person ({obj_name or 'unknown'}) visible but {dist_str} — continuing")
@@ -1557,24 +2195,45 @@ def _process_scan(scan, from_360=False):
     if from_360 and clear_dir != "front":
         _face_direction(clear_dir)
 
+    # ── Terrain-aware speed control ───────────────────────────────────────────
+    terrain_speed = _speed_for_terrain(terrain)
+
+    if terrain_speed is None:
+        # Impassable terrain — treat exactly like a wall
+        _ui("log", f"🚧 Impassable terrain '{terrain}' — avoiding")
+        log_action("IMPASSABLE_TERRAIN", terrain)
+        motors.stop()
+        eric_say(f"I see {terrain} ahead. I cannot cross that. Finding another way.")
+        force_360 = _avoid_obstacle(wall_ahead=True, small_obstacle=False)
+        if force_360:
+            _scans_since_360 = SCANS_BEFORE_360
+        else:
+            motors.forward(MOTOR_SPEED_SLOW)
+        return
+
+    if terrain and terrain not in ("clear", "unknown", ""):
+        speed_label = ("FAST" if terrain_speed == MOTOR_SPEED_FAST
+                       else "SLOW" if terrain_speed == MOTOR_SPEED_SLOW
+                       else "NORMAL")
+        _ui("log", f"Terrain '{terrain}' → {speed_label} speed")
+        log_action("TERRAIN_SPEED", f"{terrain} → {speed_label}")
+
     if action == "navigate_around":
         _turn_nav2_or_direct("left", 0.8)
-        motors.forward(MOTOR_SPEED_SLOW)
-    elif action == "slow" or terrain == "carpet":
-        motors.slow()
+        motors.forward(terrain_speed)
     elif action == "stop":
         motors.stop()
     elif action == "turn_right":
         _turn_nav2_or_direct("right", 1.0)
-        motors.forward(MOTOR_SPEED_SLOW)
+        motors.forward(terrain_speed)
     elif action == "turn_left":
         _turn_nav2_or_direct("left", 1.0)
-        motors.forward(MOTOR_SPEED_SLOW)
+        motors.forward(terrain_speed)
     elif action == "turn_back":
         _turn_nav2_or_direct("back", 1.5)
-        motors.forward(MOTOR_SPEED_SLOW)
+        motors.forward(terrain_speed)
     else:
-        motors.forward(MOTOR_SPEED_SLOW)
+        motors.forward(terrain_speed)
 
     mission_state = State.SEARCHING
     motors.oled(0, "ERIC ACTIVE")
@@ -1596,7 +2255,8 @@ def _mission_loop():
     global _avoid_attempts, _nav_clips_since_scan
 
     eric_say("Starting initial 360 degree scan of the area.")
-    scan = _scan_360_smart()
+    log_mission_event("initial_360_scan", "beginning")
+    scan = _best_360_scan()
     _process_scan(scan, from_360=True)
 
     if mission_active and mission_state == State.SEARCHING:
@@ -1618,19 +2278,22 @@ def _mission_loop():
                 if nav.get("wall_ahead") or nav.get("obstacle_close"):
                     motors.stop()
                     _ui("log", f"Nav: obstacle — {nav.get('physical_reasoning','')}")
+                    log_action("NAV_OBSTACLE", nav.get("physical_reasoning", ""))
                     force_360 = _avoid_obstacle(
                         wall_ahead=nav.get("wall_ahead", False),
                         small_obstacle=nav.get("small_obstacle", False)
                     )
                     if force_360:
                         _scans_since_360 = SCANS_BEFORE_360
-                        _nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS  # force scan
+                        _nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS
                     else:
                         motors.forward(MOTOR_SPEED_SLOW)
                 elif nav.get("action") == "slow":
                     motors.slow()
+                    log_action("NAV_SLOW", "nav check requested slow")
                 elif nav.get("action") == "stop":
                     motors.stop()
+                    log_action("NAV_STOP", "nav check requested stop")
                 else:
                     motors.forward(MOTOR_SPEED_SLOW)
                 continue
@@ -1649,7 +2312,9 @@ def _mission_loop():
                     eric_say("Nothing found. Performing a full 360 scan.")
                 else:
                     _ui("log", "Periodic 360 scan...")
-                scan = _scan_360_smart()
+                log_mission_event("360_scan_triggered",
+                                  f"empty={_empty_scans} scans_since={_scans_since_360}")
+                scan = _best_360_scan()
                 _scans_since_360 = _empty_scans = 0
                 _process_scan(scan, from_360=True)
                 if mission_active and mission_state == State.SEARCHING:
@@ -1663,7 +2328,7 @@ def _mission_loop():
             time.sleep(0.3)
 
         except Exception as e:
-            log.error(f"Mission loop error: {e}")
+            log_exception("_mission_loop", e)
             time.sleep(1)
 
     motors.stop()
