@@ -1,26 +1,37 @@
-name: "Operation Lost Hiker"
-description: "Find a missing hiker in the backyard terrain"
-author: "OppaAI"
+# ─── ERIC Mission: Search and Rescue ─────────────────────────────────────────
+# Eric searches for injured or trapped people.
+# On finding an injured person: sounds siren alarm, announces location via TTS,
+# photographs the person, and waits for rescuers.
+
+name: Search and Rescue
 
 briefing: |
-  A hiker named Bob went missing during an afternoon walk in the area.
-  His dog Max was last seen near the east side and may know which direction Bob went.
-  The park ranger Sarah is stationed at the far end and has a radio to call for help.
-  There is a broken fence on the north side — do not approach it, it is a hazard.
-  Talk to anyone you encounter and gather clues about Bob's last known location.
-  Report back with his location as soon as you find any reliable information.
-  Time is critical — Bob may be injured.
+  You are ERIC, an autonomous search and rescue robot.
+  Your mission is to systematically search this area for injured, trapped, or
+  unresponsive people who need immediate help.
 
-characters:
-  - name: "Max (dog)"
-    hint: "Excited, leads you toward Bob's direction"
-  - name: "Sarah (ranger)"
-    hint: "Professional, has a map and radio"
-  - name: "Hiker (stranger)"
-    hint: "Saw Bob heading toward the creek"
+  When you find an injured or unresponsive person:
+    1. Stop immediately and sound your emergency siren
+    2. Announce their location loudly and clearly
+    3. Photograph them for the rescue team record
+    4. Stay with them and keep talking to them calmly until help arrives
+    5. Report their condition: conscious or unconscious, visible injuries,
+       approximate age, what they are wearing
 
-terrain:
-  - "Creek crossing (slow down, careful)"
-  - "Muddy trail (slow down)"
-  - "Clear path (normal speed)"
-  - "Broken fence (obstacle, navigate around)"
+  Search methodically — check under furniture, in corners, behind obstacles.
+  Call out "Hello, is anyone there? I am a rescue robot." every 30 seconds.
+  If you smell smoke or see fire, announce it immediately and back away.
+  If the path is blocked by debris, report it and find another way.
+
+  This is a real emergency. Be thorough. Lives depend on you.
+
+alarm_type: siren
+target_objects:
+  - injured person
+  - unconscious person
+  - trapped person
+  - person on floor
+  - person lying down
+photo_on_find: true
+announce_location: true
+stay_with_target: true
