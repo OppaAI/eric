@@ -38,29 +38,198 @@ Eric navigates a Star Wars Lego scene autonomously — scanning with dual camera
 | Gradio | Dual camera + LiDAR status + mission control UI |
 | Waveshare ESP32 serial UART | Motor + OLED + LED + pan-tilt control |
 
+---
+
 ## Architecture
 
+### System Overview
+
+```mermaid
+flowchart TD
+    COSMOS["🧠 COSMOS REASON 2\n(Mission Brain)\nSees → Reasons → Decides"]
+
+    subgraph SENSORS["Sensor Layer"]
+        LIDAR["📡 D500 LiDAR\n360° /scan topic"]
+        OAKD["📷 OAK-D Lite\nStereo Depth"]
+        CAM1["🎥 Webcam\nClose-up"]
+        CAM2["🎥 Pan-tilt Cam\nWide angle"]
+    end
+
+    subgraph NAV["Navigation Layer"]
+        NAV2["🗺️ ROS2 Nav2\nPath Planning + SLAM\n(optional)"]
+        DIRECT["⚡ Direct Motor Control\n(fallback)"]
+    end
+
+    subgraph SAFETY["⚠️ Independent Safety Layer"]
+        LIDAR_MON["LiDAR Safety Monitor\nlidar.py"]
+        OAKD_MON["OAK-D Depth Monitor\noakd.py"]
+    end
+
+    MOTORS["🤖 ESP32 Motors\nWaveshare UGV Beast UART"]
+
+    CAM1 --> COSMOS
+    CAM2 --> COSMOS
+    OAKD --> OAKD_MON
+    LIDAR --> LIDAR_MON
+
+    COSMOS -->|"goal pose / direction"| NAV2
+    COSMOS -->|"fallback: turn/move cmds"| DIRECT
+
+    NAV2 -->|cmd_vel| MOTORS
+    DIRECT --> MOTORS
+
+    LIDAR_MON -->|"obstacle < 0.30m → STOP\nobstacle < 0.60m → SLOW"| MOTORS
+    OAKD_MON -->|depth data available\nto Cosmos + mission| COSMOS
+
+    style SAFETY fill:#3a1a1a,stroke:#cc4444
+    style COSMOS fill:#1a2a3a,stroke:#4488cc
 ```
-┌─────────────────────────────────────────────────────┐
-│                  COSMOS REASON 2                    │  ← mission brain
-│  sees scene → reasons → decides where to go        │
-└─────────────────┬───────────────────────────────────┘
-                  │ goal pose / direction
-          ┌───────▼────────┐
-          │   Nav2 + ROS2  │  ← path planning (if enabled)
-          │  costmap + SLAM │
-          └───────┬─────────┘
-                  │ cmd_vel
-┌─────────────────▼───────────────────────────────────┐
-│              MOTORS (ESP32 via UART)                │
-└─────────────────────────────────────────────────────┘
-          ▲
-          │ STOP if obstacle < 30cm (independent of Cosmos)
-┌─────────┴───────────────────────────────────────────┐
-│          D500 LiDAR safety monitor                  │  ← reactive safety layer
-│    /scan → front arc check → motors.stop()          │
-└─────────────────────────────────────────────────────┘
+
+### Obstacle Safety Logic
+
+> **Current behaviour:** Eric stops or slows — it does **not** yet automatically reverse or steer around obstacles. Avoidance manoeuvres are on the roadmap.
+
+```mermaid
+flowchart LR
+    SCAN["D500 /scan\n360° reading"]
+    ARC["Extract front arc\n±60° = 120° total"]
+    MIN["min_distance\nin front arc"]
+
+    MIN -->|"< 0.30 m"| STOP["🛑 motors.stop()\nHARD STOP"]
+    MIN -->|"0.30–0.60 m"| SLOW["🐢 motors.slow()\nREDUCE SPEED"]
+    MIN -->|"> 0.60 m"| CLEAR["✅ No action\nCosmos drives"]
+
+    SCAN --> ARC --> MIN
+
+    style STOP fill:#3a0000,stroke:#cc0000
+    style SLOW fill:#2a1a00,stroke:#ff6600
+    style CLEAR fill:#0a2a0a,stroke:#76b900
 ```
+
+### Mission State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Idle : System start
+    Idle --> Initialising : ENGAGE pressed
+
+    Initialising --> Scanning : 360° initial scan
+
+    Scanning --> Reasoning : Cosmos receives\nvideo clip (10s)
+    Reasoning --> Moving : Cosmos decides direction
+    Reasoning --> Interacting : Target/character spotted
+
+    Moving --> Scanning : SCAN_INTERVAL elapsed
+    Moving --> SafetyStop : LiDAR obstacle < 0.30m
+
+    SafetyStop --> Scanning : Obstacle cleared
+
+    Interacting --> WaitingForInput : Eric speaks to character
+    WaitingForInput --> Reasoning : User types character reply
+    Reasoning --> MissionComplete : Objective confirmed
+
+    MissionComplete --> Idle : DISENGAGE
+    Idle --> [*]
+```
+
+---
+
+## Sequence Diagrams
+
+### Startup Sequence
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant main.py
+    participant Nav2
+    participant LiDAR
+    participant OAK-D
+    participant Cosmos
+    participant GUI
+
+    User->>main.py: uv run main.py
+    main.py->>Nav2: init_nav2() [if USE_NAV2]
+    Nav2-->>main.py: ✅ connected / ⚠️ fallback
+    main.py->>LiDAR: init_lidar() [if USE_LIDAR]
+    LiDAR-->>main.py: ✅ /scan subscribed
+    main.py->>OAK-D: init_oakd() [if USE_OAKD]
+    OAK-D-->>main.py: ✅ stereo depth active
+    main.py->>Cosmos: ask_cosmos("ERIC online and ready.")
+    Cosmos-->>main.py: "ERIC online and ready."
+    main.py->>GUI: launch() [Gradio on :7860]
+    GUI-->>User: Browser opens
+```
+
+### Mission Loop — One Reasoning Cycle
+
+```mermaid
+sequenceDiagram
+    participant GUI
+    participant Mission
+    participant Cosmos
+    participant Motors
+    participant LiDAR
+    participant TTS
+
+    GUI->>Mission: ENGAGE (mission selected)
+    Mission->>Motors: 360° rotation scan
+    Mission->>Cosmos: capture_frame() + NAV_PROMPT
+    Cosmos-->>Mission: reasoning + move decision (JSON)
+
+    alt Move forward
+        Mission->>LiDAR: obstacle_close()?
+        LiDAR-->>Mission: false
+        Mission->>Motors: forward()
+    else Obstacle detected
+        LiDAR->>Motors: stop() ← independent safety
+        Mission->>TTS: speak("Obstacle ahead, waiting...")
+    end
+
+    Mission->>Cosmos: capture_frame() [after SCAN_INTERVAL]
+    Cosmos-->>Mission: character spotted!
+    Mission->>Motors: stop()
+    Mission->>TTS: speak("Greetings, I am ERIC...")
+    Mission->>GUI: await character_input
+    GUI-->>Mission: user typed character response
+    Mission->>Cosmos: evaluate_response(character_text)
+    Cosmos-->>Mission: has_info=true / objective_found=true
+    Mission->>TTS: speak("Mission complete!")
+```
+
+### TTS Pipeline
+
+```mermaid
+sequenceDiagram
+    participant Mission
+    participant speak()
+    participant Queue
+    participant Worker
+    participant Piper
+    participant gTTS
+
+    Mission->>speak(): speak("Hello world")
+    speak()->>Queue: clear stale items
+    speak()->>Queue: put(text)
+    speak()-->>Mission: returns instantly (non-blocking)
+
+    loop Background worker
+        Worker->>Queue: get(timeout=1s)
+        Queue-->>Worker: text
+
+        alt Piper available
+            Worker->>Piper: feed(text).play()
+            Piper-->>Worker: audio complete (blocking)
+        else gTTS fallback
+            Worker->>gTTS: gTTS(text)
+            gTTS-->>Worker: .mp3 via pygame
+        end
+
+        Worker->>Queue: task_done()
+    end
+```
+
+---
 
 ## Project Structure
 
@@ -74,6 +243,7 @@ eric/
 ├── mission.py                # Mission state machine + YAML loader
 ├── nav2.py                   # ROS2 Nav2 integration (graceful fallback)
 ├── lidar.py                  # D500 LiDAR safety monitor
+├── oakd.py                   # OAK-D Lite stereo depth
 ├── gui.py                    # Gradio dual-camera + LiDAR status UI
 ├── missions/
 │   ├── template.yaml         # Start here — fully commented
@@ -127,6 +297,7 @@ CAMERA_PANTILT=0
 # Optional Nav2 + LiDAR (set true after ros2 launch)
 USE_NAV2=false
 USE_LIDAR=false
+USE_OAKD=false
 LIDAR_STOP_DIST=0.30
 LIDAR_SLOW_DIST=0.60
 ```
@@ -180,6 +351,16 @@ Missions are YAML files in `missions/`. Select from dropdown — Eric's reasonin
 6. Eric stops at characters — type as character in GUI
 7. Eric evaluates response, gets info, politely exits if off-topic
 8. Mission continues until objective found
+
+## Obstacle Avoidance — Current Behaviour & Roadmap
+
+| Sensor | Current Behaviour | Roadmap |
+|---|---|---|
+| D500 LiDAR | Stop (< 0.30m) / Slow (< 0.60m) | Reverse + turn away, retry path |
+| OAK-D Lite | Depth data exposed to Cosmos | Feed into Nav2 costmap, trigger evasion |
+| Cosmos | Can reason about obstacles in frame | Issue reverse/turn commands via mission |
+
+The safety layer is **reactive only** today — it halts Eric but does not steer around obstacles. Full evasion (back up → turn → re-approach) is planned as a `mission.py` recovery behaviour triggered when the LiDAR stop condition persists for > 2 seconds.
 
 ## Cosmos Performance (Jetson Orin Nano 8GB)
 
