@@ -103,7 +103,7 @@ class Motors:
 
     # NOTE: positive speed = forward on UGV Beast hardware (corrected)
     def backward(self, speed=MOTOR_SPEED_NORMAL):  self._send(speed, speed)
-    def foreward(self, speed=MOTOR_SPEED_NORMAL): self._send(-speed, -speed)
+    def forward(self, speed=MOTOR_SPEED_NORMAL): self._send(-speed, -speed)
     def left(self, speed=MOTOR_SPEED_SLOW):       self._send(-speed, speed)   # left track back, right track forward
     def right(self, speed=MOTOR_SPEED_SLOW):      self._send(speed, -speed)   # right track back, left track forward
     def stop(self):                                self._send(0.0, 0.0)
