@@ -65,24 +65,34 @@ class Motors:
         cmd = json.dumps({"T": 1, "L": round(left, 3), "R": round(right, 3)}) + "\n"
         self._write(cmd)
 
+        # Determine direction label
+        if left == 0 and right == 0:
+            direction = "stopped"
+        elif left < 0 and right < 0:
+            direction = "forward"
+        elif left > 0 and right > 0:
+            direction = "backward"
+        elif left < 0 and right > 0:
+            direction = "left"
+        elif left > 0 and right < 0:
+            direction = "right"
+        else:
+            direction = "spinning"
+
         # Update telemetry state for GUI display
         try:
             from gui import _motor_state
-            _motor_state["left"]  = round(left, 3)
-            _motor_state["right"] = round(right, 3)
-            if left == 0 and right == 0:
-                _motor_state["direction"] = "stopped"
-            elif left > 0 and right > 0:
-                _motor_state["direction"] = "backward"
-            elif left < 0 and right < 0:
-                _motor_state["direction"] = "forward"
-            elif left < 0 and right > 0:
-                _motor_state["direction"] = "left"
-            elif left > 0 and right < 0:
-                _motor_state["direction"] = "right"
-            else:
-                _motor_state["direction"] = "spinning"
+            _motor_state["left"]      = round(left, 3)
+            _motor_state["right"]     = round(right, 3)
+            _motor_state["direction"] = direction
         except ImportError:
+            pass
+
+        # Structured activity log — only log meaningful changes to avoid spam
+        try:
+            from logger import log_action as _log_action
+            _log_action("MOTOR", f"{direction} L={left:.3f} R={right:.3f}")
+        except Exception:
             pass
 
     def oled(self, line: int, text: str):
