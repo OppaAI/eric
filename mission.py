@@ -45,8 +45,6 @@ class State:
 mission_state        = State.IDLE
 mission_active       = False
 conversation_history = []
-_last_good_scan      = None   # FIX B2: remember last valid scan so JSON failures don't freeze Eric
-_target_keywords     = set()  # FIX B5: words from mission briefing used to detect target by name
 
 _empty_scans       = 0
 _avoid_attempts    = 0
@@ -71,7 +69,12 @@ def _ui(key, text):
 
 def eric_say(text):
     _ui("eric_says", text)
-    speak(text)
+    # Truncate to 2 sentences max — long Cosmos responses block TTS for too long
+    sentences = [s.strip() for s in text.replace("!", ".").replace("?", ".").split(".") if s.strip()]
+    short = ". ".join(sentences[:2])
+    if short:
+        short += "."
+    speak(short or text)
 
 
 def _cosmos_frames(frames, prompt, max_tokens=250, temp=0.3):
@@ -100,9 +103,9 @@ def _parse_json(response, fallback, label="COSMOS"):
     try:
         clean = response.replace("```json", "").replace("```python", "").replace("```", "").strip()
 
-        # ── Reject pure string lists — ["r2d2"], ["wall_ahead", ...] ─────────
-        # Cosmos nav check sometimes returns a Python list of strings instead of JSON.
-        # These parse fine as JSON arrays but contain no useful data — discard them.
+        # ── Handle JSON array — Cosmos sometimes returns [{...}, {...}] ───────
+        # Merge all items: pick the highest-priority object across all entries,
+        # collect all object_names, and OR all boolean flags together.
         arr_start = clean.find("[")
         obj_start = clean.find("{")
         if arr_start >= 0 and (obj_start < 0 or arr_start < obj_start):
@@ -110,13 +113,9 @@ def _parse_json(response, fallback, label="COSMOS"):
             if arr_end > arr_start:
                 items = json.loads(clean[arr_start:arr_end])
                 if isinstance(items, list) and items:
-                    # If it's a list of dicts → merge them
-                    if isinstance(items[0], dict):
-                        result = _merge_array_items(items, fallback)
-                        return _finalize_result(result, fallback, label)
-                    # If it's a list of strings → Cosmos gave us garbage, treat as failure
-                    log.warning(f"Cosmos returned string list {items[:3]} — ignoring")
-                    raise ValueError("string list, not JSON object")
+                    result = _merge_array_items(items, fallback)
+                    # skip to normalization below
+                    return _finalize_result(result, fallback, label)
 
         # ── Normal single-object JSON ─────────────────────────────────────────
         s = clean.find("{")
@@ -128,11 +127,6 @@ def _parse_json(response, fallback, label="COSMOS"):
     except Exception:
         log.warning(f"JSON parse failed: {response[:100]}")
         print(f"\n⚠️  RAW RESPONSE ({label}): {response[:400]}\n")
-    # FIX B2: on parse failure, use last known-good scan rather than freezing on "stop"
-    global _last_good_scan
-    if _last_good_scan and label in ("QUICK SCAN RESULT", "NAV CHECK", "360° OVERVIEW"):
-        log.info(f"JSON parse failed — using last good scan to avoid unnecessary stop")
-        return dict(_last_good_scan)
     return fallback
 
 
@@ -231,29 +225,6 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
     result["object"] = _infer_category(result.get("object", "unknown"),
                                         result.get("object_name"))
 
-    # FIX B5: Cosmos contradiction fix — if it named the mission target but set target_visible=False,
-    # override it. Catches the "object: robot, object_name: r2d2, target_visible: False" bug.
-    if _target_keywords and not result.get("target_visible"):
-        obj_name_str  = str(result.get("object_name") or "").lower()
-        obj_str       = str(result.get("object") or "").lower()
-        combined      = obj_name_str + " " + obj_str
-        matched       = [kw for kw in _target_keywords if kw in combined]
-        if matched:
-            log.info(f"🎯 Target keyword match '{matched}' in object_name — forcing target_visible=True")
-            result["target_visible"] = True
-            if result.get("target_direction", "unknown") == "unknown":
-                result["target_direction"] = "front"
-            if not result.get("action") or result["action"] == "stop":
-                result["action"] = "forward"
-
-    # FIX: infer in_my_path — Cosmos almost never sets this to True even when target is right ahead.
-    # If target is visible, direction is front, and distance is close/nearby → it's in our path.
-    if result.get("target_visible"):
-        dist = str(result.get("distance", "")).lower()
-        tdir = str(result.get("target_direction", "front")).lower()
-        if dist in ("close", "nearby") or tdir == "front":
-            result["in_my_path"] = True
-
     # Stringify any remaining list/dict in string fields
     for field in ("terrain", "distance", "target_direction",
                   "clearest_direction", "action", "physical_reasoning"):
@@ -264,10 +235,6 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
     # Fill missing keys from fallback
     for k, v in fallback.items():
         result.setdefault(k, v)
-
-    # FIX B2: remember this as the last known-good scan
-    global _last_good_scan
-    _last_good_scan = dict(result)
 
     # ── Print ──────────────────────────────────────────────────────────────
     print(f"\n{'─'*60}")
@@ -316,7 +283,7 @@ def get_briefing_from_file(name):
 
 def start_mission(briefing):
     global mission_active, mission_state, conversation_history
-    global _empty_scans, _avoid_attempts, _scans_since_360, _target_keywords
+    global _empty_scans, _avoid_attempts, _scans_since_360
 
     if mission_active:
         return "Mission already active. Disengage first."
@@ -325,17 +292,6 @@ def start_mission(briefing):
 
     conversation_history = []
     _empty_scans = _avoid_attempts = _scans_since_360 = 0
-
-    # FIX B5: extract target keywords from briefing so we can catch Cosmos contradictions
-    # e.g. briefing "find r2d2" → _target_keywords = {"r2d2", "r2", "d2"}
-    import re
-    words = re.findall(r"[a-zA-Z0-9]+", briefing.lower())
-    stopwords = {"find", "the", "a", "an", "go", "to", "and", "or", "in", "at",
-                 "with", "for", "of", "is", "it", "locate", "search", "mission",
-                 "your", "my", "deliver", "message", "room"}
-    _target_keywords = {w for w in words if w not in stopwords and len(w) >= 2}
-    log.info(f"🎯 Target keywords from briefing: {_target_keywords}")
-
     set_mission_briefing(briefing)
 
     motors.pantilt(0, 5)   # slight downward tilt — see ground objects at normal range
@@ -386,17 +342,50 @@ def resume_after_interaction():
 
 # ─── Prompts ──────────────────────────────────────────────────────────────────
 
-NAV_PROMPT = """Analyze this camera frame and output ONLY the following JSON object. Do not output a list. Do not output markdown. Do not output any text before or after the JSON.
+NAV_PROMPT = """
+You are a tracked ground robot. These frames are from your forward camera while moving.
+Study how the scene changes across frames.
 
-{"wall_ahead":false,"obstacle_close":false,"small_obstacle":false,"person_visible":false,"action":"forward","physical_reasoning":"Path clear."}
+RULES:
+- Wall or large object filling lower half across multiple frames → wall_ahead = true
+- Any object getting visibly closer/larger → obstacle_close = true
+- Small ground hazard (cable, rug edge, step) → small_obstacle = true
+- Any human or robot visible anywhere → person_visible = true
+- ONLY set action=forward if path is clear for at least 1.5 meters
+- When unsure: obstacle_close=true, action=stop
 
-Replace the values based on what you see. Rules:
-- wall_ahead: true only if a wall/large object fills the lower half of frame
-- obstacle_close: true if any object is within 60cm directly ahead
-- person_visible: true if any person or robot is visible
-- action: must be exactly one of: forward, stop, slow"""
+OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
+STRING fields must be a single word from the options listed — NOT a list, NOT a dict, NOT null.
+BOOLEAN fields must be true or false.
 
-SCAN_360_PROMPT = """Output ONLY this JSON, no markdown, no extra fields:
+Example output (copy this structure exactly, change values to match what you see):
+{
+  "wall_ahead": false,
+  "obstacle_close": false,
+  "small_obstacle": false,
+  "person_visible": false,
+  "action": "forward",
+  "physical_reasoning": "Path is clear ahead for at least two meters."
+}
+
+Now analyze the frames and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
+"""
+
+SCAN_360_PROMPT = """
+You are a tracked ground robot. These images are from a full 360-degree scan — 4 body positions.
+At each position the camera tilted up (far view) and down (floor view). You are completely stopped.
+
+STEP 1 — SAFETY: Look at all floor-level frames. Which direction has the most open space?
+STEP 2 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts. Set target_visible=true if 30%+ confident.
+STEP 3 — SPEAK: If you see the target, set speak to an excited 1-sentence reaction. Otherwise null.
+
+OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
+"object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
+"object_name" must be a short string or null — NOT a list or dict.
+All other string fields: pick exactly one option from those shown.
+Boolean fields: true or false only.
+
+Example output (copy this structure exactly, change values to match what you see):
 {
   "object": "clear",
   "object_name": null,
@@ -410,12 +399,31 @@ SCAN_360_PROMPT = """Output ONLY this JSON, no markdown, no extra fields:
   "clearest_direction": "front",
   "action": "forward",
   "speak": null,
-  "physical_reasoning": "one sentence",
+  "physical_reasoning": "No target found. Hallway ahead is the clearest direction.",
   "mission_complete": false
 }
-Rules: object must be one word: person/robot/slipper/shoe/obstacle/wall/clear/unknown. target_visible=true if mission target seen. target_direction and clearest_direction must be: front/left/right/back/unknown. mission_complete=true only when target is in_my_path AND distance is close/nearby."""
 
-QUICK_SCAN_PROMPT = """Output ONLY this JSON, no markdown, no extra fields:
+Now analyze the images and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
+"""
+
+QUICK_SCAN_PROMPT = """
+You are a tracked ground robot. You are completely stopped. These frames are from your pan-tilt and webcam cameras.
+
+OBSTACLE CHECK — lower half of every image:
+- Anything filling/touching the bottom edge → wall_ahead = true
+- Object within ~60cm ahead → obstacle_close = true AND in_my_path = true
+- When in doubt: obstacle_close = true
+
+MISSION TARGET CHECK:
+- Person, robot, slipper, shoe — even partially visible → target_visible = true
+
+OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
+"object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
+"object_name" must be a short string or null — NOT a list or dict.
+All other string fields: pick exactly one option from those shown.
+Boolean fields: true or false only.
+
+Example output (copy this structure exactly, change values to match what you see):
 {
   "object": "clear",
   "object_name": null,
@@ -430,10 +438,12 @@ QUICK_SCAN_PROMPT = """Output ONLY this JSON, no markdown, no extra fields:
   "clearest_direction": "front",
   "action": "forward",
   "speak": null,
-  "physical_reasoning": "one sentence",
+  "physical_reasoning": "Path is clear. No target visible.",
   "mission_complete": false
 }
-Rules: object must be one word: person/robot/slipper/shoe/obstacle/wall/clear/unknown. target_visible=true if mission target seen — if object_name matches the target, target_visible MUST be true. distance must be: close/nearby/far. action must be: forward/stop/slow/turn_left/turn_right. mission_complete=true only when target is in_my_path AND distance is close/nearby."""
+
+Now analyze the frames and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
+"""
 
 _SCAN_FALLBACK = {
     "object": "unknown", "object_name": None, "terrain": "clear",
@@ -498,18 +508,28 @@ Example output (copy this structure exactly, change values to match what you see
 Now analyze the frame and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
 """
     try:
-        response = ask_cosmos(NAV_IMAGE_PROMPT, image_b64=frame, max_tokens=120)
+        # Raw request with NO system prompt — ask_cosmos sends the mission briefing
+        # as system context which causes the 2B model to hallucinate mission content
+        # into nav responses (e.g. "finding north pole ice skates", Chinese text)
+        payload = {
+            "model": COSMOS_MODEL,
+            "messages": [{"role": "user", "content": [
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}},
+                {"type": "text", "text": NAV_IMAGE_PROMPT.strip()}
+            ]}],
+            "max_tokens": 120,
+            "temperature": 0.1,
+            "repetition_penalty": 1.15,
+        }
+        r = requests.post(VLLM_URL, json=payload, timeout=30)
+        r.raise_for_status()
+        response = r.json()["choices"][0]["message"]["content"].strip()
         result = _parse_json(response, dict(_NAV_FALLBACK), label="NAV CHECK")
 
         if result.get("person_visible") and mission_active:
             motors.stop()
-            _ui("log", "👤 Person spotted during nav — approaching before greeting")
+            _ui("log", "👤 Person spotted during nav — stopping")
             _ui("status", "PERSON SPOTTED")
-            # FIX B3: drive toward person before greeting — they could be meters away
-            motors.forward(MOTOR_SPEED_SLOW)
-            time.sleep(2.5)
-            motors.stop()
-            time.sleep(0.4)
             greeting = ask_cosmos(
                 "You spotted someone ahead while navigating. "
                 "Greet them and ask if they can help with your mission. 1-2 sentences.",
@@ -559,9 +579,6 @@ def _quick_scan() -> dict:
             pt = capture_frame(CAMERA_PANTILT, 640, 480) or pt
             motors.lights(0, 0)
         frames.append(pt)
-
-    time.sleep(0.2)   # small gap — prevents V4L2 select() timeout when grabbing both cams back-to-back
-
     wc = capture_frame(CAMERA_WEBCAM, 640, 480)
     if wc:
         if _is_pitch_black(wc):
@@ -885,54 +902,58 @@ def handle_character_response(character, said):
     return clean
 
 
-
-# ─── Approach Target ──────────────────────────────────────────────────────────
+# ─── Process Scan Result ──────────────────────────────────────────────────────
 
 def _approach_target():
     """
-    Drive toward the target in 2-second steps, scanning after each step.
-    Stops when target is in_my_path at close/nearby distance, hits an obstacle,
-    or loses sight of the target.
-    Sets mission_state to INTERACTING when close enough.
+    Drive toward target in 2-second steps, scanning after each.
+    Gives up only after 3 consecutive invisible scans — Cosmos is inconsistent.
+    Sets mission_state to INTERACTING when close enough or blocked.
     """
     global mission_state
     _ui("log", "Approaching target...")
     motors.oled(1, "Approaching...")
+    _ui("status", "APPROACHING")
+    invisible_count = 0
 
     for attempt in range(12):       # max ~24s total approach
         if not mission_active:
             break
-
         motors.forward(MOTOR_SPEED_SLOW)
         time.sleep(2.0)
         motors.stop()
         time.sleep(0.4)
-
         check = _quick_scan()
         dist  = str(check.get("distance", "far")).lower()
 
         if check.get("wall_ahead") or check.get("obstacle_close"):
-            _ui("log", "Obstacle during approach — arrived or blocked")
+            _ui("log", "Obstacle during approach — treating as arrived")
             mission_state = State.INTERACTING
             return
 
+        if check.get("mission_complete"):
+            _handle_mission_complete(check.get("object_name"))
+            return
+
         if check.get("in_my_path") or dist in ("close", "nearby"):
-            _ui("log", f"Close to target after {attempt+1} steps — INTERACTING")
+            _ui("log", f"Target close after {attempt+1} steps — INTERACTING")
             mission_state = State.INTERACTING
             return
 
         if not check.get("target_visible", False):
-            _ui("log", "Lost sight of target — resuming search")
-            mission_state = State.SEARCHING
-            motors.forward(MOTOR_SPEED_SLOW)
-            return
+            invisible_count += 1
+            _ui("log", f"Target not visible ({invisible_count}/3) — continuing approach")
+            if invisible_count >= 3:
+                _ui("log", "Lost target after 3 misses — resuming search")
+                mission_state = State.SEARCHING
+                motors.forward(MOTOR_SPEED_SLOW)
+                return
+        else:
+            invisible_count = 0  # reset on any visible scan
 
-    # Ran out of steps — treat as arrived (may just be Cosmos underestimating distance)
     _ui("log", "Approach complete — switching to INTERACTING")
     mission_state = State.INTERACTING
 
-
-# ─── Process Scan Result ──────────────────────────────────────────────────────
 
 def _process_scan(scan, from_360=False):
     global mission_state, _empty_scans, _avoid_attempts, _scans_since_360
@@ -992,17 +1013,17 @@ def _process_scan(scan, from_360=False):
 
     if target_visible and from_360:
         _empty_scans = 0
-        _ui("log", f"Target spotted {target_dir}!")
+        _ui("log", f"Target spotted at {target_dir} — approaching!")
         motors.oled(1, f"Target {target_dir}!")
         _ui("status", "TARGET SPOTTED")
         _face_direction(target_dir)
         _approach_target()
         return
 
-    # Also trigger approach from a regular quick scan — target may be spotted while searching
+    # Also trigger approach from regular quick scan
     if target_visible and not from_360:
         _empty_scans = 0
-        _ui("log", f"Target spotted during scan — approaching")
+        _ui("log", "Target spotted during scan — approaching")
         _ui("status", "TARGET SPOTTED")
         if target_dir and target_dir not in ("front", "unknown"):
             _face_direction(target_dir)

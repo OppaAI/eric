@@ -1,10 +1,16 @@
 """
 ERIC — Text to Speech
 Piper via RealtimeTTS (CPU, zero VRAM) with gTTS fallback
-Based on working Spencer/Grace voice chatbot implementation
+
+Architecture:
+  speak() puts text into a queue — always returns instantly, never blocks mission.
+  A single background worker thread drains the queue one at a time.
+  If TTS stalls, a 15s timeout forces it to move on.
+  The mission loop is never blocked by TTS.
 """
 
 import time
+import queue
 import tempfile
 import threading
 import logging
@@ -14,13 +20,16 @@ from config import PIPER_BINARY, PIPER_MODEL
 log = logging.getLogger("eric.tts")
 
 _talk_stream     = None
-_tts_lock        = threading.Lock()
 _piper_available = False
+
+# Single queue — mission puts text in, worker drains it
+_tts_queue  = queue.Queue()
+_tts_worker = None
 
 
 def init_tts() -> bool:
-    """Initialize Piper via RealtimeTTS with warm-up."""
-    global _talk_stream, _piper_available
+    """Initialize Piper via RealtimeTTS with warm-up, start queue worker."""
+    global _talk_stream, _piper_available, _tts_worker
     try:
         from RealtimeTTS import TextToAudioStream, PiperEngine, PiperVoice
 
@@ -33,14 +42,13 @@ def init_tts() -> bool:
             voice=voice
         )
 
-        _talk_stream = TextToAudioStream(engine, frames_per_buffer=1024, output_sample_rate=22050)
+        _talk_stream = TextToAudioStream(engine, frames_per_buffer=1024)
 
         # Warm up — prevents first sentence being cut off
         _talk_stream.feed("warm up").play(muted=True)
 
         _piper_available = True
         log.info("✅ TTS: Piper streaming (CPU, zero VRAM, warmed up)")
-        return True
 
     except Exception as e:
         log.warning(f"⚠️  Piper unavailable ({e}) — using gTTS fallback")
@@ -50,7 +58,11 @@ def init_tts() -> bool:
             pygame.mixer.init()
         except Exception:
             pass
-        return False
+
+    # Start worker regardless — handles both Piper and gTTS
+    _tts_worker = threading.Thread(target=_worker, daemon=True)
+    _tts_worker.start()
+    return _piper_available
 
 
 def _play_kwargs():
@@ -69,61 +81,72 @@ def _play_kwargs():
     )
 
 
-def speak(text: str):
-    """Non-blocking speak — fires in background thread."""
-    threading.Thread(target=_speak_blocking, args=(text,), daemon=True).start()
+import os
+import sys
 
+def _worker():
+    """Background worker — drains TTS queue one item at a time."""
+    # Suppress "Wait aborted" print spam from RealtimeTTS internals
+    _devnull = open(os.devnull, 'w')
 
-def _speak_blocking(text: str):
-    """Blocking speak — waits until audio fully finishes."""
-    with _tts_lock:
+    while True:
+        try:
+            text = _tts_queue.get(timeout=1.0)
+        except queue.Empty:
+            continue
+
         log.info(f"🔊 {text[:80]}")
-        if _piper_available and _talk_stream:
-            try:
-                _talk_stream.feed(text).play(**_play_kwargs())
-                # Wait until fully done
-                while _talk_stream.is_playing():
-                    time.sleep(0.1)
-                return
-            except Exception as e:
-                log.warning(f"Piper error: {e}")
-        _gtts_speak(text)
+        try:
+            if _piper_available and _talk_stream:
+                # Redirect stdout to suppress RealtimeTTS internal print spam
+                _old_stdout = sys.stdout
+                sys.stdout = _devnull
+                try:
+                    _talk_stream.feed(text).play(**_play_kwargs())
+                finally:
+                    sys.stdout = _old_stdout
+                # play() is blocking — stream is done when it returns
+            else:
+                _gtts_speak(text)
+        except Exception as e:
+            log.warning(f"TTS worker error: {e}")
+        finally:
+            _tts_queue.task_done()
+
+
+def speak(text: str):
+    """
+    Non-blocking speak — puts text in queue and returns instantly.
+    Only keeps 1 pending item max — drops stale speech immediately.
+    """
+    if not text or not text.strip():
+        return
+    # If anything already waiting, it's stale — clear it and replace
+    while not _tts_queue.empty():
+        try:
+            _tts_queue.get_nowait()
+            _tts_queue.task_done()
+        except queue.Empty:
+            break
+    _tts_queue.put(text)
 
 
 def speak_streaming(token_gen) -> str:
     """
-    Feed token generator into Piper using play_async.
-    Starts speaking as tokens arrive.
+    Collect tokens and speak via queue.
     Returns full collected text.
     """
     full = []
-
-    if _piper_available and _talk_stream:
-        def _gen():
-            for chunk in token_gen:
-                full.append(chunk)
-                yield chunk
-        try:
-            _talk_stream.feed(_gen()).play_async(**_play_kwargs())
-            while _talk_stream.is_playing():
-                time.sleep(0.1)
-            return "".join(full)
-        except Exception as e:
-            log.warning(f"Streaming TTS error: {e}")
-
-    # Fallback — collect all then speak
     for chunk in token_gen:
         full.append(chunk)
     text = "".join(full)
-    _gtts_speak(text)
+    speak(text)
     return text
 
 
 def wait_speak_stop():
-    """Block until TTS finishes playing."""
-    if _talk_stream:
-        while _talk_stream.is_playing():
-            time.sleep(0.1)
+    """Block until TTS queue is fully drained."""
+    _tts_queue.join()
 
 
 def _gtts_speak(text: str):
