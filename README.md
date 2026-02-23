@@ -27,7 +27,7 @@
 
 **NVIDIA Cosmos Cookoff 2026 Entry**
 
-ERIC is a search and rescue ground robot powered by NVIDIA Cosmos Reason 2, running fully at the edge on a ~$750 CAD Jetson Orin Nano Super 8GB. No cloud. No server. Just a tracked robot reasoning about the physical world in real time.
+ERIC is a search and rescue ground robot powered by NVIDIA Cosmos Reason 2, running fully at the edge on a sub-$1000 CAD Jetson Orin Nano Super 8GB. No cloud. No server. Just a tracked robot reasoning about the physical world in real time.
 
 Cosmos Reason 2 is the mission brain — it sees the world through Eric's cameras, reasons about what it finds, decides where to go, and actively directs the escape route when obstacles are hit. The D500 LiDAR and OAK-D Lite provide an independent safety layer. ROS2 Nav2 handles path planning when enabled.
 
@@ -42,14 +42,13 @@ Eric navigates a Star Wars Lego scene autonomously — scanning with dual camera
 | Component | Details |
 |---|---|
 | SBC | Jetson Orin Nano Super 8GB |
-| Robot | Waveshare UGV Beast (tracked) |
+| Robot | Waveshare UGV Beast (tracked-wheels) |
 | LiDAR | D500 (360°, reactive obstacle safety + arc map) |
 | Depth Camera | OAK-D Lite (3D perception, 3×3 depth grid) |
 | Camera 1 | Webcam (close-up scanning) |
 | Camera 2 | Pan-tilt wide-angle (navigation + overview) |
 | TTS | Piper danny-low (CPU, zero VRAM) |
-| Total | ~$750 CAD |
-| Location | Vancouver BC, Canada |
+
 
 ## Stack
 
@@ -63,6 +62,15 @@ Eric navigates a Star Wars Lego scene autonomously — scanning with dual camera
 | Piper via RealtimeTTS | Streaming TTS, CPU only, zero VRAM |
 | Gradio | Dual camera + LiDAR status + mission control UI |
 | Waveshare ESP32 serial UART | Motor + OLED + LED + pan-tilt control |
+
+---
+
+## Cost
+| Component | Price |
+|---|---|
+| Hardware   | < $1000 CAD  |
+| Software   |     FOSS     |
+| Experience |   Priceless  |
 
 ---
 
@@ -495,18 +503,17 @@ Cosmos timeout fallback: if Cosmos takes longer than 20s, the arc-based directio
 | Metric | Value |
 |---|---|
 | Model | `embedl/Cosmos-Reason2-2B-W4A16` |
-| TPS | ~40–50 tokens/second |
+| TPS | ~40–50 tokens/second (text/image) | ~16–17 tokens/second (640x400 video) |
 | Vision inference | ~5–9 seconds per frame |
 | GPU utilization | 0.75 |
 | Startup time | ~3 minutes |
-| VRAM for model | ~2.3 GB |
+| RAM utilized | ~6.8 GB (out of 7.4GB total) |
 | Avoidance call timeout | 20s (arc fallback if exceeded) |
 
 ## Dependencies
 
 ```bash
-uv add gradio pyyaml pyserial requests python-dotenv \
-        opencv-python-headless gtts pygame RealtimeTTS
+uv sync
 # ROS2 Nav2 and LiDAR via apt (ros-humble-nav2-*, ros-humble-rplidar-ros)
 ```
 
