@@ -72,9 +72,9 @@ class Motors:
             _motor_state["right"] = round(right, 3)
             if left == 0 and right == 0:
                 _motor_state["direction"] = "stopped"
-            elif left < 0 and right < 0:
-                _motor_state["direction"] = "forward"   # negative = forward on UGV Beast
             elif left > 0 and right > 0:
+                _motor_state["direction"] = "forward"
+            elif left < 0 and right < 0:
                 _motor_state["direction"] = "backward"
             elif left < 0 and right > 0:
                 _motor_state["direction"] = "left"
@@ -101,9 +101,9 @@ class Motors:
         """Pan-tilt control. pan/tilt in degrees from center."""
         self._send_raw({"T": 133, "X": pan, "Y": tilt, "SPD": speed, "ACC": 10})
 
-    # NOTE: negative speed = forward on UGV Beast hardware
-    def forward(self, speed=MOTOR_SPEED_NORMAL):  self._send(-speed, -speed)
-    def backward(self, speed=MOTOR_SPEED_NORMAL): self._send(speed, speed)
+    # NOTE: positive speed = forward on UGV Beast hardware (corrected)
+    def forward(self, speed=MOTOR_SPEED_NORMAL):  self._send(speed, speed)
+    def backward(self, speed=MOTOR_SPEED_NORMAL): self._send(-speed, -speed)
     def left(self, speed=MOTOR_SPEED_SLOW):       self._send(-speed, speed)   # left track back, right track forward
     def right(self, speed=MOTOR_SPEED_SLOW):      self._send(speed, -speed)   # right track back, left track forward
     def stop(self):                                self._send(0.0, 0.0)

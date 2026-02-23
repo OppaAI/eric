@@ -844,13 +844,20 @@ def _scan_360_smart() -> dict:
 
 # ─── Direction Control ────────────────────────────────────────────────────────
 
-def _face_direction(direction):
-    if direction == "right":
+def _face_direction(direction: str):
+    """Turn robot to face a direction. Handles all strings Cosmos might return."""
+    d = str(direction).lower().strip()
+    if d in ("right", "right_side"):
         motors.right(MOTOR_SPEED_SLOW); time.sleep(1.5); motors.stop()
-    elif direction == "back":
-        motors.right(MOTOR_SPEED_SLOW); time.sleep(3.0); motors.stop()
-    elif direction == "left":
+    elif d in ("left", "left_side"):
         motors.left(MOTOR_SPEED_SLOW);  time.sleep(1.5); motors.stop()
+    elif d in ("back", "behind", "backward", "rear"):
+        motors.right(MOTOR_SPEED_SLOW); time.sleep(3.0); motors.stop()
+    elif d in ("side",):
+        # "side" is ambiguous — do a short right turn as best guess
+        motors.right(MOTOR_SPEED_SLOW); time.sleep(0.8); motors.stop()
+    elif d in ("down", "below", "front", "ahead", "forward", "unknown", ""):
+        pass  # already facing it or already arrived — no turn needed
     time.sleep(0.3)
 
 
@@ -979,14 +986,16 @@ def handle_character_response(character, said):
 def _approach_target():
     """
     Drive toward target in 2-second steps, scanning after each.
-    Gives up only after 3 consecutive invisible scans — Cosmos is inconsistent.
-    Sets mission_state to INTERACTING when close enough or blocked.
+    Stops when: close enough, obstacle hit, person seen, or 3 consecutive invisible scans.
     """
     global mission_state
     _ui("log", "Approaching target...")
     motors.oled(1, "Approaching...")
     _ui("status", "APPROACHING")
     invisible_count = 0
+
+    _NEAR_DISTANCES = {"close", "near", "nearby", "very_close", "very close", "right there"}
+    _TARGET_OBJECTS = {"slipper", "shoe", "person", "robot"}
 
     for attempt in range(12):       # max ~24s total approach
         if not mission_active:
@@ -997,33 +1006,84 @@ def _approach_target():
         time.sleep(0.4)
         check = _quick_scan()
         dist  = str(check.get("distance", "far")).lower()
+        obj   = check.get("object", "unknown")
+        tdir  = str(check.get("target_direction", "front")).lower().strip()
 
+        # ── Obstacle → avoid and continue approach, don't just stop ──────────
         if check.get("wall_ahead") or check.get("obstacle_close"):
-            _ui("log", "Obstacle during approach — treating as arrived")
-            mission_state = State.INTERACTING
-            return
+            _ui("log", "Obstacle during approach — avoiding")
+            force_360 = _avoid_obstacle(
+                wall_ahead=check.get("wall_ahead", False),
+                small_obstacle=check.get("small_obstacle", False)
+            )
+            if force_360:
+                mission_state = State.SEARCHING
+                return
+            continue  # resume approach after avoidance
 
         if check.get("mission_complete"):
             _handle_mission_complete(check.get("object_name"))
             return
 
-        if check.get("in_my_path") or dist in ("close", "nearby"):
-            _ui("log", f"Target close after {attempt+1} steps — INTERACTING")
+        # ── Mission complete: confirmed close to target ───────────────────────
+        if check.get("target_visible") and obj in _TARGET_OBJECTS and dist in _NEAR_DISTANCES:
+            _ui("log", f"Target confirmed close ({dist}) — MISSION COMPLETE")
+            _handle_mission_complete(check.get("object_name") or obj)
+            return
+
+        # ── Close enough to interact ──────────────────────────────────────────
+        if dist in _NEAR_DISTANCES or check.get("in_my_path"):
+            _ui("log", f"Target close ({dist}) — INTERACTING")
+            mission_state = State.INTERACTING
+            return
+
+        # ── Target dropped below camera → already on top of it ───────────────
+        if tdir in ("down", "below"):
+            _ui("log", "Target below camera — arrived!")
+            motors.pantilt(0, 20)
+            time.sleep(0.3)
+            _handle_mission_complete(check.get("object_name") or obj)
+            return
+
+        # ── Lateral steering: brief corrective turn to stay aimed at target ───
+        if tdir in ("left", "left_side"):
+            _ui("log", "Target drifted left — correcting")
+            motors.left(MOTOR_SPEED_SLOW); time.sleep(0.4); motors.stop()
+        elif tdir in ("right", "right_side"):
+            _ui("log", "Target drifted right — correcting")
+            motors.right(MOTOR_SPEED_SLOW); time.sleep(0.4); motors.stop()
+
+        # ── Pan-tilt vertical tracking: tilt down as we get closer ───────────
+        tilt_map = {"far": 5, "medium": 10, "mid": 10,
+                    "close": 15, "near": 18, "nearby": 18, "very_close": 22}
+        motors.pantilt(0, tilt_map.get(dist, 5), 60)
+
+        # ── Person nearby → stop and greet ───────────────────────────────────
+        if obj == "person" and (dist in _NEAR_DISTANCES or check.get("in_my_path")):
+            name = check.get("object_name") or "person"
+            _ui("log", "Person nearby during approach — stopping to interact")
+            motors.oled(1, "Person!")
+            _ui("status", f"FOUND — {name}")
+            greeting = ask_cosmos(
+                f"You see {name} nearby. Greet them and ask if they can help with your mission. 1-2 sentences.",
+                max_tokens=80
+            )
+            eric_say(greeting)
             mission_state = State.INTERACTING
             return
 
         if not check.get("target_visible", False):
             invisible_count += 1
-            _ui("log", f"Target not visible ({invisible_count}/3) — continuing approach")
+            _ui("log", f"Target not visible ({invisible_count}/3)")
             if invisible_count >= 3:
-                _ui("log", "Lost target after 3 misses — resuming search")
+                _ui("log", "Lost target — resuming search")
                 mission_state = State.SEARCHING
                 motors.forward(MOTOR_SPEED_SLOW)
                 return
         else:
-            invisible_count = 0  # reset on any visible scan
+            invisible_count = 0
 
-    _ui("log", "Approach complete — switching to INTERACTING")
+    _ui("log", "Approach complete — INTERACTING")
     mission_state = State.INTERACTING
 
 
@@ -1099,40 +1159,56 @@ def _process_scan(scan, from_360=False):
     if target_visible:
         _empty_scans = 0
         _target_spotted_count = 0   # reset — _approach_target takes over from here
-        direction = target_dir if target_dir and target_dir not in ("unknown",) else "front"
+        direction = str(target_dir).lower().strip() if target_dir else "front"
+
+        # "down" means Eric is already right on top of the target
+        if direction in ("down", "below"):
+            _ui("log", "Target is directly below — already arrived!")
+            motors.stop()
+            motors.pantilt(0, 20)   # tilt camera down to look at it
+            time.sleep(0.5)
+            _handle_mission_complete(obj_name)
+            return
+
         if from_360:
             _ui("log", f"Target spotted at {direction} — approaching!")
             motors.oled(1, f"Target {direction}!")
         else:
             _ui("log", "Target spotted during scan — approaching")
         _ui("status", "TARGET SPOTTED")
-        if direction != "front":
+        if direction not in ("front", "ahead", "unknown", ""):
             _face_direction(direction)
         _approach_target()
         return
 
-    if in_path and obj in ["person", "robot"]:
-        _empty_scans = 0
-        motors.stop()
-        mission_state = State.INTERACTING
-        name = obj_name or obj
-        motors.oled(0, name[:16])
-        motors.oled(1, "Centering...")
-        _ui("status", f"FOUND — {name}")
+    # Person or robot visible → only stop if near, keep moving if far
+    _NEAR_DISTANCES = {"close", "near", "nearby", "very_close", "very close", "right there"}
+    if obj in ["person", "robot"] and not target_visible:
+        dist_str = str(distance).lower()
+        if dist_str in _NEAR_DISTANCES or in_path:
+            # Near enough to stop and talk
+            _empty_scans = 0
+            motors.stop()
+            mission_state = State.INTERACTING
+            name = obj_name or obj
+            motors.oled(0, name[:16])
+            motors.oled(1, "Talking...")
+            _ui("status", f"FOUND — {name}")
+            motors.pantilt(0, 5)
+            time.sleep(0.5)
+            greeting = ask_cosmos(
+                f"You see {name} {'ahead' if in_path else 'nearby'} ({dist_str} away). "
+                "Greet them and ask about your mission. 1-2 sentences.",
+                max_tokens=80
+            )
+            eric_say(greeting)
+            _ui("status", f"TALKING — {name}")
+            return
+        else:
+            # Person visible but far — note it, keep moving
+            _ui("log", f"Person ({obj_name or 'unknown'}) visible but {dist_str} — continuing")
 
-        # Ground-looking tilt to see person/robot at close range
-        motors.pantilt(0, 5)
-        time.sleep(0.5)
-
-        motors.oled(1, "Talking...")
-        greeting = ask_cosmos(
-            f"You see {name} ahead. Greet them and ask about your mission. 1-2 sentences.",
-            max_tokens=80
-        )
-        eric_say(greeting)
-        _ui("status", f"TALKING — {name}")
-        return
-
+    # Only count as empty if truly nothing found — wall/obstacle means something IS there
     if obj in ["clear", "unknown"] and not target_visible:
         _empty_scans += 1
         _ui("log", f"Nothing found ({_empty_scans}/{EMPTY_SCAN_LIMIT})")
