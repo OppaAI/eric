@@ -38,10 +38,11 @@ MISSIONS_DIR = Path(__file__).parent / "missions"
 GRADIO_PORT = int(os.getenv("GRADIO_PORT", "7860"))
 GRADIO_HOST = os.getenv("GRADIO_HOST", "0.0.0.0")
 
-# ─── ROS2 / Nav2 / LiDAR ──────────────────────────────────────────────────────
+# ─── ROS2 / Nav2 / LiDAR / OAK-D ─────────────────────────────────────────────
 # Set USE_NAV2=true in .env to enable autonomous navigation via Nav2
 # If false or ROS2 not running, Eric falls back to direct motor control
 USE_NAV2          = os.getenv("USE_NAV2",    "false").lower() == "true"
 USE_LIDAR         = os.getenv("USE_LIDAR",   "false").lower() == "true"
+USE_OAKD          = os.getenv("USE_OAKD",    "false").lower() == "true"
 LIDAR_STOP_DIST   = float(os.getenv("LIDAR_STOP_DIST", "0.30"))  # meters
 LIDAR_SLOW_DIST   = float(os.getenv("LIDAR_SLOW_DIST", "0.60"))  # meters

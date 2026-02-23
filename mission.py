@@ -13,12 +13,23 @@ Stabilization rule:
 
 LED:
   Adaptive — on only when captured frame is dark.
+
+Sensor integration:
+  _sensor_context() builds a text summary of LiDAR + OAK-D readings that is
+  prepended to every Cosmos nav-check and scan prompt. This gives Cosmos real
+  metric ground-truth distances so it reasons accurately rather than guessing
+  from visual cues alone.
+
+Nav2 integration:
+  _move_forward() uses Nav2 send_goal() when available, falling back to direct
+  motor control. Cosmos still decides WHERE to go — Nav2 handles HOW.
 """
 
 import time
 import threading
 import logging
 import json
+import math
 import requests
 
 from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MISSIONS_DIR, VLLM_URL, COSMOS_MODEL
@@ -143,10 +154,24 @@ _NAME_TO_CATEGORY = {
     # people
     "man": "person", "woman": "person", "person": "person",
     "human": "person", "child": "person", "kid": "person",
-    # robots
+    # robots — broad coverage for Cosmos inventions
     "droid": "robot", "robot": "robot", "r2": "robot", "bb8": "robot",
+    "toy_droid": "robot", "toy_robot": "robot", "toy droid": "robot",
+    "mech": "robot", "android": "robot", "bot": "robot",
     # walls / structural
     "wall": "wall", "door": "wall", "fence": "wall",
+}
+
+# Non-standard object strings Cosmos invents that map to canonical categories.
+# Applied in _finalize_result regardless of whether object is "unknown".
+_OBJ_REMAP = {
+    "toy_droid": "robot", "toy_robot": "robot", "toy droid": "robot",
+    "toy robot": "robot", "droid": "robot", "android": "robot",
+    "mech": "robot", "bot": "robot",
+    "sandal": "slipper", "flip_flop": "slipper", "flip flop": "slipper",
+    "sneaker": "shoe", "boot": "shoe",
+    "human": "person", "man": "person", "woman": "person",
+    "kid": "person", "child": "person",
 }
 
 _OBJ_PRIORITY = ["person", "robot", "slipper", "shoe", "obstacle", "wall", "clear", "unknown"]
@@ -196,6 +221,7 @@ def _merge_array_items(items: list, fallback: dict) -> dict:
                 val = item.get(field)
                 if val and val not in (None, ""):
                     merged[field] = val
+
     merged["object_name"] = ", ".join(names) if names else None
     return merged
 
@@ -227,13 +253,23 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
     result["object"] = _infer_category(result.get("object", "unknown"),
                                         result.get("object_name"))
 
+    # ── Remap non-standard object strings Cosmos invents ─────────────────────
+    raw_obj = str(result.get("object", "unknown")).lower().strip()
+    if raw_obj in _OBJ_REMAP:
+        log.info(f"Remapping object '{raw_obj}' → '{_OBJ_REMAP[raw_obj]}'")
+        result["object"] = _OBJ_REMAP[raw_obj]
+    elif "_" in raw_obj or " " in raw_obj:
+        for key, val in _OBJ_REMAP.items():
+            if key in raw_obj:
+                log.info(f"Remapping object '{raw_obj}' → '{val}' (partial match '{key}')")
+                result["object"] = val
+                break
+
     # ── Normalize action to canonical set ────────────────────────────────────
-    # Cosmos 2B invents values like "move_forward", "go_forward", "continue" etc.
     _VALID_ACTIONS = {"forward", "backward", "left", "right", "slow",
                       "stop", "navigate_around", "turn_left", "turn_right", "turn_back"}
     raw_action = str(result.get("action", "forward")).lower().strip()
     if raw_action not in _VALID_ACTIONS:
-        # Map common inventions to canonical values
         _ACTION_MAP = {
             "move_forward": "forward", "go_forward": "forward", "continue": "forward",
             "move": "forward", "proceed": "forward", "advance": "forward",
@@ -243,21 +279,17 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
         }
         normalized = _ACTION_MAP.get(raw_action)
         if not normalized:
-            # Fuzzy: if "forward" appears anywhere in the value, use forward
             normalized = "forward" if "forward" in raw_action else "stop"
         log.info(f"Normalized action '{raw_action}' → '{normalized}'")
         result["action"] = normalized
 
     # ── Consistency fix: if object IS the target, target_visible must be True ──
-    # The 2B model frequently sets object="slipper" but target_visible=false.
-    # Enforce agreement here so the mission code never misses a confirmed sighting.
     _TARGET_OBJECTS = {"slipper", "shoe", "person", "robot"}
     if result.get("object") in _TARGET_OBJECTS and not result.get("target_visible"):
         log.info(f"Auto-correcting target_visible=True (object={result['object']})")
         result["target_visible"] = True
 
     # ── Consistency fix: action=stop requires an obstacle reason ─────────────
-    # If Cosmos says stop but there's no wall/obstacle, promote to forward.
     if (result.get("action") == "stop"
             and not result.get("wall_ahead")
             and not result.get("obstacle_close")
@@ -291,6 +323,144 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
         print(f"  {k:25s}: {v}{icon}")
     print(f"{'─'*60}\n")
     return result
+
+
+# ─── Sensor Context ───────────────────────────────────────────────────────────
+
+def _sensor_context() -> str:
+    """
+    Build a short sensor data summary to prepend to every Cosmos prompt.
+
+    Pulls live readings from:
+      - D500 LiDAR  (lidar.py) — front arc minimum distance
+      - OAK-D Lite  (oakd.py)  — stereo depth at center-forward
+
+    Returns a text block like:
+      SENSOR DATA (ground truth — trust this over visual estimates):
+      LiDAR front arc minimum distance: 0.42m
+      OAK-D depth center-forward: 0.38m
+      ⚠️  OAK-D: obstacle within caution range
+
+    This context is prepended to nav-check and scan prompts so Cosmos
+    gets real metric distances. Cosmos can then say "obstacle at 0.4m"
+    rather than guessing "close" from a wide-angle camera image.
+
+    Fails silently — if both sensors are unavailable, returns "".
+    """
+    lines = []
+
+    # ── LiDAR ──────────────────────────────────────────────────────────────
+    try:
+        from lidar import get_status as lidar_status, lidar_available
+        if lidar_available():
+            ls = lidar_status()
+            dist = ls.get("min_distance", 999)
+            dist_str = f"{dist:.2f}m" if dist < 999 else "clear"
+            lines.append(f"LiDAR front arc minimum distance: {dist_str}")
+            if ls.get("obstacle_close"):
+                lines.append("⚠️  LIDAR STOP ZONE: obstacle within 0.30m — do NOT move forward")
+            elif ls.get("obstacle_near"):
+                lines.append("⚠️  LiDAR caution: obstacle within 0.60m — slow or stop")
+    except Exception:
+        pass
+
+    # ── OAK-D depth ────────────────────────────────────────────────────────
+    try:
+        from oakd import get_front_depth, oakd_available
+        if oakd_available():
+            d = get_front_depth()
+            if d is not None:
+                lines.append(f"OAK-D depth center-forward: {d:.2f}m")
+                if d < 0.30:
+                    lines.append("⚠️  OAK-D: obstacle VERY CLOSE (<0.30m) — stop immediately")
+                elif d < 0.60:
+                    lines.append("⚠️  OAK-D: obstacle within caution range (<0.60m) — slow down")
+    except Exception:
+        pass
+
+    if not lines:
+        return ""
+
+    return (
+        "SENSOR DATA (ground truth — trust this over visual estimates):\n"
+        + "\n".join(lines)
+        + "\n\n"
+    )
+
+
+# ─── Nav2 / Motor Movement Abstraction ───────────────────────────────────────
+
+def _move_forward(duration_sec: float = 2.0, distance_m: float = 1.5):
+    """
+    Move Eric forward using Nav2 if available, else direct motor control.
+
+    Nav2 path:
+      - Compute a goal pose distance_m ahead of current pose in map frame
+      - send_goal() hands off to Nav2's planner — it avoids obstacles on its own
+      - Wait for Nav2 to reach goal or timeout
+
+    Direct path:
+      - motors.forward() for duration_sec, then stop
+
+    This abstraction means mission.py never needs to care which mode is active.
+    """
+    from config import USE_NAV2
+    if USE_NAV2:
+        try:
+            from nav2 import nav2_available, send_goal, get_pose, is_navigating
+            if nav2_available():
+                pose = get_pose()
+                yaw  = pose["yaw"]
+                tx   = pose["x"] + distance_m * math.cos(yaw)
+                ty   = pose["y"] + distance_m * math.sin(yaw)
+                send_goal(tx, ty, yaw)
+                # Wait for Nav2 to finish or timeout
+                deadline = time.time() + duration_sec + 8.0
+                while is_navigating() and time.time() < deadline and mission_active:
+                    time.sleep(0.2)
+                return
+        except Exception as e:
+            log.warning(f"Nav2 move_forward failed ({e}) — falling back to direct")
+
+    # Direct motor fallback
+    motors.forward(MOTOR_SPEED_SLOW)
+    time.sleep(duration_sec)
+    motors.stop()
+
+
+def _turn_nav2_or_direct(direction: str, duration_sec: float = 1.5):
+    """
+    Turn Eric using Nav2 (yaw goal) if available, else direct motor control.
+    direction: "left" | "right" | "back"
+    """
+    from config import USE_NAV2
+    if USE_NAV2:
+        try:
+            from nav2 import nav2_available, send_goal, get_pose, is_navigating
+            if nav2_available():
+                pose = get_pose()
+                yaw_delta = {
+                    "left":  math.pi / 2,
+                    "right": -math.pi / 2,
+                    "back":  math.pi,
+                }.get(direction, 0.0)
+                target_yaw = pose["yaw"] + yaw_delta
+                # Stay in place — same x,y, just new heading
+                send_goal(pose["x"], pose["y"], target_yaw)
+                deadline = time.time() + duration_sec + 5.0
+                while is_navigating() and time.time() < deadline and mission_active:
+                    time.sleep(0.2)
+                return
+        except Exception as e:
+            log.warning(f"Nav2 turn failed ({e}) — falling back to direct")
+
+    # Direct motor fallback
+    if direction == "left":
+        motors.left(MOTOR_SPEED_SLOW);  time.sleep(duration_sec); motors.stop()
+    elif direction == "right":
+        motors.right(MOTOR_SPEED_SLOW); time.sleep(duration_sec); motors.stop()
+    elif direction == "back":
+        motors.right(MOTOR_SPEED_SLOW); time.sleep(duration_sec * 2); motors.stop()
 
 
 # ─── Mission File Loading ─────────────────────────────────────────────────────
@@ -360,6 +530,15 @@ def stop_mission():
     mission_active = False
     mission_state  = State.IDLE
     motors.stop()
+    # Cancel any in-progress Nav2 goal
+    try:
+        from config import USE_NAV2
+        if USE_NAV2:
+            from nav2 import cancel_goal, nav2_available
+            if nav2_available():
+                cancel_goal()
+    except Exception:
+        pass
     motors.lights(0, 0)
     motors.pantilt(0, 5)
     motors.oled(0, "ERIC STOPPED")
@@ -539,25 +718,58 @@ NAV_IMAGE_INTERVAL = 4.0  # seconds between nav image checks while moving
 def _nav_check() -> dict:
     """
     Image-based nav check while moving.
-    Single pan-tilt frame every NAV_IMAGE_INTERVAL seconds.
+    Single pan-tilt frame + live sensor data every NAV_IMAGE_INTERVAL seconds.
+    LiDAR and OAK-D readings are prepended to the prompt as ground-truth context.
     Much faster than 10s video clip — allows more frequent obstacle checks.
     """
     _ui("log", "📷 Nav check...")
     motors.oled(1, "Nav check...")
 
+    # ── Hardware safety check BEFORE asking Cosmos ──────────────────────────
+    # If LiDAR already sees something too close, stop immediately —
+    # no need to wait for Cosmos inference (which takes 5-9s).
+    try:
+        from lidar import obstacle_close as lidar_close, obstacle_near as lidar_near
+        if lidar_close():
+            log.info("Nav check: LiDAR STOP — returning obstacle result immediately")
+            return {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
+                    "action": "stop",
+                    "physical_reasoning": "LiDAR: obstacle within 0.30m stop zone"}
+        if lidar_near():
+            log.info("Nav check: LiDAR near — slowing")
+            # Don't abort — let Cosmos decide with the sensor context
+    except Exception:
+        pass
+
+    try:
+        from oakd import get_front_depth, oakd_available
+        if oakd_available():
+            d = get_front_depth()
+            if d is not None and d < 0.30:
+                log.info(f"Nav check: OAK-D STOP at {d:.2f}m")
+                return {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
+                        "action": "stop",
+                        "physical_reasoning": f"OAK-D: obstacle at {d:.2f}m — within stop distance"}
+    except Exception:
+        pass
+
     frame = capture_frame(CAMERA_PANTILT, 320, 240)
     if not frame:
         return dict(_NAV_FALLBACK)
 
+    # Build sensor context to prepend — gives Cosmos real metric distances
+    sensor_ctx = _sensor_context()
+
     # Simplified nav prompt for single image
-    NAV_IMAGE_PROMPT = """
-You are a tracked ground robot moving forward. This is a single frame from your forward camera.
+    NAV_IMAGE_PROMPT = f"""{sensor_ctx}You are a tracked ground robot moving forward. This is a single frame from your forward camera.
 
 Check ONLY for immediate safety hazards:
 - Wall or large object filling the lower 40% of frame → wall_ahead = true
 - Any object within ~60cm directly ahead → obstacle_close = true
 - Small ground obstacle (cables, edges, steps) → small_obstacle = true
 - Person or robot visible anywhere → person_visible = true
+
+If sensor data above shows obstacle_close or LiDAR STOP ZONE, you MUST set wall_ahead=true and action=stop.
 
 ACTION RULE: "action" must be EXACTLY one of these two words: "forward" or "stop"
 - Use "stop" ONLY if wall_ahead=true OR obstacle_close=true
@@ -568,21 +780,20 @@ OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field 
 BOOLEAN fields must be true or false.
 
 Example output (copy this structure exactly, change values to match what you see):
-{
+{{
   "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
   "person_visible": false,
   "action": "forward",
   "physical_reasoning": "Path ahead is clear with no obstacles visible."
-}
+}}
 
 Now analyze the frame and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
 """
     try:
-        # Raw request with NO system prompt — ask_cosmos sends the mission briefing
-        # as system context which causes the 2B model to hallucinate mission content
-        # into nav responses (e.g. "finding north pole ice skates", Chinese text)
+        # Raw request with NO system prompt — prevents mission briefing bleeding
+        # into nav responses (hallucination suppression for 2B model)
         payload = {
             "model": COSMOS_MODEL,
             "messages": [{"role": "user", "content": [
@@ -636,6 +847,7 @@ def _quick_scan() -> dict:
     """
     Dual camera stable scan while stopped.
     Pan-tilt at ground-looking default (slight downward), then both cameras captured.
+    Sensor context prepended to prompt — Cosmos gets LiDAR + OAK-D metric readings.
     LED only fires if frame is pitch black (luminance < 20).
     """
     motors.pantilt(0, 5)   # ground-looking default — sees objects on floor
@@ -644,7 +856,6 @@ def _quick_scan() -> dict:
     frames = []
     pt = capture_frame(CAMERA_PANTILT, 640, 480)
     if pt:
-        # Only turn on LED if scene is pitch black
         if _is_pitch_black(pt):
             motors.lights(base=180, head=255)
             time.sleep(0.3)
@@ -661,10 +872,41 @@ def _quick_scan() -> dict:
         frames.append(wc)
     if not frames:
         return dict(_SCAN_FALLBACK)
+
+    # Build sensor context — prepend to prompt so Cosmos sees real distances
+    sensor_ctx = _sensor_context()
+    prompt = sensor_ctx + QUICK_SCAN_PROMPT if sensor_ctx else QUICK_SCAN_PROMPT
+
     try:
         print(f"\n📷 QUICK SCAN — {len(frames)} frames to Cosmos...")
-        response = _cosmos_frames(frames, QUICK_SCAN_PROMPT, max_tokens=200, temp=0.3)
-        return _parse_json(response, dict(_SCAN_FALLBACK), label="QUICK SCAN RESULT")
+        response = _cosmos_frames(frames, prompt, max_tokens=200, temp=0.3)
+        result = _parse_json(response, dict(_SCAN_FALLBACK), label="QUICK SCAN RESULT")
+
+        # ── Sensor override: if sensors say stop, override Cosmos action ──────
+        # Cosmos vision can lag behind reality on fast approach — sensors are instant.
+        try:
+            from lidar import obstacle_close as lidar_close
+            if lidar_close():
+                log.info("Quick scan: LiDAR override → wall_ahead=True")
+                result["wall_ahead"]     = True
+                result["obstacle_close"] = True
+                result["action"]         = "stop"
+        except Exception:
+            pass
+
+        try:
+            from oakd import get_front_depth, oakd_available
+            if oakd_available():
+                d = get_front_depth()
+                if d is not None and d < 0.30:
+                    log.info(f"Quick scan: OAK-D override at {d:.2f}m → wall_ahead=True")
+                    result["wall_ahead"]     = True
+                    result["obstacle_close"] = True
+                    result["action"]         = "stop"
+        except Exception:
+            pass
+
+        return result
     except Exception as e:
         log.error(f"Quick scan error: {e}")
         return dict(_SCAN_FALLBACK)
@@ -715,6 +957,7 @@ def _scan_360_smart() -> dict:
     Full 360° scan: 8 body positions × 45° (finer than 4×90°, less overshoot).
     At each position: tilt down to ground level (5°) then up to mid-range (-15°).
     LED only on if pitch black.
+    Sensor context injected into the final overview prompt.
     """
     global mission_state
     mission_state = State.SCANNING_360
@@ -754,11 +997,14 @@ def _scan_360_smart() -> dict:
             # Quick scan at this position
             result = _quick_scan()
 
-            # ── Target found mid-scan — stop early ───────────────────────
+            # ── Target found mid-scan — turn to face it, then stop early ─────
             if result.get("target_visible"):
                 log.info(f"🎯 Target VISIBLE at {deg}° tilt={label} — stopping scan early!")
                 _ui("log", f"Target visible at {deg}° — stopping scan!")
                 motors.oled(1, "TARGET FOUND!")
+                motors.stop()
+                time.sleep(0.2)
+
                 return {
                     "object":             result.get("object", "person"),
                     "object_name":        result.get("object_name"),
@@ -769,9 +1015,9 @@ def _scan_360_smart() -> dict:
                     "obstacle_close":     False,
                     "small_obstacle":     False,
                     "target_visible":     True,
-                    "target_direction":   "front",
+                    "target_direction":   "front",   # robot is already facing it
                     "clearest_direction": "front",
-                    "action":             "forward",  # must not be "stop" — _process_scan routes on action
+                    "action":             "forward",
                     "speak":              result.get("speak"),
                     "physical_reasoning": f"Target confirmed at {deg}° tilt={label}",
                     "mission_complete":   False
@@ -834,8 +1080,12 @@ def _scan_360_smart() -> dict:
     if not all_frames:
         return dict(_SCAN_FALLBACK)
 
+    # Prepend sensor context to 360 overview prompt
+    sensor_ctx = _sensor_context()
+    prompt_360 = sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT
+
     try:
-        response = _cosmos_frames(all_frames, SCAN_360_PROMPT, max_tokens=300, temp=0.2)
+        response = _cosmos_frames(all_frames, prompt_360, max_tokens=300, temp=0.2)
         return _parse_json(response, dict(_SCAN_FALLBACK), label="360° OVERVIEW")
     except Exception as e:
         log.error(f"360 overview Cosmos error: {e}")
@@ -854,7 +1104,6 @@ def _face_direction(direction: str):
     elif d in ("back", "behind", "backward", "rear"):
         motors.right(MOTOR_SPEED_SLOW); time.sleep(3.0); motors.stop()
     elif d in ("side",):
-        # "side" is ambiguous — do a short right turn as best guess
         motors.right(MOTOR_SPEED_SLOW); time.sleep(0.8); motors.stop()
     elif d in ("down", "below", "front", "ahead", "forward", "unknown", ""):
         pass  # already facing it or already arrived — no turn needed
@@ -867,6 +1116,7 @@ def _avoid_obstacle(wall_ahead, small_obstacle) -> bool:
     """
     Obstacle avoidance. Returns True if 360 scan should be forced.
     Always re-scans after turning to confirm the new path is clear.
+    Uses _turn_nav2_or_direct() so Nav2 handles turning when available.
     """
     global _avoid_attempts, mission_state
     _avoid_attempts += 1
@@ -882,12 +1132,10 @@ def _avoid_obstacle(wall_ahead, small_obstacle) -> bool:
         motors.backward(MOTOR_SPEED_SLOW); time.sleep(1.5)
         motors.stop(); time.sleep(0.3)
 
-        # Longer turn — alternate left/right, increase turn time each attempt
-        turn_time = min(1.8 + (_avoid_attempts * 0.4), 3.5)
-        if _avoid_attempts % 2 == 1:
-            motors.right(MOTOR_SPEED_SLOW); time.sleep(turn_time)
-        else:
-            motors.left(MOTOR_SPEED_SLOW);  time.sleep(turn_time)
+        # Alternate left/right turns, increasing duration each attempt
+        turn_sec = min(1.8 + (_avoid_attempts * 0.4), 3.5)
+        direction = "right" if _avoid_attempts % 2 == 1 else "left"
+        _turn_nav2_or_direct(direction, turn_sec)
         motors.stop(); time.sleep(0.5)
 
         if _avoid_attempts >= MAX_AVOID_ATTEMPTS:
@@ -928,6 +1176,15 @@ def _handle_mission_complete(obj_name):
     log.info(f"MISSION COMPLETE — {obj_name}")
     mission_state = State.COMPLETE
     motors.stop()
+    # Cancel any active Nav2 goal
+    try:
+        from config import USE_NAV2
+        if USE_NAV2:
+            from nav2 import cancel_goal, nav2_available
+            if nav2_available():
+                cancel_goal()
+    except Exception:
+        pass
     motors.oled(0, "MISSION DONE!")
     motors.oled(1, (obj_name or "Target")[:16])
     _ui("status", "MISSION COMPLETE")
@@ -935,9 +1192,8 @@ def _handle_mission_complete(obj_name):
     for _ in range(5):
         motors.lights(255, 255); time.sleep(0.25)
         motors.lights(0, 0);    time.sleep(0.25)
-    motors.lights(128, 255)   # brief celebratory lights, then off below
+    motors.lights(128, 255)
 
-    # Tilt to ground-looking default to face the target at close range
     motors.pantilt(0, 5)
     time.sleep(0.5)
 
@@ -986,6 +1242,7 @@ def handle_character_response(character, said):
 def _approach_target():
     """
     Drive toward target in 2-second steps, scanning after each.
+    Uses _move_forward() so Nav2 is used when available.
     Stops when: close enough, obstacle hit, person seen, or 3 consecutive invisible scans.
     """
     global mission_state
@@ -1000,8 +1257,7 @@ def _approach_target():
     for attempt in range(12):       # max ~24s total approach
         if not mission_active:
             break
-        motors.forward(MOTOR_SPEED_SLOW)
-        time.sleep(2.0)
+        _move_forward(duration_sec=2.0, distance_m=0.5)
         motors.stop()
         time.sleep(0.4)
         check = _quick_scan()
@@ -1145,27 +1401,24 @@ def _process_scan(scan, from_360=False):
         eric_say(speak_tx)
 
     # ── Target persistence: Cosmos often flip-flops target_visible ───────────
-    # One positive sighting is enough — don't require back-to-back confirmation.
     if target_visible:
         _target_spotted_count += 1
     else:
-        # Allow 1 missed scan before giving up — Cosmos is inconsistent on small objects
         if _target_spotted_count > 0:
             _target_spotted_count -= 1
             if _target_spotted_count > 0:
                 log.info("Target_visible=False but keeping target lock (Cosmos flip-flop guard)")
-                target_visible = True   # restore for this cycle
+                target_visible = True
 
     if target_visible:
         _empty_scans = 0
-        _target_spotted_count = 0   # reset — _approach_target takes over from here
+        _target_spotted_count = 0
         direction = str(target_dir).lower().strip() if target_dir else "front"
 
-        # "down" means Eric is already right on top of the target
         if direction in ("down", "below"):
             _ui("log", "Target is directly below — already arrived!")
             motors.stop()
-            motors.pantilt(0, 20)   # tilt camera down to look at it
+            motors.pantilt(0, 20)
             time.sleep(0.5)
             _handle_mission_complete(obj_name)
             return
@@ -1186,7 +1439,6 @@ def _process_scan(scan, from_360=False):
     if obj in ["person", "robot"] and not target_visible:
         dist_str = str(distance).lower()
         if dist_str in _NEAR_DISTANCES or in_path:
-            # Near enough to stop and talk
             _empty_scans = 0
             motors.stop()
             mission_state = State.INTERACTING
@@ -1205,10 +1457,8 @@ def _process_scan(scan, from_360=False):
             _ui("status", f"TALKING — {name}")
             return
         else:
-            # Person visible but far — note it, keep moving
             _ui("log", f"Person ({obj_name or 'unknown'}) visible but {dist_str} — continuing")
 
-    # Only count as empty if truly nothing found — wall/obstacle means something IS there
     if obj in ["clear", "unknown"] and not target_visible:
         _empty_scans += 1
         _ui("log", f"Nothing found ({_empty_scans}/{EMPTY_SCAN_LIMIT})")
@@ -1217,20 +1467,20 @@ def _process_scan(scan, from_360=False):
         _face_direction(clear_dir)
 
     if action == "navigate_around":
-        motors.left(MOTOR_SPEED_SLOW); time.sleep(0.8)
+        _turn_nav2_or_direct("left", 0.8)
         motors.forward(MOTOR_SPEED_SLOW)
     elif action == "slow" or terrain == "carpet":
         motors.slow()
     elif action == "stop":
         motors.stop()
     elif action == "turn_right":
-        motors.right(MOTOR_SPEED_SLOW); time.sleep(1.0); motors.stop()
+        _turn_nav2_or_direct("right", 1.0)
         motors.forward(MOTOR_SPEED_SLOW)
     elif action == "turn_left":
-        motors.left(MOTOR_SPEED_SLOW);  time.sleep(1.0); motors.stop()
+        _turn_nav2_or_direct("left", 1.0)
         motors.forward(MOTOR_SPEED_SLOW)
     elif action == "turn_back":
-        motors.right(MOTOR_SPEED_SLOW); time.sleep(3.0); motors.stop()
+        _turn_nav2_or_direct("back", 1.5)
         motors.forward(MOTOR_SPEED_SLOW)
     else:
         motors.forward(MOTOR_SPEED_SLOW)

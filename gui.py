@@ -136,6 +136,38 @@ def get_status():   return _status
 def get_log():      return _log_text
 
 
+# ─── Sensor status helpers ────────────────────────────────────────────────────
+
+def get_lidar_html() -> str:
+    """LiDAR status panel for live Gradio display."""
+    try:
+        from lidar import lidar_status_html, lidar_available
+        if lidar_available():
+            return lidar_status_html()
+    except Exception:
+        pass
+    return """
+    <div style="background:#1a1a1a;border:1px solid #444;border-radius:8px;
+                padding:10px;font-family:monospace;color:#666">
+        📡 LiDAR: not connected
+    </div>"""
+
+
+def get_oakd_html() -> str:
+    """OAK-D Lite depth status panel for live Gradio display."""
+    try:
+        from oakd import oakd_status_html, oakd_available
+        if oakd_available():
+            return oakd_status_html()
+    except Exception:
+        pass
+    return """
+    <div style="background:#1a1a1a;border:1px solid #444;border-radius:8px;
+                padding:10px;font-family:monospace;color:#666">
+        📷 OAK-D Lite: not connected
+    </div>"""
+
+
 # ─── Mission file helpers ─────────────────────────────────────────────────────
 def load_mission_choices():
     missions = list_missions()
@@ -201,10 +233,39 @@ def action_status():
         f"  • {e['character']}: {e['said'][:60]}"
         for e in conversation_history[-5:]
     ) or "  (none yet)"
+
+    # Sensor status summary
+    sensor_lines = []
+    try:
+        from lidar import lidar_available, get_status as ls
+        if lidar_available():
+            s = ls()
+            dist = s.get("min_distance", 999)
+            sensor_lines.append(f"  LiDAR front: {dist:.2f}m" if dist < 999 else "  LiDAR front: clear")
+    except Exception:
+        pass
+    try:
+        from oakd import oakd_available, get_front_depth
+        if oakd_available():
+            d = get_front_depth()
+            sensor_lines.append(f"  OAK-D front: {d:.2f}m" if d is not None else "  OAK-D front: no reading")
+    except Exception:
+        pass
+    try:
+        from nav2 import nav2_available, is_navigating, get_pose
+        if nav2_available():
+            p = get_pose()
+            sensor_lines.append(f"  Nav2: navigating={is_navigating()} pose=({p['x']:.2f},{p['y']:.2f})")
+    except Exception:
+        pass
+
+    sensors = "\n".join(sensor_lines) or "  (sensors not enabled)"
+
     return (
         f"State:  {mission_state}\n"
         f"Active: {mission_active}\n"
         f"TTS:    {'Piper streaming' if piper_available() else 'gTTS fallback'}\n"
+        f"\nSensors:\n{sensors}"
         f"\nRecent conversations:\n{history}"
     )
 
@@ -233,7 +294,7 @@ def build_ui():
 
         with gr.Row():
 
-            # ── LEFT: Camera feeds ───────────────────────────────────────────
+            # ── LEFT: Camera feeds + sensor status ───────────────────────────
             with gr.Column(scale=1):
                 gr.Markdown("### 📷 Pan-Tilt Camera")
                 pantilt_img = gr.Image(streaming=True, height=240, label="Pan-Tilt")
@@ -243,6 +304,11 @@ def build_ui():
                 gr.HTML("<hr style='border-color:#333;margin:6px 0'>")
                 gr.Markdown("### 🚗 Motor Telemetry")
                 motor_display = gr.HTML(value=_motor_telemetry_html("stopped", 0.0, 0.0))
+
+                gr.HTML("<hr style='border-color:#333;margin:6px 0'>")
+                gr.Markdown("### 📡 LiDAR + Depth")
+                lidar_display = gr.HTML(value=get_lidar_html())
+                oakd_display  = gr.HTML(value=get_oakd_html())
 
             # ── RIGHT: Control panel ─────────────────────────────────────────
             with gr.Column(scale=1):
@@ -340,6 +406,8 @@ def build_ui():
         gr.Timer(1.0).tick(get_status,          outputs=status_box)
         gr.Timer(2.0).tick(get_log,             outputs=log_box)
         gr.Timer(0.5).tick(get_motor_telemetry, outputs=motor_display)
+        gr.Timer(1.0).tick(get_lidar_html,      outputs=lidar_display)
+        gr.Timer(1.0).tick(get_oakd_html,       outputs=oakd_display)
 
     return demo
 

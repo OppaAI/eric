@@ -10,7 +10,7 @@ Stack:
   - Gradio                       : dual camera GUI + mission control
   - ROS2 Nav2 (optional)         : autonomous path planning
   - D500 LiDAR (optional)        : reactive obstacle safety layer
-  - OAK-D Lite (optional)        : depth perception
+  - OAK-D Lite (optional)        : stereo depth perception
 
 Hardware:
   - Jetson Orin Nano Super 8GB
@@ -22,8 +22,8 @@ Usage:
   uv run main.py
   # Then open http://JETSON_IP:7860
 
-Enable Nav2 + LiDAR:
-  Set USE_NAV2=true and USE_LIDAR=true in .env
+Enable Nav2 + LiDAR + OAK-D:
+  Set USE_NAV2=true, USE_LIDAR=true, USE_OAKD=true in .env
   Then: ros2 launch ugv_tools navigation.launch.py
 """
 
@@ -39,7 +39,7 @@ log = logging.getLogger("eric")
 def main():
     log.info("🤖 ERIC starting — Edge Robotics Innovation by Cosmos")
 
-    from config import USE_NAV2, USE_LIDAR
+    from config import USE_NAV2, USE_LIDAR, USE_OAKD
 
     # ── Optional: ROS2 Nav2 ───────────────────────────────────────────────────
     if USE_NAV2:
@@ -60,6 +60,16 @@ def main():
             log.info("✅ LiDAR safety monitor active")
         else:
             log.warning("⚠️  LiDAR unavailable — no hardware safety layer")
+
+    # ── Optional: OAK-D Lite depth camera ────────────────────────────────────
+    if USE_OAKD:
+        log.info("📷 OAK-D Lite enabled — initializing stereo depth...")
+        from oakd import init_oakd, oakd_available
+        init_oakd()
+        if oakd_available():
+            log.info("✅ OAK-D depth perception active")
+        else:
+            log.warning("⚠️  OAK-D unavailable — no depth perception")
 
     # ── Cosmos connectivity test ──────────────────────────────────────────────
     from cosmos import ask_cosmos
