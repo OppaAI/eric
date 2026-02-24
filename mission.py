@@ -1016,7 +1016,11 @@ def start_mission(briefing: str, mission_name: str = ""):
     if mission_name:
         yaml_data = load_mission_file(mission_name)
         if yaml_data:
-            _mission_alarm_type     = yaml_data.get("alarm_type", AlarmType.HAZARD)
+            raw_alarm = yaml_data.get("alarm_type", AlarmType.HAZARD)
+            # Normalize "none" string → AlarmType.NONE so sound_alarm handles it correctly
+            if str(raw_alarm).lower() in ("none", "null", ""):
+                raw_alarm = AlarmType.NONE
+            _mission_alarm_type     = raw_alarm
             _mission_target_objects = yaml_data.get("target_objects", [])
             _mission_flags          = {k: v for k, v in yaml_data.items()
                                        if k not in ("briefing", "name", "alarm_type",
@@ -2402,9 +2406,16 @@ def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
                f"Location: {location_hint or 'current position'}. "
                f"Alerting security personnel immediately. Do NOT approach.")
     elif alarm_type == AlarmType.NATURE:
-        msg = (f"I've discovered something wonderful — {obj_name}! "
-               f"{location_hint or 'Right here in front of me'}. "
+        # Respect announce_location flag — don't announce location for wildlife (may startle)
+        if _mission_flags.get("announce_location", True):
+            loc_str = f" {location_hint or 'Right here in front of me'}."
+        else:
+            loc_str = ""
+        msg = (f"I've discovered something wonderful — {obj_name}!{loc_str} "
                f"Let me get a closer look!")
+    elif alarm_type == AlarmType.NONE:
+        # Narrative/story missions — quiet find, no alarm, just a friendly note
+        msg = f"I have located {obj_name}."
     else:  # HAZARD / default
         msg = (f"{severity}! I have found a hazard: {obj_name}. "
                f"Location: {location_hint or 'current position'}. "
@@ -2438,7 +2449,8 @@ def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
             log_exception("alarm_photo_save", e)
 
     # ── OLED display ──────────────────────────────────────────────────────────
-    motors.oled(0, f"{alarm_type.upper()}!")
+    oled_label = "FOUND!" if alarm_type == AlarmType.NONE else f"{alarm_type.upper()}!"
+    motors.oled(0, oled_label)
     motors.oled(1, obj_name[:16])
 
     # ── Sound alarm (non-blocking — TTS + LED + tone run in background) ───────
@@ -2502,6 +2514,7 @@ def _get_mission_scan_overlay() -> str:
     """
     Returns mission-specific instructions to prepend to Cosmos scan prompts.
     This customises what Cosmos looks for based on the active mission type.
+    Includes character hints and current stage goal from YAML if available.
     """
     if not _mission_target_objects and not _mission_alarm_type:
         return ""
@@ -2511,7 +2524,7 @@ def _get_mission_scan_overlay() -> str:
 
     if alarm == AlarmType.SIREN:
         target_list = ", ".join(targets) if targets else "injured or unconscious people"
-        return (
+        base = (
             f"SEARCH AND RESCUE MODE: You are searching for {target_list}.\n"
             "If you see ANY person who appears injured, unconscious, on the floor, "
             "or in distress — set target_visible=true, set object='person', "
@@ -2521,7 +2534,7 @@ def _get_mission_scan_overlay() -> str:
 
     elif alarm == AlarmType.SUSPICIOUS:
         target_list = ", ".join(targets) if targets else "unattended bags or suspicious objects"
-        return (
+        base = (
             f"SECURITY SWEEP MODE: You are scanning for {target_list}.\n"
             "Suspicious objects include: unattended bags, packages with wires, "
             "unusual canisters or containers, objects with timers or electronics attached.\n"
@@ -2532,7 +2545,7 @@ def _get_mission_scan_overlay() -> str:
 
     elif alarm == AlarmType.HAZARD:
         target_list = ", ".join(targets) if targets else "hazards and dangerous conditions"
-        return (
+        base = (
             f"HAZARD PATROL MODE: You are scanning for {target_list}.\n"
             "Classify each hazard: CRITICAL (immediate danger) / WARNING (needs attention) "
             "/ ADVISORY (monitor).\n"
@@ -2543,7 +2556,7 @@ def _get_mission_scan_overlay() -> str:
 
     elif alarm == AlarmType.NATURE:
         target_list = ", ".join(targets) if targets else "wildlife and interesting plants"
-        return (
+        base = (
             f"NATURE EXPLORE MODE: You are documenting {target_list}.\n"
             "Describe everything you see with scientific curiosity and poetic appreciation.\n"
             "Wildlife: note species, behaviour, colours, movement.\n"
@@ -2553,7 +2566,55 @@ def _get_mission_scan_overlay() -> str:
             "Use vivid descriptive language in the speak field.\n\n"
         )
 
-    return ""
+    elif alarm == AlarmType.NONE:
+        # Narrative/story missions — guide Cosmos to find story characters
+        target_list = ", ".join(targets) if targets else "mission targets"
+        base = (
+            f"NARRATIVE MISSION MODE: You are looking for {target_list}.\n"
+            "When you see the target, set target_visible=true and approach normally.\n"
+            "No alarm will sound — this is a story/roleplay mission.\n\n"
+        )
+
+    else:
+        base = ""
+
+    # ── Append character hints and stage goal from YAML ───────────────────────
+    # These give Cosmos the knowledge to roleplay characters correctly and
+    # know what sub-goal it's working toward at each stage of the mission.
+    return base + _get_stage_context() + _get_character_context()
+
+
+def _get_character_context() -> str:
+    """
+    Build a character hint block from the YAML 'characters' list.
+    Injected into Cosmos prompts so Eric knows how to interact with each character.
+    """
+    characters = _mission_flags.get("characters", [])
+    if not characters:
+        return ""
+    lines = ["CHARACTER GUIDE (how to interact with each person you meet):"]
+    for c in characters:
+        name = c.get("name", "Unknown")
+        hint = c.get("hint", "")
+        if hint:
+            lines.append(f"  {name}: {hint}")
+    lines.append("")
+    return "\n".join(lines) + "\n"
+
+
+def _get_stage_context() -> str:
+    """
+    Return the current mission stage goal from the YAML 'mission_stages' list.
+    Gives Cosmos a focused sub-goal that matches the current step index.
+    """
+    stages = _mission_flags.get("mission_stages", [])
+    if not stages or _current_step_idx >= len(stages):
+        return ""
+    stage = stages[_current_step_idx]
+    goal  = stage.get("goal", "") if isinstance(stage, dict) else str(stage)
+    if not goal:
+        return ""
+    return f"CURRENT STAGE GOAL: {goal}\n\n"
 
 
 def _handle_mission_complete(obj_name):
@@ -2615,8 +2676,16 @@ def handle_character_response(character, said):
     history = "\n".join(f"- {e['character']}: {e['said']}" for e in conversation_history[-5:])
     n = sum(1 for e in conversation_history if e["character"] == character)
 
+    # Include per-character hint from YAML if available
+    char_hint = ""
+    for c in _mission_flags.get("characters", []):
+        if c.get("name", "").lower() == character.lower():
+            char_hint = f"Character note: {c.get('hint', '')}\n" if c.get("hint") else ""
+            break
+
     response = ask_cosmos(
         f"Talking to {character}. They said: \"{said}\"\n"
+        f"{char_hint}"
         f"Info gathered:\n{history}\nExchange #{n}.\n\n"
         "If off-topic or exchange 3+ with no new info: thank them, end with [MOVE_ON]\n"
         "Otherwise: respond and ask follow-up. 2 sentences max.",
