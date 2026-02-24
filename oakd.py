@@ -3,6 +3,14 @@ ERIC — OAK-D Lite Depth Camera
 DepthAI 3.x API — Pipeline runs itself via pipeline.start().
 No separate Device creation needed.
 
+Layer 1 Safety (industrial standard — mirrors LiDAR safety monitor):
+  Every depth frame is checked instantly:
+    front depth  < OAKD_STOP_DIST  → motors.stop()  immediately
+    front depth  < OAKD_SLOW_DIST  → motors.slow()  immediately
+    floor drop detected (high confidence) → motors.stop() immediately
+  This fires in the reader thread — zero latency, independent of Cosmos.
+  Floor drop check runs at FLOOR_CHECK_HZ to limit CPU (numpy is expensive).
+
 Disconnect handling:
   - _reader_loop detects "MessageQueue was closed" / XLinkError and exits cleanly
   - _oakd_ok is cleared immediately so all callers see unavailable
@@ -30,6 +38,15 @@ _reconnect_thread    = None
 _reconnect_started   = False
 RECONNECT_INTERVAL_S = 10.0   # seconds between reconnection attempts
 
+# ── Layer 1 Safety constants ──────────────────────────────────────────────────
+OAKD_STOP_DIST   = 0.30   # meters — stop if obstacle closer than this
+OAKD_SLOW_DIST   = 0.60   # meters — slow if obstacle closer than this
+FLOOR_CHECK_HZ   = 5.0    # how often to run floor-drop check (per second)
+                           # get_floor_drop() is numpy-heavy — don't run every frame
+
+_safety_active   = True   # can be disabled for testing
+_last_floor_check = 0.0   # timestamp of last floor drop check
+
 # Error strings that mean the queue/pipeline is permanently closed
 _FATAL_ERRORS = (
     "MessageQueue was closed",
@@ -42,6 +59,13 @@ _FATAL_ERRORS = (
 
 def oakd_available() -> bool:
     return _oakd_ok
+
+
+def set_safety_active(active: bool):
+    """Enable/disable Layer 1 auto-stop. Use False only for testing."""
+    global _safety_active
+    _safety_active = active
+    log.info(f"OAK-D safety: {'ENABLED' if active else 'DISABLED'}")
 
 
 # ─── Initialisation ───────────────────────────────────────────────────────────
@@ -130,12 +154,20 @@ def _reader_loop():
     """
     Background thread — reads depth frames from the DepthAI output queue.
 
+    Layer 1 Safety (industrial standard):
+      After storing each frame, immediately checks:
+        1. Front obstacle distance → stop/slow motors instantly (no Cosmos, no latency)
+        2. Floor drop / void       → stop motors instantly (staircase protection)
+      Floor drop check is rate-limited to FLOOR_CHECK_HZ to avoid hammering numpy.
+
     On a clean disconnect (MessageQueue closed / XLinkError) we:
       1. Log ONE warning.
       2. Set _oakd_ok = False so all callers immediately see unavailable.
       3. Exit the loop — the reconnect watchdog will call init_oakd() again.
     """
-    global _depth_frame, _oakd_ok
+    global _depth_frame, _oakd_ok, _last_floor_check
+
+    floor_check_interval = 1.0 / FLOOR_CHECK_HZ
 
     while _oakd_ok:
         try:
@@ -150,6 +182,11 @@ def _reader_loop():
             frame = in_depth.getFrame()
             with _lock:
                 _depth_frame = frame
+
+            # ── Layer 1: instant safety reaction ─────────────────────────────
+            # Mirrors LiDAR _scan_callback() — fires every frame, zero latency.
+            if _safety_active:
+                _safety_check(floor_check_interval)
 
         except Exception as e:
             err_str = str(e)
@@ -168,6 +205,51 @@ def _reader_loop():
             time.sleep(0.5)
 
     log.info("OAK-D reader loop exited (device offline)")
+
+
+def _safety_check(floor_check_interval: float):
+    """
+    Layer 1 safety reactions — called every depth frame from _reader_loop().
+
+    Check 1 — Front obstacle:
+      Reads front depth (center of frame). If closer than thresholds →
+      motors.stop() or motors.slow() instantly, same as LiDAR does.
+
+    Check 2 — Floor drop / void (rate-limited):
+      Runs get_floor_drop() at FLOOR_CHECK_HZ. High-confidence void →
+      motors.stop() instantly. This is the staircase protection.
+
+    Both checks are independent of Cosmos — pure reactive hardware safety.
+    """
+    global _last_floor_check
+
+    try:
+        from motors import motors
+
+        # ── Check 1: front obstacle ───────────────────────────────────────────
+        front = get_front_depth()
+        if front is not None:
+            if front < OAKD_STOP_DIST:
+                motors.stop()
+                log.warning(f"🚧 OAK-D STOP — obstacle at {front:.2f}m")
+            elif front < OAKD_SLOW_DIST:
+                motors.slow()
+                log.info(f"⚠️  OAK-D slow — obstacle at {front:.2f}m")
+
+        # ── Check 2: floor drop / void (rate-limited) ─────────────────────────
+        now = time.monotonic()
+        if now - _last_floor_check >= floor_check_interval:
+            _last_floor_check = now
+            drop = get_floor_drop()
+            if drop["void_detected"] and drop["confidence"] == "high":
+                motors.stop()
+                log.warning(
+                    f"🕳️  OAK-D VOID STOP — {drop['reason']}"
+                )
+
+    except Exception as e:
+        # Never let safety check crash the reader loop
+        log.debug(f"OAK-D safety check error: {e}")
 
 
 # ─── Reconnect watchdog ───────────────────────────────────────────────────────
