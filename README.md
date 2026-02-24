@@ -1,9 +1,11 @@
 # ERIC — Edge Robotics Innovation by Cosmos
+**By OppaAO**
+**License: Apache 2.0**
 
 [![Repo](https://img.shields.io/badge/repo-OppaAI%2FAGi-darkcyan)](https://github.com/OppaAI/eric)
 ![Build](https://img.shields.io/badge/build-prototype-lightgrey)
 ![Status Experimental](https://img.shields.io/badge/status-experimental-orange.svg)
-[![License: GPL v3](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
+[![License: Apache_2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://www.gnu.org/licenses/gpl-3.0.en.html)
 
 ![ARM](https://img.shields.io/badge/ARM64-aarch64-0091BD?logo=arm)
 ![LLM](https://img.shields.io/badge/Model-Cosmos%20Reason2%202B-76B900?logo=nvidia)
