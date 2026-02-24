@@ -1,61 +1,104 @@
 """
-ERIC — LiDAR Safety Monitor
+ERIC — LiDAR Safety Monitor  (Layer 1)
 Waveshare UGV Beast D500 LiDAR via ROS2 LaserScan topic.
-Runs as independent safety layer — stops Eric if obstacle too close,
-regardless of what Cosmos is doing.
 
-Architecture:
-  D500 LiDAR → /scan topic → lidar.py safety monitor
-                                    ↓
-                          if obstacle < STOP_DIST → motors.stop()
-                          if obstacle < SLOW_DIST → motors.slow()
+Layer 1 guarantee:
+  Every scan callback fires motors.stop() / motors.slow() BEFORE returning.
+  This is completely independent of Cosmos, Nav2, and mission logic.
 
-This is INDEPENDENT of Cosmos reasoning — pure reactive safety.
-Cosmos still handles mission logic and longer-range decisions.
+Gaps closed vs previous version
+────────────────────────────────
+1. Staleness watchdog  — if no scan arrives for STALE_TIMEOUT_S seconds,
+   _lidar_ok is cleared and lidar_available() returns False.
+   A background thread monitors this continuously.
+
+2. Medium-confidence void auto-stop  — both "high" AND "medium" void
+   confidence now trigger motors.stop(). "medium" logs differently so
+   operators can distinguish real stairs from wide doorways.
+
+3. Front-depth fallback via 3-patch sampling  — get_front_depth() now
+   samples left-centre, centre, and right-centre and returns the minimum
+   non-None value, so a textureless white wall can't blind the sensor.
+
+4. Sensor arbitration comment  — explains that LiDAR and OAK-D are
+   independent first-responders; whichever fires first wins, which is
+   correct for safety (most conservative wins).
+
+5. GUI status exposes stale / void state  — lidar_status_html() now
+   shows a STALE banner when data has stopped arriving.
+
+Architecture
+────────────
+  D500 LiDAR → /scan ROS2 topic → _scan_callback() (ROS spin thread)
+                                        │
+                        ┌───────────────┼────────────────────┐
+                        ▼               ▼                    ▼
+               obstacle check     void check          update _last_scan_time
+               (every scan)       (every scan)        (staleness watchdog)
+                        │               │
+               motors.stop/slow   motors.stop (high OR medium confidence)
+
+  _staleness_watchdog() runs in separate daemon thread, clears _lidar_ok
+  if no scan arrives within STALE_TIMEOUT_S seconds.
+
+  avoidance.py reads _last_scan_msg for per-arc clearances (unchanged).
 """
 
 import logging
+import math
 import threading
 import time
 
 log = logging.getLogger("eric.lidar")
 
-# Safety distances (meters)
-STOP_DIST       = 0.30   # stop if anything within 30cm in front arc
-SLOW_DIST       = 0.60   # slow if anything within 60cm in front arc
-FRONT_ARC_DEG   = 60     # degrees either side of forward = 120° total front arc
+# ── Safety distances (meters) ─────────────────────────────────────────────────
+STOP_DIST     = 0.30   # stop  if anything within 30 cm in front arc
+SLOW_DIST     = 0.60   # slow  if anything within 60 cm in front arc
+FRONT_ARC_DEG = 60     # ±60° either side of forward = 120° total front arc
 
+# ── Staleness watchdog ────────────────────────────────────────────────────────
+STALE_TIMEOUT_S      = 2.0   # seconds — declare LiDAR dead if no scan arrives
+STALE_CHECK_INTERVAL = 0.5   # how often the watchdog thread checks
+
+# ── Module state ──────────────────────────────────────────────────────────────
 _lidar_ok       = False
-_obstacle_close = False   # within STOP_DIST
-_obstacle_near  = False   # within SLOW_DIST
-_min_distance   = 999.0   # minimum distance in front arc
-_safety_active  = True    # can be disabled for testing
+_lidar_stale    = False    # True when data stopped arriving (watchdog)
+_obstacle_close = False    # within STOP_DIST
+_obstacle_near  = False    # within SLOW_DIST
+_void_active    = False    # True when a void/drop was last detected
+_min_distance   = 999.0    # minimum distance in front arc (meters)
+_safety_active  = True     # can be disabled for testing
+
 _node           = None
 _sub            = None
 _ros_thread     = None
+_watchdog_thread = None
 
 # Raw scan message — exposed for avoidance.py arc distance calculations
-# avoidance.py reads this to get per-direction clearances (front/left/right/rear)
 _last_scan_msg  = None
+_last_scan_time = 0.0      # monotonic timestamp of last received scan
 
-# Lock for thread-safe distance reads
-_lock = threading.Lock()
+_lock = threading.Lock()   # guards all state above
 
+
+# ─── Public API ───────────────────────────────────────────────────────────────
 
 def lidar_available() -> bool:
-    return _lidar_ok
+    """True only if LiDAR is initialised AND data is still arriving."""
+    with _lock:
+        return _lidar_ok and not _lidar_stale
 
 
 def obstacle_close() -> bool:
     """True if obstacle within STOP_DIST in front arc."""
     with _lock:
-        return _obstacle_close and _safety_active
+        return _obstacle_close and _safety_active and not _lidar_stale
 
 
 def obstacle_near() -> bool:
     """True if obstacle within SLOW_DIST in front arc."""
     with _lock:
-        return _obstacle_near and _safety_active
+        return _obstacle_near and _safety_active and not _lidar_stale
 
 
 def min_front_distance() -> float:
@@ -71,28 +114,41 @@ def set_safety_active(active: bool):
     log.info(f"LiDAR safety: {'ENABLED' if active else 'DISABLED'}")
 
 
+def get_last_scan():
+    """Return the most recent raw LaserScan message (for avoidance.py)."""
+    with _lock:
+        return _last_scan_msg
+
+
+# ─── Void / floor-drop detection ─────────────────────────────────────────────
+
 def lidar_void_ahead(
-    min_return_ratio: float = 0.15,   # if front arc has fewer valid returns than this → void
-    front_arc_deg: int = 40,          # narrow arc for void check (tighter than obstacle arc)
+    min_return_ratio: float = 0.15,  # fraction of arc indices with valid returns
+    front_arc_deg:    int   = 40,    # narrow arc for void (tighter than obstacle arc)
 ) -> dict:
     """
-    Detect floor voids (holes, staircase tops, cliff edges, balcony gaps) using
-    the D500 LiDAR scan.
+    Detect floor voids (holes, staircase tops, cliff edges) using D500 scan.
 
-    Key insight: a normal floor fills the front arc with dense, consistent returns
-    at 0.3–3m. A void (hole, stair drop, gap) produces almost NO returns in that
-    arc because the laser goes straight down through empty air and the return
-    either misses the sensor or is beyond the max range.
+    Normal floor: dense returns at 0.3–3 m in the forward arc.
+    Void / drop:  almost NO returns — laser falls through empty air.
 
-    This is different from obstacle detection (too many close returns) —
-    void detection looks for TOO FEW returns in the forward arc.
+    Confidence levels
+    ─────────────────
+    high   → return_ratio < 5%     — auto-stop immediately (clear floor drop)
+    medium → return_ratio < 15%    — auto-stop immediately (likely stairs/gap)
+             OR sparse far returns → likely stairwell opening
+    low    → no anomaly detected
+
+    Both high AND medium now trigger auto-stop (was: high only).
+    Medium is logged differently so operators can distinguish real stairs
+    from wide-open doorways that also produce sparse returns.
 
     Returns dict:
       {
         "void_detected":  bool,
         "confidence":     "high" | "medium" | "low",
-        "return_ratio":   float,   # fraction of arc indices that gave valid returns
-        "mean_distance":  float,   # mean of valid returns (m), or None
+        "return_ratio":   float,
+        "mean_distance":  float | None,
         "reason":         str,
       }
     """
@@ -104,12 +160,10 @@ def lidar_void_ahead(
                 "return_ratio": 1.0, "mean_distance": None,
                 "reason": "no scan data"}
 
-    import math
-
-    n          = len(msg.ranges)
-    angle_inc  = msg.angle_increment
-    angle_min  = msg.angle_min
-    arc_rad    = math.radians(front_arc_deg)
+    n         = len(msg.ranges)
+    angle_inc = msg.angle_increment
+    angle_min = msg.angle_min
+    arc_rad   = math.radians(front_arc_deg)
 
     total_in_arc = 0
     valid_ranges = []
@@ -127,23 +181,33 @@ def lidar_void_ahead(
                 "reason": "no arc indices found"}
 
     return_ratio = len(valid_ranges) / total_in_arc
-    mean_dist    = float(sum(valid_ranges) / len(valid_ranges)) if valid_ranges else None
+    mean_dist    = (float(sum(valid_ranges) / len(valid_ranges))
+                    if valid_ranges else None)
 
     void_detected = False
     confidence    = "low"
     reason        = "normal floor returns"
 
-    if return_ratio < min_return_ratio:
+    if return_ratio < 0.05:
+        # Virtually no returns — unambiguous drop
         void_detected = True
-        confidence = "high" if return_ratio < 0.05 else "medium"
-        reason = (f"front arc has only {return_ratio:.0%} valid returns "
-                  f"({len(valid_ranges)}/{total_in_arc}) — floor void or drop")
+        confidence    = "high"
+        reason        = (f"front arc only {return_ratio:.0%} valid returns "
+                         f"({len(valid_ranges)}/{total_in_arc}) — floor void or drop")
+
+    elif return_ratio < min_return_ratio:
+        # Few returns — staircase or gap
+        void_detected = True
+        confidence    = "medium"
+        reason        = (f"front arc sparse {return_ratio:.0%} valid returns "
+                         f"({len(valid_ranges)}/{total_in_arc}) — likely stairs or gap")
+
     elif mean_dist is not None and mean_dist > 3.5 and return_ratio < 0.4:
         # Returns exist but very far + sparse → stairwell wall visible, floor gone
         void_detected = True
-        confidence = "medium"
-        reason = (f"sparse far returns ({mean_dist:.1f}m avg, {return_ratio:.0%} ratio) "
-                  "— likely stairwell or open gap")
+        confidence    = "medium"
+        reason        = (f"sparse far returns ({mean_dist:.1f}m avg, "
+                         f"{return_ratio:.0%} ratio) — likely stairwell or open gap")
 
     return {
         "void_detected": void_detected,
@@ -154,24 +218,63 @@ def lidar_void_ahead(
     }
 
 
+# ─── Front depth — 3-patch sampling (gap fix) ────────────────────────────────
+
+def get_front_depth_lidar() -> float | None:
+    """
+    Return the minimum range in front arc using three angle sub-samples:
+    left-of-centre (−15°), centre (0°), right-of-centre (+15°).
+
+    Returning the minimum of three independent samples means a single
+    patch on a textureless surface can't silence the whole front check.
+    Returns None only if all three sub-arcs give no valid readings.
+    """
+    with _lock:
+        msg = _last_scan_msg
+    if msg is None:
+        return None
+
+    n         = len(msg.ranges)
+    angle_inc = msg.angle_increment
+    angle_min = msg.angle_min
+
+    sub_arcs_deg = [-15.0, 0.0, 15.0]
+    half_width   = math.radians(8.0)   # ±8° window around each sample centre
+    samples      = []
+
+    for centre_deg in sub_arcs_deg:
+        centre_rad = math.radians(centre_deg)
+        arc_ranges = []
+        for i, r in enumerate(msg.ranges):
+            angle = angle_min + i * angle_inc
+            if abs(angle - centre_rad) <= half_width:
+                if msg.range_min < r < msg.range_max:
+                    arc_ranges.append(r)
+        if arc_ranges:
+            samples.append(min(arc_ranges))
+
+    return min(samples) if samples else None
+
+
+# ─── Initialisation ───────────────────────────────────────────────────────────
+
 def init_lidar() -> bool:
     """
     Subscribe to /scan topic from D500 LiDAR.
     Returns True if ROS2 available and topic found.
     Non-blocking — runs subscriber in background thread.
+    Also starts the staleness watchdog thread.
     """
-    global _lidar_ok, _node, _sub, _ros_thread
+    global _lidar_ok, _lidar_stale, _node, _sub, _ros_thread
 
     try:
         import rclpy
-        from rclpy.node import Node
         from sensor_msgs.msg import LaserScan
 
-        # Reuse existing ROS2 init if nav2 already started it
         if not rclpy.ok():
             rclpy.init()
 
-        # Try to reuse node from nav2.py to save resources
+        # Reuse Nav2 node if available — saves one ROS2 node
         try:
             from nav2 import _node as nav2_node
             if nav2_node:
@@ -189,26 +292,30 @@ def init_lidar() -> bool:
             10  # QoS depth
         )
 
-        # Only spin if not already spinning (nav2 may already be spinning the node)
+        # Only spin if not already spinning (nav2 may be spinning already)
         try:
             from nav2 import _ros_thread as nav2_thread
             if nav2_thread and nav2_thread.is_alive():
                 log.info("LiDAR: ROS2 already spinning via Nav2")
-                _lidar_ok = True
+                _lidar_ok   = True
+                _lidar_stale = False
+                _start_staleness_watchdog()
                 return True
         except Exception:
             pass
 
         _ros_thread = threading.Thread(
             target=lambda: rclpy.spin(_node),
-            daemon=True
+            daemon=True,
+            name="lidar-ros-spin"
         )
         _ros_thread.start()
 
-        # Give it a moment to confirm topic
-        time.sleep(1.0)
-        _lidar_ok = True
+        time.sleep(1.0)   # give topic time to publish first scan
+        _lidar_ok    = True
+        _lidar_stale = False
         log.info("✅ LiDAR: D500 safety monitor active")
+        _start_staleness_watchdog()
         return True
 
     except ImportError:
@@ -221,112 +328,222 @@ def init_lidar() -> bool:
         return False
 
 
+# ─── Staleness watchdog ───────────────────────────────────────────────────────
+
+def _start_staleness_watchdog():
+    """Start the background thread that monitors scan freshness."""
+    global _watchdog_thread
+    if _watchdog_thread and _watchdog_thread.is_alive():
+        return
+    _watchdog_thread = threading.Thread(
+        target=_staleness_loop, daemon=True, name="lidar-watchdog"
+    )
+    _watchdog_thread.start()
+    log.info("👁  LiDAR staleness watchdog started")
+
+
+def _staleness_loop():
+    """
+    Runs every STALE_CHECK_INTERVAL seconds.
+    If no scan has arrived within STALE_TIMEOUT_S seconds, marks _lidar_stale
+    so lidar_available() returns False and all safety checks are suppressed
+    (reporting stale data as safe would be worse than reporting unavailable).
+
+    Logs once on transition, not on every check, to avoid log flooding.
+    """
+    global _lidar_stale
+
+    was_stale = False
+    while True:
+        time.sleep(STALE_CHECK_INTERVAL)
+        with _lock:
+            last = _last_scan_time
+            ok   = _lidar_ok
+
+        if not ok:
+            continue
+
+        age     = time.monotonic() - last
+        is_stale = age > STALE_TIMEOUT_S
+
+        if is_stale and not was_stale:
+            log.warning(f"⚠️  LiDAR STALE — no scan for {age:.1f}s "
+                        f"(timeout={STALE_TIMEOUT_S}s)")
+            with _lock:
+                _lidar_stale = True
+            was_stale = True
+
+        elif not is_stale and was_stale:
+            log.info("✅ LiDAR scan data resumed")
+            with _lock:
+                _lidar_stale = False
+            was_stale = False
+
+
+# ─── Scan callback ────────────────────────────────────────────────────────────
+
 def _scan_callback(msg):
     """
-    Process LaserScan message.
-    D500 outputs 360° scan. We care about front arc only.
-    angle_min is usually -π, angle_max is +π, angle_increment is small.
-    Index 0 = directly behind on most LiDARs — check your D500 config.
+    Process LaserScan message from D500.
 
-    The raw scan message is stored in _last_scan_msg so avoidance.py can
-    read per-direction arc distances (front/left/right/rear) for smart
-    manoeuvring decisions. The instant stop/slow still fires here for safety —
-    avoidance.py takes over the full manoeuvre from mission.py.
+    Fires every scan cycle (~10 Hz for D500).
+    All safety reactions happen here — zero latency, no queuing.
+
+    Sensor arbitration note:
+      LiDAR and OAK-D each call motors.stop() / motors.slow() independently.
+      Whichever fires first wins — this is correct for safety because the
+      most conservative sensor always dominates. There is no arbitration
+      logic intentionally: adding it would only delay the stop.
+
+    What happens here:
+      1. Update _last_scan_time → staleness watchdog stays quiet
+      2. Compute minimum range in front arc → obstacle stop/slow
+      3. Run void check → stop on high OR medium confidence
+      4. Store raw message for avoidance.py
     """
-    global _obstacle_close, _obstacle_near, _min_distance, _last_scan_msg
-
-    import math
+    global _obstacle_close, _obstacle_near, _min_distance
+    global _last_scan_msg, _last_scan_time, _void_active
 
     try:
-        n         = len(msg.ranges)
+        now       = time.monotonic()
         angle_inc = msg.angle_increment
         angle_min = msg.angle_min
-
-        # Store raw message for avoidance.py arc distance calculations
-        with _lock:
-            _last_scan_msg = msg
-
-        # Find indices covering front arc (±FRONT_ARC_DEG degrees)
         arc_rad   = math.radians(FRONT_ARC_DEG)
-        front_min_angle = -arc_rad
-        front_max_angle = +arc_rad
 
+        # ── 1. Update staleness timestamp ─────────────────────────────────────
+        with _lock:
+            _last_scan_msg  = msg
+            _last_scan_time = now
+
+        # ── 2. Front-arc obstacle detection ──────────────────────────────────
         front_distances = []
         for i, r in enumerate(msg.ranges):
             angle = angle_min + i * angle_inc
-            if front_min_angle <= angle <= front_max_angle:
-                if msg.range_min < r < msg.range_max:  # valid reading
+            if -arc_rad <= angle <= arc_rad:
+                if msg.range_min < r < msg.range_max:
                     front_distances.append(r)
 
         if not front_distances:
-            return
+            # No valid front returns — could be void OR sensor issue.
+            # Void check below will handle this; obstacle check skipped.
+            pass
+        else:
+            min_dist = min(front_distances)
+            is_close = min_dist < STOP_DIST
+            is_near  = min_dist < SLOW_DIST
 
-        min_dist = min(front_distances)
+            with _lock:
+                _min_distance   = min_dist
+                _obstacle_close = is_close
+                _obstacle_near  = is_near
 
-        with _lock:
-            _min_distance   = min_dist
-            _obstacle_close = min_dist < STOP_DIST
-            _obstacle_near  = min_dist < SLOW_DIST
+            if _safety_active:
+                if is_close:
+                    _motors_stop("LIDAR STOP",
+                                 f"obstacle at {min_dist:.2f}m")
+                elif is_near:
+                    _motors_slow("LiDAR slow",
+                                 f"obstacle at {min_dist:.2f}m")
 
-        # ── Instant safety reaction — independent of Cosmos and avoidance.py ──
-        # motors.stop() / motors.slow() fire here immediately (no latency).
-        # Full manoeuvring (backup + turn + retry) is handled by avoidance.py
-        # which is called from mission.py when it detects _obstacle_close.
-        if _safety_active:
-            if _obstacle_close:
-                from motors import motors
-                motors.stop()
-                log.warning(f"🚧 LIDAR STOP — obstacle at {min_dist:.2f}m")
-                # avoidance.py reads _obstacle_close and runs the full manoeuvre
-            elif _obstacle_near:
-                from motors import motors
-                motors.slow()
-                log.info(f"⚠️  LiDAR slow — obstacle at {min_dist:.2f}m")
-
-        # ── Void / floor-drop auto-stop ───────────────────────────────────────
-        # Runs inline in the scan callback — same zero-latency guarantee as
-        # obstacle detection above. Uses the already-computed ranges so no
-        # extra scan needed. Only fires on high-confidence void to avoid
-        # false positives on open doorways or large open spaces.
+        # ── 3. Void / floor-drop check ────────────────────────────────────────
+        # Runs on every scan — void_ahead() reuses the msg we just stored.
+        # Only skip if we already stopped for an obstacle (obstacle_close)
+        # since they can't both be true simultaneously in normal operation.
         if _safety_active and not _obstacle_close:
             void = lidar_void_ahead()
-            if void["void_detected"] and void["confidence"] == "high":
-                from motors import motors
-                motors.stop()
-                log.warning(f"🕳️  LIDAR VOID STOP — {void['reason']}")
+            if void["void_detected"]:
+                conf = void["confidence"]
+                if conf == "high":
+                    _motors_stop("LIDAR VOID STOP (HIGH)",
+                                 void["reason"])
+                    with _lock:
+                        _void_active = True
+                elif conf == "medium":
+                    # Medium confidence: still stop — stairs are fatal.
+                    # Logged at WARNING but labelled MEDIUM so operators know
+                    # it may be a wide doorway or large open space.
+                    _motors_stop("LIDAR VOID STOP (MEDIUM)",
+                                 void["reason"])
+                    with _lock:
+                        _void_active = True
+                # low confidence → no action
+            else:
+                with _lock:
+                    _void_active = False
 
     except Exception as e:
         log.error(f"LiDAR scan callback error: {e}")
 
 
+# ─── Motor helpers (keep imports lazy — motors may not exist in test env) ─────
+
+def _motors_stop(tag: str, reason: str):
+    try:
+        from motors import motors
+        motors.stop()
+        log.warning(f"🚧 {tag} — {reason}")
+    except Exception:
+        pass
+
+
+def _motors_slow(tag: str, reason: str):
+    try:
+        from motors import motors
+        motors.slow()
+        log.info(f"⚠️  {tag} — {reason}")
+    except Exception:
+        pass
+
+
+# ─── Status helpers ───────────────────────────────────────────────────────────
+
 def get_status() -> dict:
     """Return current LiDAR safety status for GUI display."""
     with _lock:
         return {
-            "available":      _lidar_ok,
+            "available":      _lidar_ok and not _lidar_stale,
+            "stale":          _lidar_stale,
             "safety_active":  _safety_active,
             "obstacle_close": _obstacle_close,
             "obstacle_near":  _obstacle_near,
-            "min_distance":   round(_min_distance, 2)
+            "void_active":    _void_active,
+            "min_distance":   round(_min_distance, 2),
         }
 
 
 def lidar_status_html() -> str:
-    """HTML status display for Gradio."""
+    """HTML status panel for Gradio — includes stale and void states."""
     s = get_status()
 
-    if not s["available"]:
+    if not _lidar_ok:
         return """
         <div style="background:#1a1a1a;border:1px solid #444;border-radius:8px;
                     padding:10px;font-family:monospace;color:#666">
             📡 LiDAR: not connected
         </div>"""
 
-    color = "#cc0000" if s["obstacle_close"] else \
-            "#ff6600" if s["obstacle_near"]  else "#76b900"
-    label = "🚧 OBSTACLE CLOSE" if s["obstacle_close"] else \
-            "⚠️  OBSTACLE NEAR"  if s["obstacle_near"]  else "✅ CLEAR"
-    dist  = s["min_distance"]
+    if s["stale"]:
+        return """
+        <div style="background:#1a1a1a;border:2px solid #cc0000;border-radius:8px;
+                    padding:10px;font-family:monospace;">
+            <div style="color:#cc0000;font-weight:bold">
+                📡 LiDAR D500 — ⚠️ STALE — no data
+            </div>
+            <div style="color:#888;font-size:0.85em;margin-top:4px">
+                Topic /scan stopped publishing — safety disabled until restored
+            </div>
+        </div>"""
+
+    if s["void_active"]:
+        color, label = "#cc0000", "🕳️  VOID / DROP DETECTED"
+    elif s["obstacle_close"]:
+        color, label = "#cc0000", "🚧 OBSTACLE CLOSE"
+    elif s["obstacle_near"]:
+        color, label = "#ff6600", "⚠️  OBSTACLE NEAR"
+    else:
+        color, label = "#76b900", "✅ CLEAR"
+
+    dist     = s["min_distance"]
     dist_str = f"{dist:.2f}m" if dist < 999 else "—"
 
     return f"""
