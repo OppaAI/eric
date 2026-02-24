@@ -283,6 +283,18 @@ def _scan_callback(msg):
                 motors.slow()
                 log.info(f"⚠️  LiDAR slow — obstacle at {min_dist:.2f}m")
 
+        # ── Void / floor-drop auto-stop ───────────────────────────────────────
+        # Runs inline in the scan callback — same zero-latency guarantee as
+        # obstacle detection above. Uses the already-computed ranges so no
+        # extra scan needed. Only fires on high-confidence void to avoid
+        # false positives on open doorways or large open spaces.
+        if _safety_active and not _obstacle_close:
+            void = lidar_void_ahead()
+            if void["void_detected"] and void["confidence"] == "high":
+                from motors import motors
+                motors.stop()
+                log.warning(f"🕳️  LIDAR VOID STOP — {void['reason']}")
+
     except Exception as e:
         log.error(f"LiDAR scan callback error: {e}")
 
