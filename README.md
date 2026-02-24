@@ -1,5 +1,5 @@
 # ERIC — Edge Robotics Innovation by Cosmos
-**By OppaAO**
+**By OppaAO**\n
 **License: Apache 2.0**
 
 [![Repo](https://img.shields.io/badge/repo-OppaAI%2FAGi-darkcyan)](https://github.com/OppaAI/eric)
