@@ -285,11 +285,20 @@ def init_lidar() -> bool:
         except Exception:
             _node = rclpy.create_node("eric_lidar")
 
+        # D500 driver publishes /scan with BEST_EFFORT reliability.
+        # Using the default RELIABLE QoS causes zero messages to be received.
+        # QoSProfile with BEST_EFFORT matches the publisher and gets every scan.
+        from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+        scan_qos = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=10,
+        )
         _sub = _node.create_subscription(
             LaserScan,
             "/scan",
             _scan_callback,
-            10  # QoS depth
+            scan_qos
         )
 
         # Only spin if not already spinning (nav2 may be spinning already)
