@@ -4,9 +4,9 @@
 **Built from Feb 20, 2026 on Jetson Orin Nano Super 8GB**
 **Author:** [OppaAI](https://github.com/OppaAI) · **License:** [Apache 2.0](LICENSE)
 
-[![Repo](https://img.shields.io/badge/repo-OppaAI%2FERIC-darkcyan)](https://github.com/OppaAI/eric)
-![Build](https://img.shields.io/badge/build-prototype-lightgrey)
-![Status](https://img.shields.io/badge/status-experimental-orange.svg)
+[![Repo](https://img.shields.io/badge/Repo-OppaAI%2Feric-76B900)](https://github.com/OppaAI/eric)
+![Build](https://img.shields.io/badge/Build-prototype-lightgrey)
+![Status](https://img.shields.io/badge/Status-experimental-orange.svg)
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/apache-2-0)
 
 ![ARM](https://img.shields.io/badge/ARM64-aarch64-0091BD?logo=arm)
@@ -14,24 +14,23 @@
 ![JetPack](https://img.shields.io/badge/JetPack-6.2.2-76B900?logo=nvidia)
 ![CUDA](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia)
 
-![Linux](https://img.shields.io/badge/platform-Linux-lightgrey.svg?logo=linux)
-![Ubuntu](https://img.shields.io/badge/ubuntu-22.04-E95420.svg?logo=ubuntu)
-![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python)
-![ROS2](https://img.shields.io/badge/ROS-2%20Humble-blue.svg?logo=ros)
-
-![Started](https://img.shields.io/badge/Started-2026--02--20-darkcyan?&logo=github)
-![Released](https://img.shields.io/badge/Released-2026--03--05-darkcyan?&logo=github)
-![Version](https://img.shields.io/badge/Version-0.2.0-darkcyan?&logo=github)
-![Last Commit](https://img.shields.io/github/last-commit/OppaAI/eric?color=darkcyan&logo=github)
-
-![Owner](https://img.shields.io/badge/owner-OppaAI-salmon)
-![CS Credentials](https://img.shields.io/badge/Credentials-None-lightgrey)
-
 ---
 
-**NVIDIA Cosmos Cookoff 2026 Entry**
+**AI Robotics Project, powered by NVIDIA Cosmos Reason 2**
 
-ERIC is an autonomous multi-mission ground robot powered by **NVIDIA Cosmos Reason 2**, running fully at the edge on a sub-$1000 CAD Jetson Orin Nano Super 8GB. No cloud. No server. No pre-programmed routes. Just a tracked robot reasoning about the physical world in real time — navigating, talking to people, detecting hazards, sounding alarms, and documenting what it finds.
+ERIC is an autonomous multi-mission ground robot powered by **NVIDIA Cosmos Reason 2**, running fully in the edge device (Jetson Orin Nano Super 8GB).
+No cloud. No server. Not even Internet. Only need a local network to communicate to ERIC with your portal device or PC.
+ERIC utilizes NVIDIA Cosmos Reason 2Just a tracked robot reasoning about the physical world in real time — navigating, talking to people, detecting hazards, sounding alarms, and documenting what it finds.
+- Parses the mission briefing into an ordered list of steps at startup
+- Navigates while moving — receives a pan-tilt camera frame every 4 seconds alongside LiDAR distances, OAK-D depth grid, current terrain, and void warnings; outputs a JSON decision (forward, stop, direction, terrain, reasoning)
+- Analyses the full 360° panoramic scan — up to 42 frames (7 pan positions × 3 tilt angles × 2 phases) sent as a multi-image batch; outputs best direction, what it sees, void flags per direction
+- Directs obstacle escape (Layer 3 of 3) — after instant backup and LiDAR arc scan, receives camera frame + all sensor data and outputs exact escape direction and turn duration in seconds; 20s timeout falls back to sensor-only direction
+Mission scan overlay — different alarm types (siren, suspicious, nature) inject mission-specific visual instructions into every scan prompt; changes what Cosmos pays attention to with zero code changes
+Character conversation — receives full conversation history + briefing after every character reply; decides whether to extract info, ask a follow-up, or exit politely
+Target confirmation — a final check before any alarm fires; filters false positives from shadows and partial views before triggering TTS + LED + tone
+Void detection (visual layer) — instructed to examine the lower third of every frame for stair edges, floor texture endings, and open air; third layer on top of OAK-D hardware and LiDAR return sparsity
+Mission completion announcement — generates the final in-character summary in the voice and context of the specific mission that just ran
+Terrain-speed reasoning — reports terrain type in every scan result; Eric maps it to motor speed automatically (57 terrain keywords, 4 tiers from fast to impassable)
 
 ---
 
@@ -53,10 +52,6 @@ ERIC is an autonomous multi-mission ground robot powered by **NVIDIA Cosmos Reas
 - [Sequence Diagrams](#sequence-diagrams)
 
 ---
-
-## How ERIC Uses NVIDIA Cosmos Reason 2
-
-Cosmos Reason 2 is not a plugin or a feature — it is the entire brain. Every intelligent decision ERIC makes goes through it. Here is exactly how.
 
 ### The Model
 
