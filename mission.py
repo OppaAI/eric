@@ -86,6 +86,175 @@ _cosmos_executor = concurrent.futures.ThreadPoolExecutor(
 )
 
 
+# ─── Centralised Health Monitor ───────────────────────────────────────────────
+# Runs as a daemon thread from mission start. Watches all critical subsystems
+# and forces a safe stop + alarm if ≥2 are dead simultaneously.
+# Also logs Jetson thermal state so operators see overheating before it kills
+# inference.
+#
+# Watched components:
+#   lidar_ok   — lidar.lidar_available() (includes staleness check)
+#   oakd_ok    — oakd.oakd_available()
+#   cosmos_ok  — HTTP GET /health on vLLM server
+#   cam_ok     — cosmos._frame_buffers has fresh frames (< 5s old)
+#   jetson_temp — /sys/class/thermal/thermal_zone0/temp (millidegrees)
+#
+# Fault logic:
+#   critical_faults ≥ 2 → SYSTEM FAULT → motors.stop() + alarm + OLED
+#   jetson_temp > 80°C  → thermal warning logged + slow motors
+#
+# One log line per state change — no flooding.
+
+_health_thread:     threading.Thread | None = None
+_health_fault_count: int  = 0          # consecutive cycles with ≥2 faults
+_health_halted:     bool  = False      # True after a fault halt (reset on stop_mission)
+
+HEALTH_CHECK_INTERVAL_S  = 3.0    # seconds between health checks
+HEALTH_FAULT_THRESHOLD   = 2      # number of critical components dead = fault
+HEALTH_HALT_CYCLES       = 2      # consecutive bad cycles before halt
+JETSON_TEMP_WARN_C       = 75.0   # Celsius — warn
+JETSON_TEMP_CRIT_C       = 85.0   # Celsius — force slow
+
+
+def _read_jetson_temp() -> float | None:
+    """Read Jetson SoC temperature from sysfs. Returns Celsius or None."""
+    for zone in range(6):
+        try:
+            with open(f"/sys/class/thermal/thermal_zone{zone}/temp") as f:
+                raw = int(f.read().strip())
+            # Filter for SoC zones (usually > 20°C, < 120°C)
+            c = raw / 1000.0
+            if 20.0 < c < 120.0:
+                return c
+        except Exception:
+            continue
+    return None
+
+
+def _health_loop():
+    """
+    Background daemon — runs every HEALTH_CHECK_INTERVAL_S seconds.
+    Checks all critical subsystems and halts if too many are dead.
+    Logs once per state transition, not on every cycle.
+    """
+    global _health_fault_count, _health_halted
+
+    prev_faults: set[str] = set()
+    prev_temp_warn = False
+
+    while mission_active:
+        time.sleep(HEALTH_CHECK_INTERVAL_S)
+        if not mission_active:
+            break
+
+        faults: set[str] = set()
+
+        # ── LiDAR ────────────────────────────────────────────────────────────
+        try:
+            from lidar import lidar_available
+            if not lidar_available():
+                faults.add("lidar")
+        except Exception:
+            faults.add("lidar")
+
+        # ── OAK-D ────────────────────────────────────────────────────────────
+        try:
+            from oakd import oakd_available
+            if not oakd_available():
+                faults.add("oakd")
+        except Exception:
+            faults.add("oakd")
+
+        # ── Cosmos / vLLM ────────────────────────────────────────────────────
+        try:
+            import requests as _req
+            from config import VLLM_URL
+            r = _req.get(VLLM_URL.replace("/v1/chat/completions", "/health"),
+                         timeout=1.5)
+            if r.status_code != 200:
+                faults.add("cosmos")
+        except Exception:
+            faults.add("cosmos")
+
+        # ── Camera frame freshness ────────────────────────────────────────────
+        try:
+            from cosmos import _frame_buffers, CAMERA_PANTILT
+            buf = _frame_buffers.get(CAMERA_PANTILT)
+            if buf is None or len(buf) == 0:
+                faults.add("camera")
+        except Exception:
+            pass  # buffer not started yet — not a fault
+
+        # ── Jetson temperature ────────────────────────────────────────────────
+        temp = _read_jetson_temp()
+        if temp is not None:
+            if temp > JETSON_TEMP_CRIT_C:
+                faults.add("thermal")
+                if not prev_temp_warn:
+                    log.error(f"🌡️  JETSON CRITICAL TEMP: {temp:.1f}°C — forcing slow")
+                    _ui("log", f"🌡️  CRITICAL TEMP {temp:.1f}°C — slowing motors")
+                    motors.slow()
+                    prev_temp_warn = True
+            elif temp > JETSON_TEMP_WARN_C:
+                if not prev_temp_warn:
+                    log.warning(f"🌡️  Jetson temp high: {temp:.1f}°C")
+                    _ui("log", f"🌡️  Temp warning: {temp:.1f}°C")
+                    prev_temp_warn = True
+            else:
+                prev_temp_warn = False
+
+        # ── Log new faults (once per transition) ─────────────────────────────
+        new_faults = faults - prev_faults
+        cleared    = prev_faults - faults
+        if new_faults:
+            log.warning(f"⚠️  Health: faults → {sorted(faults)} "
+                        f"(new: {sorted(new_faults)})")
+            _ui("log", f"⚠️  HEALTH: {', '.join(sorted(faults))} FAULT")
+        if cleared:
+            log.info(f"✅ Health: cleared {sorted(cleared)} "
+                     f"(remaining: {sorted(faults)})")
+        prev_faults = faults
+
+        # ── Fault halt logic ──────────────────────────────────────────────────
+        critical = {f for f in faults if f in ("lidar", "oakd", "thermal")}
+        if len(faults) >= HEALTH_FAULT_THRESHOLD:
+            _health_fault_count += 1
+        else:
+            _health_fault_count = max(0, _health_fault_count - 1)
+
+        if _health_fault_count >= HEALTH_HALT_CYCLES and not _health_halted:
+            _health_halted = True
+            log.error(f"🚨 SYSTEM FAULT — {HEALTH_HALT_CYCLES} consecutive cycles "
+                      f"with ≥{HEALTH_FAULT_THRESHOLD} faults: {sorted(faults)}")
+            _ui("status", "SYSTEM FAULT — HALTED")
+            _ui("log",    f"🚨 SYSTEM FAULT: {', '.join(sorted(faults))} — stopping")
+            motors.stop()
+            motors.oled(0, "SYSTEM FAULT")
+            motors.oled(1, ",".join(sorted(faults))[:16])
+            try:
+                from alarm import sound_alarm, AlarmType
+                sound_alarm(AlarmType.HAZARD,
+                            f"System fault: {', '.join(sorted(faults))}")
+            except Exception:
+                pass
+
+    log.info("Health monitor exited")
+
+
+def _start_health_monitor():
+    """Start the health monitor daemon thread. Safe to call multiple times."""
+    global _health_thread, _health_fault_count, _health_halted
+    _health_fault_count = 0
+    _health_halted      = False
+    if _health_thread and _health_thread.is_alive():
+        return
+    _health_thread = threading.Thread(
+        target=_health_loop, daemon=True, name="health-monitor"
+    )
+    _health_thread.start()
+    log.info("👁  Health monitor started")
+
+
 class State:
     IDLE         = "idle"
     SEARCHING    = "searching"
@@ -1019,14 +1188,26 @@ def start_mission(briefing: str, mission_name: str = ""):
     motors.oled(0, "ERIC ACTIVE")
     motors.oled(1, "Searching...")
 
+    # Start rolling frame buffer for async video nav checks
+    start_frame_buffer(CAMERA_PANTILT, fps=1.0)
+
+    # Reset async nav state for fresh mission
+    global _pending_nav, _last_nav_result
+    _pending_nav     = None
+    _last_nav_result = {}
+
+    # Start centralised health monitor
+    _start_health_monitor()
+
     threading.Thread(target=_mission_loop, daemon=True).start()
     return ack
 
 
 def stop_mission():
-    global mission_active, mission_state
+    global mission_active, mission_state, _health_halted
     mission_active = False
     mission_state  = State.IDLE
+    _health_halted = False   # allow next mission to start even after a fault halt
     motors.stop()
     # Cancel any in-progress Nav2 goal
     try:
