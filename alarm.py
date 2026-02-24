@@ -46,6 +46,7 @@ class AlarmType:
     SUSPICIOUS = "suspicious"  # suspicious / terror object found
     NATURE     = "nature"      # wildlife / scenic discovery
     CLEAR      = "clear"       # all-clear / situation resolved
+    NONE       = "none"        # no alarm — silent find (e.g. narrative missions)
 
 
 # ── Alarm config ──────────────────────────────────────────────────────────────
@@ -85,6 +86,13 @@ _ALARM_CONFIG = {
         "led_r": 0, "led_g": 255,
         "repeat": 1,
     },
+    AlarmType.NONE: {
+        "voice_prefix": "",              # silent — no alarm for narrative missions
+        "led_pattern":  None,
+        "tone":         None,
+        "led_r": 0, "led_g": 0,
+        "repeat": 0,
+    },
 }
 
 _alarm_thread: threading.Thread | None = None
@@ -104,6 +112,11 @@ def sound_alarm(alarm_type: str, detail: str = "", blocking: bool = False):
     Always non-blocking by default — mission loop keeps running.
     """
     cfg = _ALARM_CONFIG.get(alarm_type, _ALARM_CONFIG[AlarmType.HAZARD])
+
+    # Silent mode — NONE alarm type means no audio/LED, just log
+    if alarm_type == AlarmType.NONE:
+        log.info(f"ALARM [NONE — silent]: {detail}")
+        return
 
     def _run():
         try:
@@ -155,6 +168,8 @@ def stop_alarm():
 # ── LED patterns ──────────────────────────────────────────────────────────────
 
 def _led_pattern(pattern: str, repeat: int = 2):
+    if pattern is None or repeat == 0:
+        return
     try:
         from motors import motors
     except Exception:
