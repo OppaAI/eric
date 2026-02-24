@@ -129,6 +129,13 @@ _last_yolo_bbox_w:    dict  = {}    # label → last bbox width (approach trend)
 _last_yolo_positions: dict  = {}    # label → (dist_m, bearing, bearing_deg) — latest
 _yolo_motor_stop:     bool  = False  # True when Layer 2 issued a motors.stop()
 
+# ── Bearing EMA smoothing ─────────────────────────────────────────────────────
+# Single-frame bearing readings are noisy. A 3-frame exponential moving average
+# (α=0.4) reduces jitter without adding significant lag.
+# Formula: ema = α * new + (1 - α) * prev
+_BEARING_EMA_ALPHA   = 0.4
+_bearing_ema:        dict  = {}     # label → smoothed bearing_deg float
+
 # ── Fatal error strings ───────────────────────────────────────────────────────
 _FATAL_ERRORS = (
     "MessageQueue was closed",
@@ -555,7 +562,23 @@ def _yolo_check():
                 _last_yolo_bbox_w[label] = bbox_w
                 shrinking = bbox_w < prev_w * 0.85   # >15% smaller → leaving
 
-            # ── Always update position memory ────────────────────────────────
+                # ── EMA bearing smoothing ─────────────────────────────────────
+                # Reduces single-frame jitter without significant lag.
+                prev_ema = _bearing_ema.get(label, bearing_deg)
+                smoothed_bearing_deg = (_BEARING_EMA_ALPHA * bearing_deg
+                                        + (1.0 - _BEARING_EMA_ALPHA) * prev_ema)
+                _bearing_ema[label]  = smoothed_bearing_deg
+                bearing_deg          = round(smoothed_bearing_deg, 1)
+
+                # Recompute coarse bearing from smoothed value
+                if bearing_deg < -12.0:
+                    bearing = "left"
+                elif bearing_deg > 12.0:
+                    bearing = "right"
+                else:
+                    bearing = "center"
+
+            # ── Always update position memory ─────────────────────────────────
             with _yolo_lock:
                 _last_yolo_positions[label] = {
                     "dist_m":     dist_m,
