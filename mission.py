@@ -2,7 +2,9 @@
 ERIC — Mission Logic
 
 Camera strategy:
-  Navigation (moving):  pan-tilt only, single frame, fast NAV_PROMPT
+  Navigation (moving):  Layer 1 (LiDAR/OAK-D) handles safety automatically.
+                        Layer 2 (YOLO on OAK-D Myriad X) detects people/animals.
+                        No Cosmos called while moving — Eric moves continuously.
   Scanning  (stopped):  dual camera (pan-tilt + webcam), single stable frame each
   360° scan (stopped):  pan-tilt sweeps ±90° in 30° steps + ONE 180° chassis turn
                         (finer coverage, far less chassis movement than old 8×45° rotation)
@@ -1016,15 +1018,6 @@ def start_mission(briefing: str, mission_name: str = ""):
     _ui("status", "SEARCHING")
     motors.oled(0, "ERIC ACTIVE")
     motors.oled(1, "Searching...")
-
-    # Start rolling frame buffer — collects 160x120 frames at 1fps in background.
-    # get_buffered_frames() in _nav_check_async() will return these instantly.
-    start_frame_buffer(CAMERA_PANTILT, fps=1.0)
-
-    # Reset async nav state for fresh mission
-    global _pending_nav, _last_nav_result
-    _pending_nav     = None
-    _last_nav_result = {}
 
     threading.Thread(target=_mission_loop, daemon=True).start()
     return ack
@@ -2896,25 +2889,138 @@ def _process_scan(scan, from_360=False):
 
 
 # ─── Mission Loop ─────────────────────────────────────────────────────────────
-# Nav clip is 10s — after each clip, do a quick stopped scan.
-# After SCANS_BEFORE_360 quick scans with nothing found, do a full 360.
-# The 10s clip itself IS the nav check — no separate interval needed.
+# Layer 1 (LiDAR + OAK-D) handles obstacle/void safety automatically.
+# Layer 2 (YOLO on OAK-D Myriad X) handles person/animal detection via callback.
+# Eric moves continuously — no Cosmos called while moving.
+# Stopped scans (_quick_scan, _best_360_scan) happen on a timer.
 
 _nav_clips_since_scan = 0
-NAV_CLIPS_BETWEEN_SCANS = 2  # do a quick stopped scan every 2 nav clips (~20s of movement)
+NAV_CLIPS_BETWEEN_SCANS = 2   # stopped scan every 2 movement intervals
+NAV_MOVE_INTERVAL       = 5.0  # seconds of movement between scan checks
 
-# ─── Async nav check state ────────────────────────────────────────────────────
-# _pending_nav holds the Future from the last async Cosmos call.
-# _last_nav_result holds the most recent completed result.
-# The mission loop fires a new call each cycle and acts on the PREVIOUS result —
-# Eric never waits for Cosmos, it always has a result ready to use.
-_pending_nav: concurrent.futures.Future | None = None
-_last_nav_result: dict = {}
+# ── YOLO Layer 2 detection state ──────────────────────────────────────────────
+_yolo_person_detected  = False   # set by YOLO callback, cleared after handling
+_yolo_detect_label     = None    # "person" | "dog" | "cat" etc
+_yolo_detect_distance  = None    # meters
+_yolo_detect_bearing   = None    # "left" | "center" | "right"
+_yolo_lock             = threading.Lock()
+
+
+def _on_yolo_detection(label: str, distance_m: float, bearing: str):
+    """
+    Layer 2 YOLO callback — fired from oakd.py reader thread.
+    Runs in background thread — only sets flags, never blocks.
+    Mission loop picks these up on next iteration.
+    """
+    global _yolo_person_detected, _yolo_detect_label
+    global _yolo_detect_distance, _yolo_detect_bearing
+
+    if not mission_active or mission_state in (State.INTERACTING, State.COMPLETE):
+        return
+
+    with _yolo_lock:
+        _yolo_person_detected = True
+        _yolo_detect_label    = label
+        _yolo_detect_distance = distance_m
+        _yolo_detect_bearing  = bearing
+
+    _ui("log", f"👁️  YOLO: {label} detected at {distance_m:.1f}m ({bearing})")
+    log_action("YOLO_DETECT", f"{label} {distance_m:.1f}m {bearing}")
+
+
+def _register_yolo_callback():
+    """Register YOLO Layer 2 callback with oakd.py."""
+    try:
+        from oakd import set_yolo_callback, set_yolo_active
+        set_yolo_callback(_on_yolo_detection)
+        set_yolo_active(True)
+        log.info("✅ Layer 2 YOLO callback registered")
+    except Exception as e:
+        log.warning(f"YOLO callback registration failed ({e}) — Layer 2 disabled")
+
+
+def _unregister_yolo_callback():
+    """Pause YOLO detections when mission stops."""
+    try:
+        from oakd import set_yolo_callback, set_yolo_active
+        set_yolo_active(False)
+        set_yolo_callback(None)
+    except Exception:
+        pass
+
+
+def _handle_yolo_detection() -> bool:
+    """
+    Handle a pending YOLO detection from the mission loop.
+    Returns True if a detection was handled (loop should continue).
+
+    Mission-aware response:
+      approach_on_detect=true  → slow down, approach, hand to Cosmos
+      approach_on_detect=false → stop, observe, log, hand to Cosmos
+    Default: approach (search and rescue default).
+    """
+    global _yolo_person_detected, mission_state
+
+    with _yolo_lock:
+        if not _yolo_person_detected:
+            return False
+        label    = _yolo_detect_label
+        dist_m   = _yolo_detect_distance
+        bearing  = _yolo_detect_bearing
+        _yolo_person_detected = False  # clear flag
+
+    # Read mission flag — default True (approach) for search and rescue
+    approach = _mission_flags.get("approach_on_detect", True)
+    detect_dist = float(_mission_flags.get("detect_distance", 2.0))
+
+    if dist_m > detect_dist:
+        # Too far — slow down and keep moving toward detection
+        motors.slow()
+        _ui("log", f"YOLO: {label} at {dist_m:.1f}m — approaching ({bearing})")
+        if bearing == "left":
+            _turn_nav2_or_direct("left", 0.3)
+        elif bearing == "right":
+            _turn_nav2_or_direct("right", 0.3)
+        motors.forward(MOTOR_SPEED_SLOW)
+        return True
+
+    # Close enough — stop and hand to Cosmos
+    motors.stop()
+    mission_state = State.INTERACTING
+    motors.oled(0, label[:16])
+    motors.oled(1, f"{dist_m:.1f}m {bearing}")
+    _ui("status", f"YOLO FOUND — {label.upper()}")
+    log_mission_event("yolo_found", f"{label} {dist_m:.1f}m {bearing}")
+
+    if approach:
+        # Search and rescue / find_and_approach — greet and interact
+        _ui("log", f"YOLO: {label} confirmed at {dist_m:.1f}m — handing to Cosmos")
+        greeting = ask_cosmos(
+            f"YOLO detection: {label} spotted {dist_m:.1f}m to your {bearing}. "
+            f"You have stopped and are facing them. "
+            f"Greet them naturally and ask about your mission. 1-2 sentences.",
+            max_tokens=80
+        )
+        eric_say(greeting)
+    else:
+        # Security / observe mode — log and report, don't approach
+        _ui("log", f"YOLO: {label} at {dist_m:.1f}m — observing (approach_on_detect=false)")
+        report = ask_cosmos(
+            f"YOLO detection: {label} spotted {dist_m:.1f}m to your {bearing}. "
+            f"Report what you observe. Stay in position. 1-2 sentences.",
+            max_tokens=80
+        )
+        eric_say(report)
+
+    return True
 
 
 def _mission_loop():
     global mission_active, mission_state, _empty_scans, _scans_since_360
     global _avoid_attempts, _nav_clips_since_scan
+
+    # ── Register YOLO Layer 2 callback ────────────────────────────────────────
+    _register_yolo_callback()
 
     eric_say("Starting initial 360 degree scan of the area.")
     log_mission_event("initial_360_scan", "beginning")
@@ -2932,35 +3038,36 @@ def _mission_loop():
                 time.sleep(0.5)
                 continue
 
-            # ── Nav check while moving ────────────────────────────────────
-            if _nav_clips_since_scan < NAV_CLIPS_BETWEEN_SCANS:
-                _nav_clips_since_scan += 1
-                nav = _nav_check_async()
-
-                if nav.get("wall_ahead") or nav.get("obstacle_close"):
-                    motors.stop()
-                    _ui("log", f"Nav: obstacle — {nav.get('physical_reasoning','')}")
-                    log_action("NAV_OBSTACLE", nav.get("physical_reasoning", ""))
-                    force_360 = _avoid_obstacle(
-                        wall_ahead=nav.get("wall_ahead", False),
-                        small_obstacle=nav.get("small_obstacle", False)
-                    )
-                    if force_360:
-                        _scans_since_360 = SCANS_BEFORE_360
-                        _nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS
-                    else:
-                        motors.forward(MOTOR_SPEED_SLOW)
-                elif nav.get("action") == "slow":
-                    motors.slow()
-                    log_action("NAV_SLOW", "nav check requested slow")
-                elif nav.get("action") == "stop":
-                    motors.stop()
-                    log_action("NAV_STOP", "nav check requested stop")
-                else:
-                    motors.forward(MOTOR_SPEED_SLOW)
+            # ── Layer 2: handle pending YOLO detection ────────────────────────
+            # Check YOLO flag set by _on_yolo_detection() callback.
+            # Layer 1 already stopped/slowed motors — we just handle mission logic.
+            if _handle_yolo_detection():
                 continue
 
-            # ── Stopped scan every NAV_CLIPS_BETWEEN_SCANS checks ─────────
+            # ── Move continuously — Layer 1 handles all safety ────────────────
+            # No Cosmos called while moving. Eric drives for NAV_MOVE_INTERVAL
+            # seconds, then stops for a proper Cosmos scan.
+            if _nav_clips_since_scan < NAV_CLIPS_BETWEEN_SCANS:
+                _nav_clips_since_scan += 1
+                motors.forward(MOTOR_SPEED_SLOW)
+                time.sleep(NAV_MOVE_INTERVAL)
+                # After moving, check if Layer 1 stopped us for an obstacle
+                try:
+                    from lidar import obstacle_close as lidar_close
+                    if lidar_close():
+                        _ui("log", "LiDAR: obstacle — avoiding")
+                        log_action("LAYER1_OBSTACLE", "lidar triggered avoidance")
+                        force_360 = _avoid_obstacle(wall_ahead=True, small_obstacle=False)
+                        if force_360:
+                            _scans_since_360 = SCANS_BEFORE_360
+                            _nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS
+                        else:
+                            motors.forward(MOTOR_SPEED_SLOW)
+                except Exception:
+                    pass
+                continue
+
+            # ── Stopped scan every NAV_CLIPS_BETWEEN_SCANS movement intervals ─
             _nav_clips_since_scan = 0
             _scans_since_360 += 1
             motors.stop()
@@ -2994,6 +3101,7 @@ def _mission_loop():
             time.sleep(1)
 
     motors.stop()
+    _unregister_yolo_callback()
     mission_state = State.IDLE
     _ui("status", "IDLE")
     log.info("Mission loop ended")

@@ -11,6 +11,18 @@ Layer 1 Safety (industrial standard — mirrors LiDAR safety monitor):
   This fires in the reader thread — zero latency, independent of Cosmos.
   Floor drop check runs at FLOOR_CHECK_HZ to limit CPU (numpy is expensive).
 
+Layer 2 Person/Animal Detection (YOLOv8n on OAK-D Myriad X VPU):
+  Runs YOLOv8n entirely on the OAK-D's built-in Myriad X — zero Jetson RAM.
+  Detects: person, dog, cat, horse, sheep, cow, bird (COCO classes).
+  Every detection frame is checked:
+    detection confidence > YOLO_MIN_CONFIDENCE
+    AND OAK-D spatial depth confirms distance
+    AND distance < YOLO_SLOW_DIST  → slow motors
+    AND distance < YOLO_STOP_DIST  → stop motors
+    → fires _yolo_callback(label, distance_m, bearing) for mission.py
+  No Cosmos involved — pure hardware detection on Myriad X VPU.
+  Falls back gracefully if YOLO blob not found — depth pipeline still works.
+
 Disconnect handling:
   - _reader_loop detects "MessageQueue was closed" / XLinkError and exits cleanly
   - _oakd_ok is cleared immediately so all callers see unavailable
@@ -23,6 +35,7 @@ import logging
 import threading
 import time
 import numpy as np
+from pathlib import Path
 
 log = logging.getLogger("eric.oakd")
 
@@ -44,8 +57,44 @@ OAKD_SLOW_DIST   = 0.60   # meters — slow if obstacle closer than this
 FLOOR_CHECK_HZ   = 5.0    # how often to run floor-drop check (per second)
                            # get_floor_drop() is numpy-heavy — don't run every frame
 
-_safety_active   = True   # can be disabled for testing
-_last_floor_check = 0.0   # timestamp of last floor drop check
+_safety_active    = True   # can be disabled for testing
+_last_floor_check = 0.0    # timestamp of last floor drop check
+
+# ── Layer 2 YOLO constants ────────────────────────────────────────────────────
+# YOLOv8n blob runs on OAK-D Myriad X VPU — zero Jetson RAM/GPU usage.
+# Download blob from: https://github.com/luxonis/depthai-model-zoo
+# Place at: models/yolov8n_openvino_2022.1_6shave.blob
+YOLO_BLOB_PATH       = Path("models/yolov8n_openvino_2022.1_6shave.blob")
+YOLO_MIN_CONFIDENCE  = 0.55   # minimum detection confidence
+YOLO_SLOW_DIST       = 3.0    # meters — slow down when target detected within this range
+YOLO_STOP_DIST       = 2.0    # meters — stop when target detected within this range
+YOLO_CHECK_HZ        = 10.0   # detection check rate
+YOLO_COOLDOWN_S      = 2.0    # seconds between repeated callbacks for same detection
+
+# COCO classes ERIC cares about: people + animals
+# Keys = COCO class index, values = category for mission.py
+YOLO_TARGET_CLASSES = {
+    0:  "person",
+    15: "bird",
+    16: "cat",
+    17: "dog",
+    18: "horse",
+    19: "sheep",
+    20: "cow",
+    21: "elephant",
+    22: "bear",
+    23: "zebra",
+    24: "giraffe",
+}
+
+# Layer 2 YOLO state
+_yolo_queue        = None    # DepthAI detection output queue
+_yolo_spatial_queue = None   # spatial detection queue (with depth)
+_yolo_ok           = False   # True if YOLO pipeline running
+_yolo_callback     = None    # callable(label, distance_m, bearing) set by mission.py
+_yolo_active       = False   # True when mission is running and wants detections
+_last_yolo_detect  = {}      # label → last callback timestamp (cooldown tracking)
+_yolo_lock         = threading.Lock()
 
 # Error strings that mean the queue/pipeline is permanently closed
 _FATAL_ERRORS = (
@@ -61,6 +110,11 @@ def oakd_available() -> bool:
     return _oakd_ok
 
 
+def yolo_available() -> bool:
+    """True if YOLO pipeline is running on Myriad X."""
+    return _yolo_ok
+
+
 def set_safety_active(active: bool):
     """Enable/disable Layer 1 auto-stop. Use False only for testing."""
     global _safety_active
@@ -68,17 +122,40 @@ def set_safety_active(active: bool):
     log.info(f"OAK-D safety: {'ENABLED' if active else 'DISABLED'}")
 
 
+def set_yolo_active(active: bool):
+    """Enable/disable Layer 2 YOLO detections. Call from mission.py."""
+    global _yolo_active
+    _yolo_active = active
+    log.info(f"OAK-D YOLO detection: {'ACTIVE' if active else 'PAUSED'}")
+
+
+def set_yolo_callback(fn):
+    """
+    Register mission.py callback for Layer 2 detections.
+    Signature: fn(label: str, distance_m: float, bearing: str)
+    bearing is one of: "left" | "center" | "right"
+    Set to None to disable callbacks.
+    """
+    global _yolo_callback
+    _yolo_callback = fn
+    log.info(f"OAK-D YOLO callback: {'registered' if fn else 'cleared'}")
+
+
 # ─── Initialisation ───────────────────────────────────────────────────────────
 
 def init_oakd() -> bool:
     """
     (Re-)initialise OAK-D pipeline.
+    Builds two pipelines on the Myriad X:
+      1. Stereo depth (Layer 1 safety)
+      2. YOLOv8n spatial detection (Layer 2 person/animal detection)
+    YOLO pipeline is optional — depth works even if blob not found.
     Safe to call multiple times — tears down existing pipeline first.
     Returns True on success.
     """
     global _pipeline, _depth_queue, _oakd_ok, _reader_thread
+    global _yolo_queue, _yolo_spatial_queue, _yolo_ok
 
-    # Tear down any existing pipeline cleanly before re-init
     _teardown()
 
     try:
@@ -86,6 +163,7 @@ def init_oakd() -> bool:
 
         _pipeline  = dai.Pipeline()
 
+        # ── Stereo depth nodes (Layer 1) ──────────────────────────────────────
         mono_left  = _pipeline.create(dai.node.MonoCamera)
         mono_right = _pipeline.create(dai.node.MonoCamera)
         stereo     = _pipeline.create(dai.node.StereoDepth)
@@ -111,10 +189,26 @@ def init_oakd() -> bool:
         mono_left.out.link(stereo.left)
         mono_right.out.link(stereo.right)
 
-        # DepthAI 3.x — createOutputQueue on the node output, then start pipeline
         _depth_queue = stereo.depth.createOutputQueue(maxSize=1, blocking=False)
-        _pipeline.start()
 
+        # ── YOLO spatial detection nodes (Layer 2) ────────────────────────────
+        # Only added if blob file exists — depth pipeline always works regardless.
+        _yolo_ok = False
+        if YOLO_BLOB_PATH.exists():
+            try:
+                _yolo_ok = _add_yolo_pipeline(_pipeline, stereo)
+                if _yolo_ok:
+                    log.info("✅ OAK-D YOLO: YOLOv8n spatial detection active on Myriad X")
+            except Exception as ye:
+                log.warning(f"⚠️  OAK-D YOLO pipeline failed ({ye}) — depth still active")
+                _yolo_ok = False
+        else:
+            log.info(
+                f"ℹ️  OAK-D YOLO: blob not found at {YOLO_BLOB_PATH} — "
+                "person detection disabled. Download from depthai-model-zoo."
+            )
+
+        _pipeline.start()
         _oakd_ok = True
         log.info("✅ OAK-D Lite: stereo depth started (DepthAI 3.x)")
 
@@ -129,15 +223,64 @@ def init_oakd() -> bool:
     except Exception as e:
         log.warning(f"⚠️  OAK-D init failed ({e}) — depth perception disabled")
         _oakd_ok = False
+        _yolo_ok = False
         _ensure_reconnect_watchdog()
         return False
 
 
+def _add_yolo_pipeline(pipeline, stereo) -> bool:
+    """
+    Add YOLOv8n spatial detection to an existing pipeline.
+    Uses the colour camera for detection + stereo depth for distance.
+    Returns True if successfully added.
+    """
+    import depthai as dai
+
+    # Colour camera — feeds YOLO (separate from mono cameras used for depth)
+    cam_rgb = pipeline.create(dai.node.ColorCamera)
+    cam_rgb.setPreviewSize(416, 416)   # YOLOv8n input size
+    cam_rgb.setInterleaved(False)
+    cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
+    cam_rgb.setFps(10)                 # 10fps — enough for person detection
+
+    # YOLOv8n neural network on Myriad X
+    nn = pipeline.create(dai.node.YoloSpatialDetectionNetwork)
+    nn.setBlobPath(str(YOLO_BLOB_PATH))
+    nn.setConfidenceThreshold(YOLO_MIN_CONFIDENCE)
+    nn.setNumClasses(80)               # COCO 80 classes
+    nn.setCoordinateSize(4)
+    nn.setAnchors([
+        10, 13, 16, 30, 33, 23,        # YOLOv8n anchors
+        30, 61, 62, 45, 59, 119,
+        116, 90, 156, 198, 373, 326
+    ])
+    nn.setAnchorMasks({
+        "side52": [0, 1, 2],
+        "side26": [3, 4, 5],
+        "side13": [6, 7, 8]
+    })
+    nn.setIouThreshold(0.5)
+    nn.setBoundingBoxScaleFactor(0.5)
+    nn.setDepthLowerThreshold(100)     # mm — ignore depth < 10cm
+    nn.setDepthUpperThreshold(8000)    # mm — ignore depth > 8m
+
+    # Spatial calculator needs depth from stereo
+    stereo.depth.link(nn.inputDepth)
+    cam_rgb.preview.link(nn.input)
+
+    global _yolo_spatial_queue
+    _yolo_spatial_queue = nn.out.createOutputQueue(maxSize=4, blocking=False)
+    return True
+
+
 def _teardown():
-    """Stop the existing pipeline and clear state without raising."""
+    """Stop the existing pipeline and clear all state without raising."""
     global _pipeline, _depth_queue, _depth_frame, _oakd_ok
-    _oakd_ok     = False
-    _depth_queue = None
+    global _yolo_queue, _yolo_spatial_queue, _yolo_ok
+    _oakd_ok          = False
+    _yolo_ok          = False
+    _depth_queue      = None
+    _yolo_spatial_queue = None
     with _lock:
         _depth_frame = None
     try:
@@ -152,25 +295,23 @@ def _teardown():
 
 def _reader_loop():
     """
-    Background thread — reads depth frames from the DepthAI output queue.
+    Background thread — reads depth frames and YOLO detections.
 
-    Layer 1 Safety (industrial standard):
-      After storing each frame, immediately checks:
-        1. Front obstacle distance → stop/slow motors instantly (no Cosmos, no latency)
-        2. Floor drop / void       → stop motors instantly (staircase protection)
-      Floor drop check is rate-limited to FLOOR_CHECK_HZ to avoid hammering numpy.
+    Layer 1: reads depth every frame → _safety_check() → instant stop/slow
+    Layer 2: reads YOLO detections at YOLO_CHECK_HZ → _yolo_check() → callback
 
-    On a clean disconnect (MessageQueue closed / XLinkError) we:
-      1. Log ONE warning.
-      2. Set _oakd_ok = False so all callers immediately see unavailable.
-      3. Exit the loop — the reconnect watchdog will call init_oakd() again.
+    On fatal disconnect: logs once, sets _oakd_ok=False, exits cleanly.
+    Reconnect watchdog handles restart.
     """
     global _depth_frame, _oakd_ok, _last_floor_check
 
     floor_check_interval = 1.0 / FLOOR_CHECK_HZ
+    yolo_check_interval  = 1.0 / YOLO_CHECK_HZ
+    last_yolo_check      = 0.0
 
     while _oakd_ok:
         try:
+            # ── Layer 1: depth frame ──────────────────────────────────────────
             if _depth_queue is None:
                 time.sleep(0.1)
                 continue
@@ -183,24 +324,25 @@ def _reader_loop():
             with _lock:
                 _depth_frame = frame
 
-            # ── Layer 1: instant safety reaction ─────────────────────────────
-            # Mirrors LiDAR _scan_callback() — fires every frame, zero latency.
             if _safety_active:
                 _safety_check(floor_check_interval)
 
+            # ── Layer 2: YOLO detections ──────────────────────────────────────
+            now = time.monotonic()
+            if (_yolo_ok and _yolo_active and _yolo_spatial_queue is not None
+                    and now - last_yolo_check >= yolo_check_interval):
+                last_yolo_check = now
+                _yolo_check()
+
         except Exception as e:
             err_str = str(e)
-
-            # Fatal disconnect — log once, mark unavailable, exit thread
             if any(token in err_str for token in _FATAL_ERRORS):
                 log.warning(
                     f"⚠️  OAK-D disconnected ({err_str.splitlines()[0]}) "
                     "— depth disabled, reconnect watchdog will retry"
                 )
                 _oakd_ok = False
-                return   # ← exit loop; no more spam
-
-            # Transient / unexpected error — log and back off briefly
+                return
             log.warning(f"OAK-D reader frame error: {e}")
             time.sleep(0.5)
 
@@ -250,6 +392,85 @@ def _safety_check(floor_check_interval: float):
     except Exception as e:
         # Never let safety check crash the reader loop
         log.debug(f"OAK-D safety check error: {e}")
+
+
+def _yolo_check():
+    """
+    Layer 2: poll YOLO spatial detections from Myriad X.
+    Runs at YOLO_CHECK_HZ — only when _yolo_active is True (mission running).
+
+    For each detection of a target class (person/animal):
+      - Get spatial depth from OAK-D (no separate depth lookup needed)
+      - Determine bearing from bounding box center x position
+      - If within YOLO_SLOW_DIST → slow motors
+      - If within YOLO_STOP_DIST → stop motors
+      - Fire _yolo_callback(label, distance_m, bearing) for mission.py
+      - Cooldown prevents callback spam for same label
+    """
+    global _last_yolo_detect
+
+    try:
+        detections = _yolo_spatial_queue.tryGetAll()
+        if not detections:
+            return
+
+        # Use most recent detection packet
+        packet = detections[-1]
+        now    = time.monotonic()
+
+        for det in packet.detections:
+            label_idx = det.label
+            if label_idx not in YOLO_TARGET_CLASSES:
+                continue
+
+            label      = YOLO_TARGET_CLASSES[label_idx]
+            confidence = det.confidence
+
+            if confidence < YOLO_MIN_CONFIDENCE:
+                continue
+
+            # Spatial depth from OAK-D — in mm, convert to meters
+            dist_mm = det.spatialCoordinates.z
+            if dist_mm <= 0:
+                continue
+            dist_m = dist_mm / 1000.0
+
+            # Bearing from bounding box center x (0.0=left, 1.0=right)
+            cx = (det.xmin + det.xmax) / 2.0
+            if cx < 0.35:
+                bearing = "left"
+            elif cx > 0.65:
+                bearing = "right"
+            else:
+                bearing = "center"
+
+            # Layer 2 motor reaction — slow/stop based on distance
+            try:
+                from motors import motors
+                if dist_m < YOLO_STOP_DIST:
+                    motors.stop()
+                    log.info(f"🛑 YOLO STOP — {label} at {dist_m:.1f}m ({bearing})")
+                elif dist_m < YOLO_SLOW_DIST:
+                    motors.slow()
+                    log.info(f"⚠️  YOLO slow — {label} at {dist_m:.1f}m ({bearing})")
+            except Exception:
+                pass
+
+            # Fire mission.py callback — with cooldown to avoid spam
+            with _yolo_lock:
+                last = _last_yolo_detect.get(label, 0.0)
+                if now - last < YOLO_COOLDOWN_S:
+                    continue
+                _last_yolo_detect[label] = now
+
+            if _yolo_callback:
+                try:
+                    _yolo_callback(label, dist_m, bearing)
+                except Exception as ce:
+                    log.warning(f"YOLO callback error: {ce}")
+
+    except Exception as e:
+        log.debug(f"OAK-D YOLO check error: {e}")
 
 
 # ─── Reconnect watchdog ───────────────────────────────────────────────────────
@@ -441,8 +662,10 @@ def get_status() -> dict:
     """Return current OAK-D status for GUI or debug display."""
     front = get_front_depth()
     return {
-        "available": _oakd_ok,
-        "front_m":   round(front, 2) if front is not None else None,
+        "available":  _oakd_ok,
+        "front_m":    round(front, 2) if front is not None else None,
+        "yolo_ok":    _yolo_ok,
+        "yolo_active": _yolo_active,
     }
 
 
