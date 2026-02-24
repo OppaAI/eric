@@ -758,6 +758,54 @@ def _sensor_context() -> str:
     except Exception:
         pass
 
+    # ── YOLO Layer 2 — live person/animal positions (ground truth) ────────
+    # These are hardware detections from the OAK-D Myriad X VPU — not visual
+    # estimates. Trust these distances and bearings for spatial reasoning.
+    try:
+        from oakd import oakd_available, yolo_available
+        if oakd_available() and yolo_available():
+            import time as _t
+            _now = _t.monotonic()
+            try:
+                from oakd import _last_yolo_positions, _yolo_lock
+                with _yolo_lock:
+                    positions = dict(_last_yolo_positions)
+            except Exception:
+                positions = {}
+            fresh = {
+                label: pos for label, pos in positions.items()
+                if (_now - pos.get("timestamp", 0)) < 4.0   # only last 4 seconds
+            }
+            if fresh:
+                for label, pos in fresh.items():
+                    age = _now - pos.get("timestamp", _now)
+                    lines.append(
+                        f"YOLO L2 detection: {label} at {pos['dist_m']:.1f}m "
+                        f"bearing={pos['bearing']} ({pos['bearing_deg']:+.0f}°) "
+                        f"confidence={pos['confidence']:.0%} [{age:.1f}s ago]"
+                    )
+                lines.append(
+                    "↑ These are hardware depth measurements from the OAK-D VPU — "
+                    "more accurate than visual distance estimates."
+                )
+    except Exception:
+        pass
+
+    # ── Nav2 pose + navigation state ──────────────────────────────────────
+    try:
+        from config import USE_NAV2
+        if USE_NAV2:
+            from nav2 import nav2_available, get_pose, is_navigating, cancel_goal
+            if nav2_available():
+                pose = get_pose()
+                nav_str = "NAVIGATING to goal" if is_navigating() else "stationary"
+                lines.append(
+                    f"Nav2 pose: x={pose['x']:.2f}m y={pose['y']:.2f}m "
+                    f"yaw={math.degrees(pose['yaw']):.0f}° — {nav_str}"
+                )
+    except Exception:
+        pass
+
     if not lines:
         return ""
 
@@ -1144,6 +1192,11 @@ Now analyze the images and output ONLY the JSON object above. No markdown. No ex
 QUICK_SCAN_PROMPT = """
 You are a tracked ground robot. You are completely stopped. These frames are from your pan-tilt and webcam cameras.
 
+IF SENSOR DATA IS PROVIDED ABOVE: read it carefully first.
+- Use YOLO L2 distance/bearing as ground truth for spatial reasoning.
+- Use LiDAR distances to confirm or override your visual estimates.
+- If Nav2 pose is shown, reference your map position in physical_reasoning.
+
 STEP 1 — VOID / DROP CHECK (CRITICAL — check before anything else):
 Look at the LOWER THIRD of every image for signs of floor disappearing:
 - Stair edges, step lips, ledge edges, trap doors, holes, gaps → void_ahead = true
@@ -1155,14 +1208,21 @@ When void_ahead = true: action = "stop", wall_ahead = true. NEVER forward into a
 STEP 2 — OBSTACLE CHECK (lower half of every image):
 - Anything filling/touching the bottom edge → wall_ahead = true
 - Object within ~60cm directly ahead → obstacle_close = true AND in_my_path = true
+- LiDAR or OAK-D shows obstacle closer than 0.60m → obstacle_close = true
 - When in doubt → obstacle_close = true
 
 STEP 3 — MISSION TARGET CHECK:
 - If you set object to "slipper", "shoe", "person", or "robot" → you MUST set target_visible = true
 - Any slipper, shoe, person, or robot visible anywhere in any frame → target_visible = true
-- target_visible = false ONLY if none of those objects appear anywhere
+- If YOLO sensor data above shows a person/animal detection → include that in your reasoning
+- target_visible = false ONLY if none of those objects appear anywhere AND no YOLO detections
 
-STEP 4 — ACTION:
+STEP 4 — PHYSICAL REASONING (important for judges):
+Write 1-2 sentences that COMBINE what you see visually WITH the sensor data above.
+Example: "LiDAR confirms 2.3m to nearest obstacle. YOLO detects a person 1.8m to my left — 
+I can see them in the left frame. Path to the right appears clear."
+
+STEP 5 — ACTION:
 - action = "stop" is ONLY valid when wall_ahead=true OR obstacle_close=true OR void_ahead=true
 - If path is clear and no obstacle or void: action = "forward"
 
@@ -1171,23 +1231,23 @@ OUTPUT: A single JSON object. Every field is REQUIRED.
 "object_name": short string or null
 Boolean fields: true or false only.
 
-Example when void detected:
+Example when target found via YOLO sensor data:
 {
-  "object": "clear",
-  "object_name": null,
+  "object": "person",
+  "object_name": "person 1.8m left",
   "terrain": "tiles",
-  "distance": "far",
+  "distance": "near",
   "in_my_path": false,
-  "wall_ahead": true,
+  "wall_ahead": false,
   "obstacle_close": false,
   "small_obstacle": false,
-  "void_ahead": true,
-  "target_visible": false,
-  "target_direction": "unknown",
-  "clearest_direction": "back",
-  "action": "stop",
-  "speak": "I see a staircase edge ahead — stopping for safety.",
-  "physical_reasoning": "Floor ends at a stair edge in lower frame — void detected.",
+  "void_ahead": false,
+  "target_visible": true,
+  "target_direction": "left",
+  "clearest_direction": "right",
+  "action": "forward",
+  "speak": "I can see someone nearby to my left — YOLO confirms 1.8 meters.",
+  "physical_reasoning": "YOLO L2 detects person at 1.8m bearing left (-22°). Visible in pan-tilt frame. LiDAR clear to 2.1m front. Turning left to approach.",
   "mission_complete": false
 }
 
@@ -1207,7 +1267,7 @@ Example when path is clear:
   "clearest_direction": "front",
   "action": "forward",
   "speak": null,
-  "physical_reasoning": "Path is clear. No target visible.",
+  "physical_reasoning": "Path is clear. LiDAR reads 1.4m to nearest object. No target visible.",
   "mission_complete": false
 }
 
@@ -3176,20 +3236,32 @@ def _handle_yolo_detection() -> bool:
     _ui("status", f"YOLO FOUND — {label.upper()}")
     log_mission_event("yolo_found", f"{label} {dist_m:.1f}m {bearing} {bearing_deg:+.0f}°")
 
+    # Build sensor context snapshot for Cosmos — include YOLO ground truth
+    sensor_ctx = _sensor_context()
+    step = _current_step()
+    step_info = f"Current mission step: find {step.target} and {step.action}." if step else ""
+
     if approach:
         _ui("log", f"YOLO: {label} confirmed at {dist_m:.1f}m — handing to Cosmos")
         greeting = ask_cosmos(
-            f"YOLO detection: {label} spotted {dist_m:.1f}m to your {bearing} "
-            f"({bearing_deg:+.0f}° off-centre). You have stopped and are facing them. "
-            "Greet them naturally and ask about your mission. 1-2 sentences.",
-            max_tokens=80
+            f"{sensor_ctx}"
+            f"HARDWARE DETECTION — Layer 2 YOLO (OAK-D Myriad X VPU) has confirmed:\n"
+            f"  Target: {label}\n"
+            f"  Distance: {dist_m:.2f}m (stereo depth — ground truth)\n"
+            f"  Bearing: {bearing} ({bearing_deg:+.0f}° off-centre)\n"
+            f"  {step_info}\n\n"
+            "You have stopped and turned to face them. "
+            "Greet them naturally, mention that your sensors detected them, "
+            "and ask if they can help with your mission. 1-2 sentences.",
+            max_tokens=100
         )
         eric_say(greeting)
     else:
         _ui("log", f"YOLO: {label} at {dist_m:.1f}m — observing (approach_on_detect=false)")
         report = ask_cosmos(
-            f"YOLO detection: {label} spotted {dist_m:.1f}m to your {bearing} "
-            f"({bearing_deg:+.0f}° off-centre). "
+            f"{sensor_ctx}"
+            f"HARDWARE DETECTION — Layer 2 YOLO confirmed {label} at {dist_m:.2f}m "
+            f"to your {bearing} ({bearing_deg:+.0f}°). {step_info} "
             "Report what you observe. Stay in position. 1-2 sentences.",
             max_tokens=80
         )
@@ -3204,10 +3276,92 @@ def _mission_loop():
     # ── Register YOLO Layer 2 callback ────────────────────────────────────────
     _register_yolo_callback()
 
-    eric_say("Starting initial 360 degree scan of the area.")
-    log_mission_event("initial_360_scan", "beginning")
-    scan = _best_360_scan()
-    _process_scan(scan, from_360=True)
+    # ── Initial situational awareness sweep ──────────────────────────────────
+    # Pan-tilt sweeps ±60° at start while robot is stationary.
+    # Cosmos reasons over 5 positions to build a spatial picture BEFORE moving.
+    # This is what a cautious professional operator would do:
+    #   "Look around first. Know your environment. Then act."
+    # If a target is spotted immediately, Eric approaches without driving blind.
+    _ui("log", "🔍 Initial situational awareness sweep...")
+    _ui("status", "INITIAL SWEEP")
+    motors.oled(0, "ERIC ACTIVE")
+    motors.oled(1, "Initial sweep...")
+    motors.stop()
+
+    sweep_frames: list[str] = []
+    sweep_found = False
+
+    for pan_angle in [-60, -30, 0, 30, 60]:
+        if not mission_active:
+            break
+        motors.pantilt(pan_angle, 5, speed=60)   # 5° down — standard search angle
+        time.sleep(0.35)
+        f = _capture_sharp(CAMERA_PANTILT)
+        if f:
+            sweep_frames.append(f)
+        _ui("log", f"Sweep {pan_angle:+d}°")
+
+    motors.pantilt(0, 5)
+
+    if sweep_frames and mission_active:
+        sensor_ctx  = _sensor_context()
+        mission_ov  = _get_mission_scan_overlay()
+        step        = _current_step()
+        step_target = step.target if step else "target"
+
+        sweep_prompt = (
+            mission_ov + sensor_ctx +
+            f"INITIAL AWARENESS SWEEP — {len(sweep_frames)} frames from a ±60° pan sweep.\n"
+            f"You are completely stationary. You just activated. Your mission target is: {step_target}.\n\n"
+            "Carefully study ALL frames. Report:\n"
+            "1. Is the mission target visible in ANY frame? (target_visible)\n"
+            "2. Which direction has the clearest path for exploration? (clearest_direction)\n"
+            "3. Any immediate hazards — voids, stairs, obstacles? (void_ahead, wall_ahead)\n"
+            "4. What do you observe overall? (physical_reasoning — be descriptive for the judges)\n\n"
+            "This is your first look at the world. Make it count.\n\n"
+            + QUICK_SCAN_PROMPT
+        )
+        try:
+            _ui("log", f"🧠 Cosmos initial sweep analysis ({len(sweep_frames)} frames)...")
+            resp  = _cosmos_frames(sweep_frames, sweep_prompt, max_tokens=300, temp=0.2)
+            sweep_result = _parse_json(resp, dict(_SCAN_FALLBACK), label="INITIAL SWEEP")
+
+            # Narrate what Eric sees to the judges — this is a showcase moment
+            reasoning = sweep_result.get("physical_reasoning", "")
+            if reasoning:
+                _ui("log", f"👁️  Eric observes: {reasoning}")
+
+            if sweep_result.get("target_visible"):
+                sweep_found = True
+                _ui("log", "🎯 TARGET SPOTTED in initial sweep — approaching immediately!")
+                motors.oled(1, "TARGET IN SIGHT!")
+                _process_scan(sweep_result, from_360=True)
+                if mission_active and mission_state == State.SEARCHING:
+                    motors.forward(MOTOR_SPEED_SLOW)
+                _nav_clips_since_scan = 0
+            elif sweep_result.get("void_ahead") or sweep_result.get("wall_ahead"):
+                _ui("log", "⚠️  Obstacle/void in initial sweep — scanning 360°")
+                # Fall through to full 360 scan below
+            else:
+                # Announce what was seen and which direction looks best
+                clear_dir = sweep_result.get("clearest_direction", "front")
+                ack = ask_cosmos(
+                    f"You just completed your initial awareness sweep of the environment. "
+                    f"You observed: {reasoning or 'the area around you'}. "
+                    f"The clearest path is to your {clear_dir}. "
+                    f"Your target is: {step_target}. "
+                    "In 2 sentences: describe what you see and announce your first move.",
+                    max_tokens=100
+                )
+                eric_say(ack)
+        except Exception as e:
+            log_exception("initial_sweep_cosmos", e)
+
+    # ── Full 360 scan if target not spotted in initial sweep ──────────────────
+    if mission_active and not sweep_found:
+        _ui("log", "🔄 Full 360° scan...")
+        scan = _best_360_scan()
+        _process_scan(scan, from_360=True)
 
     if mission_active and mission_state == State.SEARCHING:
         motors.forward(MOTOR_SPEED_SLOW)
