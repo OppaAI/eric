@@ -603,6 +603,14 @@ label span, .gr-label {
     padding-left: 2px;
 }
 
+/* Webcam is portrait (rotated 90°) — constrain so it doesn't blow up tall */
+#webcam-feed img, #webcam-feed .svelte-1udb6db {
+    object-fit: contain !important;
+    max-width: 100% !important;
+    max-height: 160px !important;
+    width: auto !important;
+}
+
 /* ── Section headers ─────────────────────────────────────────────────── */
 .panel-head {
     color: #88d400;
@@ -657,8 +665,8 @@ def build_ui():
 
                 gr.HTML('<div class="cam-label" style="margin-top:8px">🔬 WEBCAM — CLOSE</div>')
                 webcam_img = gr.Image(
-                    streaming=True, height=200, label="",
-                    show_label=False
+                    streaming=True, height=160, label="",
+                    show_label=False, elem_id="webcam-feed"
                 )
 
                 # Compact LiDAR + OAK-D under cameras

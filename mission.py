@@ -64,6 +64,7 @@ from motors import motors
 from cosmos import (
     ask_cosmos, set_mission_briefing, get_mission_briefing,
     capture_frame, capture_frames_video,
+    start_frame_buffer, get_buffered_frames,
     CAMERA_WEBCAM, CAMERA_PANTILT
 )
 from tts import speak
@@ -1016,6 +1017,15 @@ def start_mission(briefing: str, mission_name: str = ""):
     motors.oled(0, "ERIC ACTIVE")
     motors.oled(1, "Searching...")
 
+    # Start rolling frame buffer — collects 160x120 frames at 1fps in background.
+    # get_buffered_frames() in _nav_check_async() will return these instantly.
+    start_frame_buffer(CAMERA_PANTILT, fps=1.0)
+
+    # Reset async nav state for fresh mission
+    global _pending_nav, _last_nav_result
+    _pending_nav     = None
+    _last_nav_result = {}
+
     threading.Thread(target=_mission_loop, daemon=True).start()
     return ack
 
@@ -1413,6 +1423,190 @@ Set close_and_facing=false if the person is far away, looking away, or has their
     except Exception as e:
         log_exception("_nav_check", e)
         return dict(_NAV_FALLBACK)
+
+
+def _nav_check_async() -> dict:
+    """
+    Fire-and-forget video nav check — never blocks Eric.
+
+    Strategy (Option 1 + 2 combined):
+      - Snapshot the last 6 frames from the rolling buffer instantly (no wait).
+      - Fire a Cosmos call async using those frames for temporal context.
+      - Return the PREVIOUS completed result immediately so the mission loop
+        can act on it right now.
+      - Next cycle: collect the result that just finished, fire another call.
+
+    Hardware safety gates (LiDAR, OAK-D, void) still run synchronously first —
+    they are fast (no Cosmos) and must never be delayed.
+
+    Falls back to _nav_check() (single frame, synchronous) if buffer is empty.
+    """
+    global _pending_nav, _last_nav_result
+
+    # ── Hardware safety always first — no Cosmos delay ────────────────────
+    try:
+        from lidar import obstacle_close as lidar_close
+        if lidar_close():
+            log_action("LIDAR_STOP", "obstacle within 0.30m")
+            result = {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
+                      "action": "stop",
+                      "physical_reasoning": "LiDAR: obstacle within 0.30m stop zone"}
+            _last_nav_result = result
+            return result
+    except Exception:
+        pass
+
+    try:
+        from oakd import get_front_depth, oakd_available
+        if oakd_available():
+            d = get_front_depth()
+            if d is not None and d < 0.30:
+                log_action("OAKD_STOP", f"obstacle at {d:.2f}m")
+                result = {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
+                          "action": "stop",
+                          "physical_reasoning": f"OAK-D: obstacle at {d:.2f}m"}
+                _last_nav_result = result
+                return result
+    except Exception:
+        pass
+
+    void = _void_check()
+    if void["void"]:
+        motors.stop()
+        log_action("VOID_BLOCK_NAV", f"{void['source']}: {void['reason']}")
+        _ui("log", f"🕳️  VOID detected — stopping! ({void['source']})")
+        result = {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
+                  "action": "stop",
+                  "physical_reasoning": f"Void: {void['reason']}"}
+        _last_nav_result = result
+        return result
+
+    # ── Collect previous Cosmos result if ready ───────────────────────────
+    if _pending_nav is not None and _pending_nav.done():
+        try:
+            raw = _pending_nav.result(timeout=0)
+            parsed = _parse_json(raw, dict(_NAV_FALLBACK), label="NAV_ASYNC")
+            log_ai("nav_check_async", raw, label="NAV_ASYNC")
+
+            # Void gate on Cosmos result
+            if parsed.get("void_ahead"):
+                motors.stop()
+                log_action("VOID_COSMOS_NAV_ASYNC", parsed.get("physical_reasoning", ""))
+                _ui("log", "🕳️  Cosmos (async): void ahead — stopping!")
+                parsed.update({"wall_ahead": True, "obstacle_close": True, "action": "stop"})
+
+            # Eye-contact gate — person visible in buffered frames
+            if parsed.get("person_visible") and mission_active:
+                motors.stop()
+                _ui("log", "👤 Person in video frames — checking proximity...")
+                ec_frame = capture_frame(CAMERA_PANTILT, 320, 240)
+                if ec_frame:
+                    ec_prompt = (
+                        "Is there a person BOTH close (within ~1.5m) AND facing you?\n"
+                        "JSON only: {\"close_and_facing\": true_or_false, \"reasoning\": \"one sentence\"}"
+                    )
+                    try:
+                        ec_payload = {
+                            "model": COSMOS_MODEL,
+                            "messages": [{"role": "user", "content": [
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
+                                {"type": "text", "text": ec_prompt}
+                            ]}],
+                            "max_tokens": 60, "temperature": 0.1,
+                        }
+                        ec_r = requests.post(VLLM_URL, json=ec_payload, timeout=20)
+                        ec_r.raise_for_status()
+                        ec_result = _parse_json(
+                            ec_r.json()["choices"][0]["message"]["content"].strip(),
+                            {"close_and_facing": False}, "EYE_CONTACT"
+                        )
+                        if ec_result.get("close_and_facing"):
+                            _ui("log", f"👁️  Eye contact confirmed — greeting!")
+                            log_mission_event("person_greeted", ec_result.get("reasoning", ""))
+                            greeting = ask_cosmos(
+                                "Someone is close and looking at you. Greet them and ask if they can help with your mission. 1-2 sentences.",
+                                max_tokens=60
+                            )
+                            eric_say(greeting)
+                        else:
+                            _ui("log", f"Person not close/facing — continuing")
+                            motors.forward(MOTOR_SPEED_SLOW)
+                    except Exception as e:
+                        log_exception("eye_contact_async", e)
+                        motors.forward(MOTOR_SPEED_SLOW)
+
+            _last_nav_result = parsed
+        except Exception as e:
+            log_exception("_nav_check_async collect", e)
+        _pending_nav = None
+
+    # ── Fire next Cosmos call async — does not block ──────────────────────
+    if _pending_nav is None:
+        frames = get_buffered_frames(CAMERA_PANTILT, n=6)
+        if not frames:
+            # Buffer cold — fall back to synchronous single-frame check
+            _ui("log", "📷 Nav check (sync fallback)...")
+            return _nav_check()
+
+        sensor_ctx = _sensor_context()
+        NAV_VIDEO_PROMPT = f"""{sensor_ctx}You are a tracked ground robot moving forward. These are the last few seconds of footage from your forward camera — analyse them for changes over time.
+
+VOID / DROP (HIGHEST PRIORITY — look at lower third of each frame):
+- Stair edge, hole, gap, or floor abruptly ending → void_ahead = true
+- If sensor data shows VOID or FLOOR DROP WARNING → void_ahead = true
+- When void_ahead = true: wall_ahead = true, action = stop
+
+OBSTACLES:
+- Wall or large object ahead → wall_ahead = true
+- Object within ~60cm → obstacle_close = true
+- Small ground obstacle → small_obstacle = true
+
+PEOPLE: person or robot visible anywhere → person_visible = true
+
+ACTION: "stop" if wall_ahead OR obstacle_close OR void_ahead. "forward" otherwise.
+
+OUTPUT — single JSON, no markdown:
+{{
+  "wall_ahead": false,
+  "obstacle_close": false,
+  "small_obstacle": false,
+  "void_ahead": false,
+  "person_visible": false,
+  "action": "forward",
+  "physical_reasoning": "one sentence"
+}}"""
+
+        def _call():
+            try:
+                content = [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}}
+                    for f in frames
+                ]
+                content.append({"type": "text", "text": NAV_VIDEO_PROMPT.strip()})
+                payload = {
+                    "model": COSMOS_MODEL,
+                    "messages": [{"role": "user", "content": content}],
+                    "max_tokens": 120, "temperature": 0.1, "repetition_penalty": 1.15,
+                }
+                r = requests.post(VLLM_URL, json=payload, timeout=30)
+                r.raise_for_status()
+                return r.json()["choices"][0]["message"]["content"].strip()
+            except Exception as e:
+                log_exception("nav_async_call", e)
+                return ""
+
+        _pending_nav = _cosmos_executor.submit(_call)
+        _ui("log", f"📹 Async video nav ({len(frames)} frames) fired — acting on last result")
+
+    # ── Return last known result immediately — never waits ────────────────
+    if _last_nav_result:
+        return _last_nav_result
+
+    # Very first call — no result yet, fall back to fast single-frame check
+    _ui("log", "📷 Nav check (first call, sync)...")
+    result = _nav_check()
+    _last_nav_result = result
+    return result
 
 
 # ─── Quick Scan (stopped) ─────────────────────────────────────────────────────
@@ -2709,6 +2903,14 @@ def _process_scan(scan, from_360=False):
 _nav_clips_since_scan = 0
 NAV_CLIPS_BETWEEN_SCANS = 2  # do a quick stopped scan every 2 nav clips (~20s of movement)
 
+# ─── Async nav check state ────────────────────────────────────────────────────
+# _pending_nav holds the Future from the last async Cosmos call.
+# _last_nav_result holds the most recent completed result.
+# The mission loop fires a new call each cycle and acts on the PREVIOUS result —
+# Eric never waits for Cosmos, it always has a result ready to use.
+_pending_nav: concurrent.futures.Future | None = None
+_last_nav_result: dict = {}
+
 
 def _mission_loop():
     global mission_active, mission_state, _empty_scans, _scans_since_360
@@ -2733,7 +2935,7 @@ def _mission_loop():
             # ── Nav check while moving ────────────────────────────────────
             if _nav_clips_since_scan < NAV_CLIPS_BETWEEN_SCANS:
                 _nav_clips_since_scan += 1
-                nav = _nav_check()
+                nav = _nav_check_async()
 
                 if nav.get("wall_ahead") or nav.get("obstacle_close"):
                     motors.stop()

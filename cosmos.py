@@ -236,6 +236,71 @@ class _CameraReader:
 _readers: dict[int, _CameraReader] = {}
 
 
+# ─── Rolling Frame Buffer ─────────────────────────────────────────────────────
+# Continuously grabs frames from the background camera reader into a fixed-size
+# deque. start_frame_buffer() launches one collector thread per camera.
+# get_buffered_frames() returns the last N frames instantly — zero wait.
+# This lets _nav_check() send multiple frames to Cosmos (temporal context)
+# without stopping Eric to record a video clip.
+
+import collections as _collections
+
+_frame_buffers: dict[int, _collections.deque]   = {}
+_buffer_lock    = _threading.Lock()
+_buffer_threads: dict[int, _threading.Thread]   = {}
+
+FRAME_BUFFER_SIZE = 10   # keep last 10 frames per camera
+FRAME_BUFFER_FPS  = 1.0  # collection rate — 1 fps is plenty for Cosmos reasoning
+
+
+def start_frame_buffer(device: int, fps: float = FRAME_BUFFER_FPS):
+    """
+    Start a background thread that continuously grabs frames from the camera
+    into a rolling deque of FRAME_BUFFER_SIZE frames.
+
+    Safe to call multiple times — skips if already running for this device.
+    Call once at mission start for CAMERA_PANTILT.
+    """
+    with _buffer_lock:
+        if device in _buffer_threads and _buffer_threads[device].is_alive():
+            return  # already running
+        buf = _collections.deque(maxlen=FRAME_BUFFER_SIZE)
+        _frame_buffers[device] = buf
+
+    interval = 1.0 / max(fps, 0.1)
+
+    def _collect():
+        while True:
+            frame = capture_frame(device, 160, 120)   # small — fast to encode and send
+            if frame:
+                with _buffer_lock:
+                    buf.append(frame)
+            _time.sleep(interval)
+
+    t = _threading.Thread(target=_collect, daemon=True,
+                          name=f"frame-buf-{device}")
+    t.start()
+    with _buffer_lock:
+        _buffer_threads[device] = t
+    log.info(f"📹 Frame buffer started: camera {device} @ {fps:.1f} fps "
+             f"(buffer={FRAME_BUFFER_SIZE} frames)")
+
+
+def get_buffered_frames(device: int, n: int = 6) -> list[str]:
+    """
+    Return the last n frames from the rolling buffer — returns instantly.
+    Falls back to a single live capture if buffer is empty or not started.
+    """
+    with _buffer_lock:
+        buf = _frame_buffers.get(device)
+        if buf and len(buf) > 0:
+            return list(buf)[-n:]
+
+    # Buffer not started or empty — single live capture as fallback
+    frame = capture_frame(device, 160, 120)
+    return [frame] if frame else []
+
+
 def _get_reader(device: int) -> _CameraReader:
     if device not in _readers:
         reader = _CameraReader(device)
