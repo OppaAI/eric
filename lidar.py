@@ -56,6 +56,15 @@ STOP_DIST     = 0.30   # stop  if anything within 30 cm in front arc
 SLOW_DIST     = 0.60   # slow  if anything within 60 cm in front arc
 FRONT_ARC_DEG = 60     # ±60° either side of forward = 120° total front arc
 
+# ── Motor heartbeat watchdog ──────────────────────────────────────────────────
+# If the UART to the ESP32 goes silent (cable pulled, crash), we can't safely
+# drive. Watchdog checks every MOTOR_HB_INTERVAL_S that motors._ser is open.
+# On failure: sets _motor_link_ok=False so lidar_available() returns False,
+# preventing any further sensor-driven motor commands on a dead link.
+MOTOR_HB_INTERVAL_S  = 2.0    # check interval
+_motor_link_ok       = True    # assume ok until proven otherwise
+_motor_hb_thread     = None
+
 # ── Staleness watchdog ────────────────────────────────────────────────────────
 STALE_TIMEOUT_S      = 2.0   # seconds — declare LiDAR dead if no scan arrives
 STALE_CHECK_INTERVAL = 0.5   # how often the watchdog thread checks
@@ -84,9 +93,9 @@ _lock = threading.Lock()   # guards all state above
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def lidar_available() -> bool:
-    """True only if LiDAR is initialised AND data is still arriving."""
+    """True only if LiDAR is initialised, data is arriving, AND motor link is alive."""
     with _lock:
-        return _lidar_ok and not _lidar_stale
+        return _lidar_ok and not _lidar_stale and _motor_link_ok
 
 
 def obstacle_close() -> bool:
@@ -309,6 +318,7 @@ def init_lidar() -> bool:
                 _lidar_ok   = True
                 _lidar_stale = False
                 _start_staleness_watchdog()
+                _start_motor_heartbeat()
                 return True
         except Exception:
             pass
@@ -325,6 +335,7 @@ def init_lidar() -> bool:
         _lidar_stale = False
         log.info("✅ LiDAR: D500 safety monitor active")
         _start_staleness_watchdog()
+        _start_motor_heartbeat()
         return True
 
     except ImportError:
@@ -445,8 +456,9 @@ def _scan_callback(msg):
                 _min_distance   = min_dist
                 _obstacle_close = is_close
                 _obstacle_near  = is_near
+                sa = _safety_active  # read under lock
 
-            if _safety_active:
+            if sa:
                 if is_close:
                     _motors_stop("LIDAR STOP",
                                  f"obstacle at {min_dist:.2f}m")
@@ -458,7 +470,10 @@ def _scan_callback(msg):
         # Runs on every scan — void_ahead() reuses the msg we just stored.
         # Only skip if we already stopped for an obstacle (obstacle_close)
         # since they can't both be true simultaneously in normal operation.
-        if _safety_active and not _obstacle_close:
+        with _lock:
+            sa2 = _safety_active
+            obs_close = _obstacle_close
+        if sa2 and not obs_close:
             void = lidar_void_ahead()
             if void["void_detected"]:
                 conf = void["confidence"]
@@ -504,14 +519,59 @@ def _motors_slow(tag: str, reason: str):
         pass
 
 
+# ─── Motor UART heartbeat watchdog ────────────────────────────────────────────
+
+def _start_motor_heartbeat():
+    """Start motor serial link watchdog. Call once after init_lidar()."""
+    global _motor_hb_thread
+    if _motor_hb_thread and _motor_hb_thread.is_alive():
+        return
+    _motor_hb_thread = threading.Thread(
+        target=_motor_hb_loop, daemon=True, name="motor-heartbeat"
+    )
+    _motor_hb_thread.start()
+    log.info("💓 Motor UART heartbeat watchdog started")
+
+
+def _motor_hb_loop():
+    """
+    Check every MOTOR_HB_INTERVAL_S that the ESP32 UART link is alive.
+    If the serial port closes unexpectedly (cable pulled, crash), clears
+    _motor_link_ok so lidar_available() returns False — prevents further
+    sensor-driven motor commands on a dead link.
+    Logs once on transition (fail and recover), not every check.
+    """
+    global _motor_link_ok
+    was_ok = True
+    while True:
+        time.sleep(MOTOR_HB_INTERVAL_S)
+        try:
+            from motors import motors as _m
+            ok = _m._ser is not None and _m._ser.is_open
+        except Exception:
+            ok = False   # motors module not loaded yet — assume ok
+
+        if not ok and was_ok:
+            log.error("💔 Motor UART link LOST — lidar safety paused until restored")
+            with _lock:
+                _motor_link_ok = False
+            was_ok = False
+        elif ok and not was_ok:
+            log.info("💓 Motor UART link restored — lidar safety re-enabled")
+            with _lock:
+                _motor_link_ok = True
+            was_ok = True
+
+
 # ─── Status helpers ───────────────────────────────────────────────────────────
 
 def get_status() -> dict:
     """Return current LiDAR safety status for GUI display."""
     with _lock:
         return {
-            "available":      _lidar_ok and not _lidar_stale,
+            "available":      _lidar_ok and not _lidar_stale and _motor_link_ok,
             "stale":          _lidar_stale,
+            "motor_link_ok":  _motor_link_ok,
             "safety_active":  _safety_active,
             "obstacle_close": _obstacle_close,
             "obstacle_near":  _obstacle_near,
