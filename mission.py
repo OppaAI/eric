@@ -2899,37 +2899,74 @@ NAV_CLIPS_BETWEEN_SCANS = 2   # stopped scan every 2 movement intervals
 NAV_MOVE_INTERVAL       = 5.0  # seconds of movement between scan checks
 
 # ── YOLO Layer 2 detection state ──────────────────────────────────────────────
+# These module-level variables replace the previous four-variable block.
+
+import time
+import threading
+import logging
+
+log = logging.getLogger("eric.mission")
+
 _yolo_person_detected  = False   # set by YOLO callback, cleared after handling
 _yolo_detect_label     = None    # "person" | "dog" | "cat" etc
 _yolo_detect_distance  = None    # meters
 _yolo_detect_bearing   = None    # "left" | "center" | "right"
+_yolo_detect_bearing_deg = None  # signed float degrees (−45…+45)
+_yolo_detect_time      = 0.0     # monotonic timestamp of last detection
 _yolo_lock             = threading.Lock()
 
+YOLO_POSITION_STALE_S  = 3.0    # seconds — detection data older than this is stale
 
-def _on_yolo_detection(label: str, distance_m: float, bearing: str):
+
+# ─── Callback from oakd.py ────────────────────────────────────────────────────
+
+def _on_yolo_detection(label: str, distance_m: float,
+                       bearing: str, bearing_deg: float):
     """
     Layer 2 YOLO callback — fired from oakd.py reader thread.
     Runs in background thread — only sets flags, never blocks.
     Mission loop picks these up on next iteration.
+
+    Signature change: now accepts bearing_deg for proportional steering.
+
+    If mission is INTERACTING: stores detection but does not set
+    _yolo_person_detected — the mission loop will pick it up on
+    the next iteration when the state returns to SEARCHING.
+    Log entry is always written so the operator sees it in the GUI.
     """
     global _yolo_person_detected, _yolo_detect_label
     global _yolo_detect_distance, _yolo_detect_bearing
+    global _yolo_detect_bearing_deg, _yolo_detect_time
 
-    if not mission_active or mission_state in (State.INTERACTING, State.COMPLETE):
+    if not mission_active:
         return
 
+    # Always log — even during interaction, operator should see this
+    _ui("log", f"👁️  YOLO: {label} at {distance_m:.1f}m "
+               f"({bearing} / {bearing_deg:+.0f}°)")
+    log_action("YOLO_DETECT", f"{label} {distance_m:.1f}m "
+                               f"{bearing} {bearing_deg:+.0f}°")
+
+    if mission_state in (State.COMPLETE,):
+        return  # Mission done — ignore
+
+    # Store position even when INTERACTING (recovered on next SEARCHING tick)
     with _yolo_lock:
-        _yolo_person_detected = True
-        _yolo_detect_label    = label
-        _yolo_detect_distance = distance_m
-        _yolo_detect_bearing  = bearing
+        _yolo_detect_label       = label
+        _yolo_detect_distance    = distance_m
+        _yolo_detect_bearing     = bearing
+        _yolo_detect_bearing_deg = bearing_deg
+        _yolo_detect_time        = time.monotonic()
 
-    _ui("log", f"👁️  YOLO: {label} detected at {distance_m:.1f}m ({bearing})")
-    log_action("YOLO_DETECT", f"{label} {distance_m:.1f}m {bearing}")
+        if mission_state not in (State.INTERACTING,):
+            _yolo_person_detected = True
+        # If INTERACTING: flag stays False — picked up on next SEARCHING loop
 
+
+# ─── Register / unregister ────────────────────────────────────────────────────
 
 def _register_yolo_callback():
-    """Register YOLO Layer 2 callback with oakd.py."""
+    """Register Layer 2 YOLO callback with oakd.py."""
     try:
         from oakd import set_yolo_callback, set_yolo_active
         set_yolo_callback(_on_yolo_detection)
@@ -2942,78 +2979,126 @@ def _register_yolo_callback():
 def _unregister_yolo_callback():
     """Pause YOLO detections when mission stops."""
     try:
-        from oakd import set_yolo_callback, set_yolo_active
+        from oakd import set_yolo_callback, set_yolo_active, clear_yolo_motor_stop
         set_yolo_active(False)
         set_yolo_callback(None)
+        clear_yolo_motor_stop()
     except Exception:
         pass
 
 
+# ─── Handle detection in mission loop ────────────────────────────────────────
+
 def _handle_yolo_detection() -> bool:
     """
     Handle a pending YOLO detection from the mission loop.
-    Returns True if a detection was handled (loop should continue).
+    Returns True if a detection was handled (loop should skip rest of iteration).
 
-    Mission-aware response:
-      approach_on_detect=true  → slow down, approach, hand to Cosmos
-      approach_on_detect=false → stop, observe, log, hand to Cosmos
-    Default: approach (search and rescue default).
+    Fixes applied vs previous version:
+    ─────────────────────────────────
+    • Proportional steering: turn duration scales with |bearing_deg|, not fixed 0.3s.
+    • Layer 2 motor guard: checks oakd.yolo_motor_stop_issued() before any
+      motors.forward() to avoid overriding a Layer 2 stop with a move command.
+    • Stale data guard: if stored detection is older than YOLO_POSITION_STALE_S,
+      falls back to oakd.get_last_yolo_position() for fresh spatial data.
+    • Mission-aware: approach_on_detect flag from YAML still controls behaviour.
     """
     global _yolo_person_detected, mission_state
 
     with _yolo_lock:
         if not _yolo_person_detected:
             return False
-        label    = _yolo_detect_label
-        dist_m   = _yolo_detect_distance
-        bearing  = _yolo_detect_bearing
-        _yolo_person_detected = False  # clear flag
+        label       = _yolo_detect_label
+        dist_m      = _yolo_detect_distance
+        bearing     = _yolo_detect_bearing
+        bearing_deg = _yolo_detect_bearing_deg
+        detect_age  = time.monotonic() - _yolo_detect_time
+        _yolo_person_detected = False   # clear flag
 
-    # Read mission flag — default True (approach) for search and rescue
-    approach = _mission_flags.get("approach_on_detect", True)
+    # ── Stale detection guard ─────────────────────────────────────────────────
+    # If the stored detection is old (Cosmos was running), get fresh position.
+    if detect_age > YOLO_POSITION_STALE_S:
+        try:
+            from oakd import get_last_yolo_position
+            fresh = get_last_yolo_position(label)
+            if fresh:
+                dist_m      = fresh["dist_m"]
+                bearing     = fresh["bearing"]
+                bearing_deg = fresh["bearing_deg"]
+                _ui("log", f"YOLO: refreshed position from OAK-D memory "
+                           f"({detect_age:.1f}s old → {dist_m:.1f}m {bearing})")
+            else:
+                _ui("log", f"YOLO: detection {detect_age:.1f}s old, no fresh data — skipping")
+                return True  # consumed the flag, don't act on stale data
+        except Exception:
+            pass
+
+    # ── Clear the Layer 2 motor guard ────────────────────────────────────────
+    # Layer 2 already called motors.stop() for this detection.
+    # We take over mission logic from here. Clear the flag so mission loop
+    # knows it can issue motor commands again once it has handled this event.
+    try:
+        from oakd import yolo_motor_stop_issued, clear_yolo_motor_stop
+        if yolo_motor_stop_issued():
+            clear_yolo_motor_stop()
+    except Exception:
+        pass
+
+    # ── Mission flag ──────────────────────────────────────────────────────────
+    approach    = _mission_flags.get("approach_on_detect", True)
     detect_dist = float(_mission_flags.get("detect_distance", 2.0))
 
     if dist_m > detect_dist:
-        # Too far — slow down and keep moving toward detection
+        # ── Far detection: slow + steer proportionally toward target ──────────
+        # Turn duration: 0.2s at bearing ±5°, up to 0.8s at bearing ±45°
+        turn_sec = max(0.2, min(0.8, abs(bearing_deg) / 45.0 * 0.8))
         motors.slow()
-        _ui("log", f"YOLO: {label} at {dist_m:.1f}m — approaching ({bearing})")
-        if bearing == "left":
-            _turn_nav2_or_direct("left", 0.3)
-        elif bearing == "right":
-            _turn_nav2_or_direct("right", 0.3)
-        motors.forward(MOTOR_SPEED_SLOW)
+        _ui("log", f"YOLO: {label} at {dist_m:.1f}m ({bearing} / "
+                   f"{bearing_deg:+.0f}°) — steering {turn_sec:.2f}s")
+
+        if bearing_deg < -5.0:     # target is to the left
+            _turn_nav2_or_direct("left", turn_sec)
+        elif bearing_deg > 5.0:    # target is to the right
+            _turn_nav2_or_direct("right", turn_sec)
+        # If within ±5° — already centred, just slow forward
+
+        # Safety: don't issue forward if Layer 2 issued a stop since we read the flag
+        try:
+            from oakd import yolo_motor_stop_issued
+            if not yolo_motor_stop_issued():
+                motors.forward(MOTOR_SPEED_SLOW)
+        except Exception:
+            motors.forward(MOTOR_SPEED_SLOW)
         return True
 
-    # Close enough — stop and hand to Cosmos
+    # ── Close enough — stop and hand to Cosmos ────────────────────────────────
     motors.stop()
     mission_state = State.INTERACTING
     motors.oled(0, label[:16])
     motors.oled(1, f"{dist_m:.1f}m {bearing}")
     _ui("status", f"YOLO FOUND — {label.upper()}")
-    log_mission_event("yolo_found", f"{label} {dist_m:.1f}m {bearing}")
+    log_mission_event("yolo_found", f"{label} {dist_m:.1f}m {bearing} {bearing_deg:+.0f}°")
 
     if approach:
-        # Search and rescue / find_and_approach — greet and interact
         _ui("log", f"YOLO: {label} confirmed at {dist_m:.1f}m — handing to Cosmos")
         greeting = ask_cosmos(
-            f"YOLO detection: {label} spotted {dist_m:.1f}m to your {bearing}. "
-            f"You have stopped and are facing them. "
-            f"Greet them naturally and ask about your mission. 1-2 sentences.",
+            f"YOLO detection: {label} spotted {dist_m:.1f}m to your {bearing} "
+            f"({bearing_deg:+.0f}° off-centre). You have stopped and are facing them. "
+            "Greet them naturally and ask about your mission. 1-2 sentences.",
             max_tokens=80
         )
         eric_say(greeting)
     else:
-        # Security / observe mode — log and report, don't approach
         _ui("log", f"YOLO: {label} at {dist_m:.1f}m — observing (approach_on_detect=false)")
         report = ask_cosmos(
-            f"YOLO detection: {label} spotted {dist_m:.1f}m to your {bearing}. "
-            f"Report what you observe. Stay in position. 1-2 sentences.",
+            f"YOLO detection: {label} spotted {dist_m:.1f}m to your {bearing} "
+            f"({bearing_deg:+.0f}° off-centre). "
+            "Report what you observe. Stay in position. 1-2 sentences.",
             max_tokens=80
         )
         eric_say(report)
 
     return True
-
 
 def _mission_loop():
     global mission_active, mission_state, _empty_scans, _scans_since_360
