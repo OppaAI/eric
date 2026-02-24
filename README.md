@@ -1,7 +1,8 @@
 # ERIC — Edge Robotics Innovation by Cosmos
-**By OppaAO**
-
-**License: Apache 2.0**
+**A tracked-wheel robot on a mission, powered by NVIDIA Cosmos Reason 2**  
+**Built from Feb 20, 2026 in Jetson Orin Nano 8GB**  
+**Author:** [OppaAI](https://github.com/OppaAI)  
+**License:** [Apache 2.0](LICENSE)
 
 [![Repo](https://img.shields.io/badge/repo-OppaAI%2FAGi-darkcyan)](https://github.com/OppaAI/eric)
 ![Build](https://img.shields.io/badge/build-prototype-lightgrey)
