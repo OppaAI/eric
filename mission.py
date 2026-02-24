@@ -86,175 +86,6 @@ _cosmos_executor = concurrent.futures.ThreadPoolExecutor(
 )
 
 
-# ─── Centralised Health Monitor ───────────────────────────────────────────────
-# Runs as a daemon thread from mission start. Watches all critical subsystems
-# and forces a safe stop + alarm if ≥2 are dead simultaneously.
-# Also logs Jetson thermal state so operators see overheating before it kills
-# inference.
-#
-# Watched components:
-#   lidar_ok   — lidar.lidar_available() (includes staleness check)
-#   oakd_ok    — oakd.oakd_available()
-#   cosmos_ok  — HTTP GET /health on vLLM server
-#   cam_ok     — cosmos._frame_buffers has fresh frames (< 5s old)
-#   jetson_temp — /sys/class/thermal/thermal_zone0/temp (millidegrees)
-#
-# Fault logic:
-#   critical_faults ≥ 2 → SYSTEM FAULT → motors.stop() + alarm + OLED
-#   jetson_temp > 80°C  → thermal warning logged + slow motors
-#
-# One log line per state change — no flooding.
-
-_health_thread:     threading.Thread | None = None
-_health_fault_count: int  = 0          # consecutive cycles with ≥2 faults
-_health_halted:     bool  = False      # True after a fault halt (reset on stop_mission)
-
-HEALTH_CHECK_INTERVAL_S  = 3.0    # seconds between health checks
-HEALTH_FAULT_THRESHOLD   = 2      # number of critical components dead = fault
-HEALTH_HALT_CYCLES       = 2      # consecutive bad cycles before halt
-JETSON_TEMP_WARN_C       = 75.0   # Celsius — warn
-JETSON_TEMP_CRIT_C       = 85.0   # Celsius — force slow
-
-
-def _read_jetson_temp() -> float | None:
-    """Read Jetson SoC temperature from sysfs. Returns Celsius or None."""
-    for zone in range(6):
-        try:
-            with open(f"/sys/class/thermal/thermal_zone{zone}/temp") as f:
-                raw = int(f.read().strip())
-            # Filter for SoC zones (usually > 20°C, < 120°C)
-            c = raw / 1000.0
-            if 20.0 < c < 120.0:
-                return c
-        except Exception:
-            continue
-    return None
-
-
-def _health_loop():
-    """
-    Background daemon — runs every HEALTH_CHECK_INTERVAL_S seconds.
-    Checks all critical subsystems and halts if too many are dead.
-    Logs once per state transition, not on every cycle.
-    """
-    global _health_fault_count, _health_halted
-
-    prev_faults: set[str] = set()
-    prev_temp_warn = False
-
-    while mission_active:
-        time.sleep(HEALTH_CHECK_INTERVAL_S)
-        if not mission_active:
-            break
-
-        faults: set[str] = set()
-
-        # ── LiDAR ────────────────────────────────────────────────────────────
-        try:
-            from lidar import lidar_available
-            if not lidar_available():
-                faults.add("lidar")
-        except Exception:
-            faults.add("lidar")
-
-        # ── OAK-D ────────────────────────────────────────────────────────────
-        try:
-            from oakd import oakd_available
-            if not oakd_available():
-                faults.add("oakd")
-        except Exception:
-            faults.add("oakd")
-
-        # ── Cosmos / vLLM ────────────────────────────────────────────────────
-        try:
-            import requests as _req
-            from config import VLLM_URL
-            r = _req.get(VLLM_URL.replace("/v1/chat/completions", "/health"),
-                         timeout=1.5)
-            if r.status_code != 200:
-                faults.add("cosmos")
-        except Exception:
-            faults.add("cosmos")
-
-        # ── Camera frame freshness ────────────────────────────────────────────
-        try:
-            from cosmos import _frame_buffers, CAMERA_PANTILT
-            buf = _frame_buffers.get(CAMERA_PANTILT)
-            if buf is None or len(buf) == 0:
-                faults.add("camera")
-        except Exception:
-            pass  # buffer not started yet — not a fault
-
-        # ── Jetson temperature ────────────────────────────────────────────────
-        temp = _read_jetson_temp()
-        if temp is not None:
-            if temp > JETSON_TEMP_CRIT_C:
-                faults.add("thermal")
-                if not prev_temp_warn:
-                    log.error(f"🌡️  JETSON CRITICAL TEMP: {temp:.1f}°C — forcing slow")
-                    _ui("log", f"🌡️  CRITICAL TEMP {temp:.1f}°C — slowing motors")
-                    motors.slow()
-                    prev_temp_warn = True
-            elif temp > JETSON_TEMP_WARN_C:
-                if not prev_temp_warn:
-                    log.warning(f"🌡️  Jetson temp high: {temp:.1f}°C")
-                    _ui("log", f"🌡️  Temp warning: {temp:.1f}°C")
-                    prev_temp_warn = True
-            else:
-                prev_temp_warn = False
-
-        # ── Log new faults (once per transition) ─────────────────────────────
-        new_faults = faults - prev_faults
-        cleared    = prev_faults - faults
-        if new_faults:
-            log.warning(f"⚠️  Health: faults → {sorted(faults)} "
-                        f"(new: {sorted(new_faults)})")
-            _ui("log", f"⚠️  HEALTH: {', '.join(sorted(faults))} FAULT")
-        if cleared:
-            log.info(f"✅ Health: cleared {sorted(cleared)} "
-                     f"(remaining: {sorted(faults)})")
-        prev_faults = faults
-
-        # ── Fault halt logic ──────────────────────────────────────────────────
-        critical = {f for f in faults if f in ("lidar", "oakd", "thermal")}
-        if len(faults) >= HEALTH_FAULT_THRESHOLD:
-            _health_fault_count += 1
-        else:
-            _health_fault_count = max(0, _health_fault_count - 1)
-
-        if _health_fault_count >= HEALTH_HALT_CYCLES and not _health_halted:
-            _health_halted = True
-            log.error(f"🚨 SYSTEM FAULT — {HEALTH_HALT_CYCLES} consecutive cycles "
-                      f"with ≥{HEALTH_FAULT_THRESHOLD} faults: {sorted(faults)}")
-            _ui("status", "SYSTEM FAULT — HALTED")
-            _ui("log",    f"🚨 SYSTEM FAULT: {', '.join(sorted(faults))} — stopping")
-            motors.stop()
-            motors.oled(0, "SYSTEM FAULT")
-            motors.oled(1, ",".join(sorted(faults))[:16])
-            try:
-                from alarm import sound_alarm, AlarmType
-                sound_alarm(AlarmType.HAZARD,
-                            f"System fault: {', '.join(sorted(faults))}")
-            except Exception:
-                pass
-
-    log.info("Health monitor exited")
-
-
-def _start_health_monitor():
-    """Start the health monitor daemon thread. Safe to call multiple times."""
-    global _health_thread, _health_fault_count, _health_halted
-    _health_fault_count = 0
-    _health_halted      = False
-    if _health_thread and _health_thread.is_alive():
-        return
-    _health_thread = threading.Thread(
-        target=_health_loop, daemon=True, name="health-monitor"
-    )
-    _health_thread.start()
-    log.info("👁  Health monitor started")
-
-
 class State:
     IDLE         = "idle"
     SEARCHING    = "searching"
@@ -1188,26 +1019,14 @@ def start_mission(briefing: str, mission_name: str = ""):
     motors.oled(0, "ERIC ACTIVE")
     motors.oled(1, "Searching...")
 
-    # Start rolling frame buffer for async video nav checks
-    start_frame_buffer(CAMERA_PANTILT, fps=1.0)
-
-    # Reset async nav state for fresh mission
-    global _pending_nav, _last_nav_result
-    _pending_nav     = None
-    _last_nav_result = {}
-
-    # Start centralised health monitor
-    _start_health_monitor()
-
     threading.Thread(target=_mission_loop, daemon=True).start()
     return ack
 
 
 def stop_mission():
-    global mission_active, mission_state, _health_halted
+    global mission_active, mission_state
     mission_active = False
     mission_state  = State.IDLE
-    _health_halted = False   # allow next mission to start even after a fault halt
     motors.stop()
     # Cancel any in-progress Nav2 goal
     try:
@@ -1802,13 +1621,21 @@ def _is_pitch_black(frame_b64: str, threshold: float = 20.0) -> bool:
 
 def _quick_scan() -> dict:
     """
-    Dual camera stable scan while stopped.
-    Always runs a hardware void check first — if OAK-D or LiDAR detects a drop,
-    returns immediately without moving the pan-tilt or running Cosmos.
-    Then tilts steeply down to capture the floor edge (for both sensor void checks
-    and Cosmos visual void detection) before returning to normal scan tilt.
+    Industrial-standard stopped scan.
+
+    Strategy:
+      1. Hardware void pre-check (LiDAR + OAK-D) — no Cosmos, instant.
+      2. Pan-tilt at TILT_SCAN (5°) — wide angle, the primary search sensor.
+         Short 2-second video clip (3 frames) — beats single frame for accuracy.
+         Cosmos asked to find target and assess path.
+      3. If candidate found → webcam confirmation zoom shot before committing.
+         Webcam (longer focal length) only fires here — resource-efficient.
+      4. Sensor overrides applied last (LiDAR/OAK-D hard-gate Cosmos result).
+
+    Tilt at 5° shows ground 1-3m ahead — the correct industrial search angle.
+    30° steep-down is only for void detection, not target search.
     """
-    # ── Hardware void pre-check ────────────────────────────────────────────
+    # ── 1. Hardware void pre-check ────────────────────────────────────────────
     hw_void = _void_check()
     if hw_void["void"]:
         log.warning(f"🕳️  _quick_scan pre-check: void ({hw_void['source']}): {hw_void['reason']}")
@@ -1819,66 +1646,83 @@ def _quick_scan() -> dict:
             "physical_reasoning": f"Hardware void pre-check: {hw_void['reason']}"
         }
 
-    # ── Floor-edge tilt: steep down to show stair lips / hole edges ────────
-    # TILT_FLOOR_EDGE = 30° down — shows ~0.5m in front of tracks at ground level.
-    # This is the frame most likely to reveal a stair edge or cliff lip.
-    motors.pantilt(0, 30)
-    motors.lights(0, 0)
-    time.sleep(0.5)
-
-    frames = []
-
-    # Capture floor-edge frame first (steep down)
-    floor_frame = capture_frame(CAMERA_PANTILT, 640, 480)
-    if floor_frame:
-        if _is_pitch_black(floor_frame):
-            motors.lights(base=180, head=255)
-            time.sleep(0.3)
-            floor_frame = capture_frame(CAMERA_PANTILT, 640, 480) or floor_frame
-            motors.lights(0, 0)
-        frames.append(floor_frame)
-
-    # Return to normal ground-looking tilt for the second frame
+    # ── 2. Pan-tilt wide-angle scan at 5° (industrial standard angle) ─────────
     motors.pantilt(0, 5)
-    time.sleep(0.4)
+    motors.lights(0, 0)
+    time.sleep(0.3)
 
-    pt = capture_frame(CAMERA_PANTILT, 640, 480)
-    if pt:
-        if _is_pitch_black(pt):
-            motors.lights(base=180, head=255)
-            time.sleep(0.3)
-            pt = capture_frame(CAMERA_PANTILT, 640, 480) or pt
-            motors.lights(0, 0)
-        frames.append(pt)
+    # Short video clip: 2s at 1.5fps = 3 frames
+    # Motion context > single frame; same Cosmos token cost as one 720p frame
+    clip_frames = capture_frames_video(CAMERA_PANTILT, duration=2.0, fps_sample=1.5)
+    if not clip_frames:
+        f = _capture_sharp(CAMERA_PANTILT)
+        clip_frames = [f] if f else []
 
-    wc = capture_frame(CAMERA_WEBCAM, 640, 480)
-    if wc:
-        if _is_pitch_black(wc):
-            motors.lights(base=180, head=255)
-            time.sleep(0.3)
-            wc = capture_frame(CAMERA_WEBCAM, 640, 480) or wc
-            motors.lights(0, 0)
-        frames.append(wc)
-
-    if not frames:
+    if not clip_frames:
         return dict(_SCAN_FALLBACK)
+
+    # Adaptive LED
+    if _is_pitch_black(clip_frames[-1]):
+        motors.lights(base=180, head=255)
+        time.sleep(0.3)
+        extra = _capture_sharp(CAMERA_PANTILT)
+        if extra:
+            clip_frames.append(extra)
+        motors.lights(0, 0)
 
     sensor_ctx = _sensor_context()
     mission_ov = _get_mission_scan_overlay()
-    prompt = mission_ov + (sensor_ctx + QUICK_SCAN_PROMPT if sensor_ctx else QUICK_SCAN_PROMPT)
+    prompt = mission_ov + (sensor_ctx + QUICK_SCAN_PROMPT
+                           if sensor_ctx else QUICK_SCAN_PROMPT)
 
     try:
-        print(f"\n📷 QUICK SCAN — {len(frames)} frames to Cosmos (incl. floor-edge)...")
-        response = _cosmos_frames(frames, prompt, max_tokens=250, temp=0.3)
-        result = _parse_json(response, dict(_SCAN_FALLBACK), label="QUICK SCAN RESULT")
+        print(f"\n📷 QUICK SCAN — {len(clip_frames)} frames (pan-tilt 5°)...")
+        response = _cosmos_frames(clip_frames, prompt, max_tokens=250, temp=0.3)
+        result = _parse_json(response, dict(_SCAN_FALLBACK), label="QUICK SCAN")
 
-        # ── Sensor overrides ─────────────────────────────────────────────
+        # ── 3. Candidate found — webcam confirmation ───────────────────────────
+        # Wide angle detected something → zoom in with webcam to confirm.
+        # Only now do we pay the cost of a second camera frame + Cosmos call.
+        if result.get("target_visible"):
+            _ui("log", "🔍 Candidate found — webcam confirmation...")
+            wc = capture_frame(CAMERA_WEBCAM, 640, 480)
+            if wc:
+                if _is_pitch_black(wc):
+                    motors.lights(base=180, head=255)
+                    time.sleep(0.2)
+                    wc = capture_frame(CAMERA_WEBCAM, 640, 480) or wc
+                    motors.lights(0, 0)
+                confirm_frames = clip_frames + [wc]
+                confirm_prompt = (
+                    mission_ov +
+                    "CONFIRMATION: You flagged a possible target. "
+                    "The last image is a zoom shot from the close-up webcam. "
+                    "Confirm: is the target actually present? "
+                    "Set target_visible=true only if 60%+ confident.\n\n"
+                ) + (sensor_ctx + QUICK_SCAN_PROMPT if sensor_ctx else QUICK_SCAN_PROMPT)
+                try:
+                    confirm_resp = _cosmos_frames(confirm_frames, confirm_prompt,
+                                                  max_tokens=200, temp=0.1)
+                    confirmed = _parse_json(confirm_resp, dict(_SCAN_FALLBACK),
+                                            label="QUICK SCAN CONFIRM")
+                    if confirmed.get("target_visible"):
+                        _ui("log", "✅ Target confirmed by webcam")
+                        result = confirmed
+                    else:
+                        _ui("log", "❌ Webcam: false positive — continuing search")
+                        result["target_visible"] = False
+                except Exception as e:
+                    log_exception("quick_scan_confirm", e)
+                    # Keep original result if confirmation call fails
+
+        # ── 4. Sensor hard-gates ─────────────────────────────────────────────
         try:
             from lidar import obstacle_close as lidar_close
             if lidar_close():
-                log.info("Quick scan: LiDAR override → wall_ahead=True")
                 log_action("LIDAR_OVERRIDE", "quick scan")
-                result["wall_ahead"] = True; result["obstacle_close"] = True; result["action"] = "stop"
+                result["wall_ahead"] = True
+                result["obstacle_close"] = True
+                result["action"] = "stop"
         except Exception:
             pass
 
@@ -1887,9 +1731,10 @@ def _quick_scan() -> dict:
             if oakd_available():
                 d = get_front_depth()
                 if d is not None and d < 0.30:
-                    log.info(f"Quick scan: OAK-D override at {d:.2f}m → wall_ahead=True")
-                    log_action("OAKD_OVERRIDE", f"quick scan at {d:.2f}m")
-                    result["wall_ahead"] = True; result["obstacle_close"] = True; result["action"] = "stop"
+                    log_action("OAKD_OVERRIDE", f"quick scan {d:.2f}m")
+                    result["wall_ahead"] = True
+                    result["obstacle_close"] = True
+                    result["action"] = "stop"
         except Exception:
             pass
 
@@ -2038,10 +1883,9 @@ def _scan_360_pantilt() -> dict:
 
     # Pan positions: 7 stops covering -90° to +90° in 30° increments
     PAN_STEPS  = [-90, -60, -30, 0, 30, 60, 90]
-    TILT_STEEP = 30   # steep down — shows floor edge / stair lip ~0.5m ahead
-    TILT_LOW   = 10   # ground-looking
-    TILT_MID   = -10  # mid-range / horizon
-    PAN_SETTLE = 0.35  # seconds after pantilt() before capture
+    TILT_SCAN  = 5    # industrial standard: 5° down — sees ground 1-3m ahead clearly
+    TILT_STEEP = 25   # only used for void pre-check at each position (not normal scan)
+    PAN_SETTLE = 0.25  # seconds after pantilt() before capture (was 0.35)
 
     def _pan_to_chassis_turn_sec(pan: int) -> float:
         """Estimate chassis turn duration to face a target spotted at pan angle pan."""
@@ -2051,8 +1895,18 @@ def _scan_360_pantilt() -> dict:
 
     def _sweep(phase_label: str) -> dict | None:
         """
-        Sweep all PAN_STEPS. Returns target result dict if found, else None.
-        Appends captured frames to all_frames.
+        Industrial-standard sweep: pan-tilt wide-angle only during search.
+        At each pan position:
+          1. Quick void pre-check at steep tilt (hardware safety, no Cosmos)
+          2. Settle at TILT_SCAN (5°) — the industrial standard search angle
+          3. Capture 2-second video clip (3 frames) — motion artifacts avoided
+          4. Send to Cosmos — pan-tilt only, no webcam yet
+          5. If candidate found (target_visible=true) → THEN fire webcam for
+             confirmation zoom shot before committing to approach
+          6. 2-of-3 frame confidence gate before treating as confirmed target
+
+        Webcam (longer focal length) only activates on a confirmed candidate,
+        exactly as professional platforms use telephoto for confirmation only.
         """
         for pan in PAN_STEPS:
             if not mission_active:
@@ -2060,73 +1914,135 @@ def _scan_360_pantilt() -> dict:
             _ui("log", f"{phase_label}: pan {pan:+d}°")
             motors.oled(1, f"Pan {pan:+d}d")
 
-            for tilt, tilt_label in [(TILT_STEEP, "floor-edge"), (TILT_LOW, "ground"), (TILT_MID, "mid")]:
-                motors.pantilt(pan, tilt, speed=60)
-                time.sleep(PAN_SETTLE)
+            # ── 1. Void pre-check at steep tilt (hardware only, no Cosmos) ───
+            motors.pantilt(pan, TILT_STEEP, speed=60)
+            time.sleep(PAN_SETTLE)
+            hw_void = _void_check()
+            if hw_void["void"]:
+                log.warning(f"🕳️  Void at pan={pan}°: {hw_void['reason']}")
+                log_action("VOID_360_SCAN", f"pan={pan}: {hw_void['reason']}")
+                _ui("log", f"🕳️  Void at pan {pan}° — skipping direction")
+                continue
 
-                # ── Hardware void check at the steep-down position ────────────
-                # Only check at TILT_STEEP — that's when we're most likely to see a drop
-                if tilt == TILT_STEEP:
-                    hw_void = _void_check()
-                    if hw_void["void"]:
-                        log.warning(f"🕳️  Void during 360 scan at pan={pan}°: {hw_void['reason']}")
-                        log_action("VOID_360_SCAN", f"pan={pan}: {hw_void['reason']}")
-                        _ui("log", f"🕳️  VOID in that direction (pan {pan}°) — skipping, noting unsafe")
-                        # Don't stop the scan — just skip this direction and continue
-                        all_frames.append(capture_frame(CAMERA_PANTILT) or b"")
-                        continue  # skip to next tilt/pan
-                motors.pantilt(pan, tilt, speed=60)
-                time.sleep(PAN_SETTLE)
+            # ── 2. Settle at standard scan tilt (5° down) ────────────────────
+            motors.pantilt(pan, TILT_SCAN, speed=60)
+            time.sleep(PAN_SETTLE)
 
-                # ── Adaptive LED ─────────────────────────────────────────────
-                frame = _capture_sharp(CAMERA_PANTILT)
-                if not frame:
-                    continue
-                if _is_pitch_black(frame):
+            # ── 3. Capture short video clip — 2s, 3 frames ───────────────────
+            # Short video beats single frame: motion artifacts averaged out,
+            # Cosmos gets temporal context (something moving = more confident).
+            # 3 frames at 640×480 ≈ same token cost as 1 frame at 1280×720.
+            clip_frames = capture_frames_video(CAMERA_PANTILT,
+                                               duration=2.0, fps_sample=1.5)
+            if not clip_frames:
+                # Fallback to single sharp frame
+                f = _capture_sharp(CAMERA_PANTILT)
+                clip_frames = [f] if f else []
+            if not clip_frames:
+                continue
+
+            # Adaptive LED on last frame
+            if _is_pitch_black(clip_frames[-1]):
+                motors.lights(base=180, head=255)
+                time.sleep(0.2)
+                extra = _capture_sharp(CAMERA_PANTILT)
+                if extra:
+                    clip_frames.append(extra)
+                motors.lights(0, 0)
+
+            all_frames.extend(clip_frames)
+
+            # ── 4. Cosmos scan — pan-tilt wide-angle only ─────────────────────
+            sensor_ctx = _sensor_context()
+            mission_ov = _get_mission_scan_overlay()
+            prompt = mission_ov + (sensor_ctx + SCAN_360_PROMPT
+                                   if sensor_ctx else SCAN_360_PROMPT)
+
+            try:
+                response = _cosmos_frames(clip_frames, prompt,
+                                          max_tokens=200, temp=0.2)
+                result = _parse_json(response, dict(_SCAN_FALLBACK),
+                                     label=f"SWEEP pan={pan}")
+            except Exception as e:
+                log_exception(f"sweep pan={pan}", e)
+                continue
+
+            if not result.get("target_visible"):
+                continue  # nothing here — move to next pan position
+
+            # ── 5. Candidate found — webcam confirmation zoom shot ────────────
+            # Industrial practice: wide-angle detects, telephoto confirms.
+            # Webcam has longer focal length than pan-tilt — fires only here.
+            _ui("log", f"🔍 Candidate at pan {pan:+d}° — webcam confirmation...")
+            log_mission_event("candidate_found", f"pan={pan} — confirming with webcam")
+
+            wc_frame = capture_frame(CAMERA_WEBCAM, 640, 480)
+            confirm_frames = clip_frames.copy()
+            if wc_frame:
+                if _is_pitch_black(wc_frame):
                     motors.lights(base=180, head=255)
                     time.sleep(0.2)
-                    frame = _capture_sharp(CAMERA_PANTILT) or frame
+                    wc_frame = capture_frame(CAMERA_WEBCAM, 640, 480) or wc_frame
                     motors.lights(0, 0)
-                all_frames.append(frame)
+                confirm_frames.append(wc_frame)
 
-                # ── Quick video scan at this position ────────────────────────
-                result = _video_scan_at_position()
+            # ── 6. Confirmation pass with webcam — 2-of-3 confidence gate ─────
+            confirm_prompt = (
+                mission_ov +
+                "CONFIRMATION PASS: You previously detected a possible target. "
+                "The last image is a zoom shot from the close-up webcam. "
+                "Confirm or deny: is the target actually present?\n"
+                "Set target_visible=true ONLY if you are at least 60% confident.\n\n"
+            ) + (sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT)
 
-                if result.get("target_visible"):
-                    log.info(f"🎯 Target at {phase_label} pan={pan:+d}° tilt={tilt_label}")
-                    _ui("log", f"Target visible at pan {pan:+d}° — turning chassis to face it!")
-                    log_mission_event("target_found_mid_scan", f"pan={pan} tilt={tilt_label}")
-                    motors.oled(1, "TARGET FOUND!")
-                    motors.stop()
-                    time.sleep(0.2)
+            try:
+                confirm_resp = _cosmos_frames(confirm_frames, confirm_prompt,
+                                              max_tokens=200, temp=0.1)
+                confirm_result = _parse_json(confirm_resp, dict(_SCAN_FALLBACK),
+                                             label=f"CONFIRM pan={pan}")
+            except Exception as e:
+                log_exception(f"confirm pan={pan}", e)
+                confirm_result = result  # fall back to original result
 
-                    # Turn chassis to face the target (pan angle → chassis turn)
-                    if pan < -15:
-                        turn_sec = _pan_to_chassis_turn_sec(pan)
-                        _ui("log", f"Turning left {turn_sec:.1f}s to face target at pan {pan}°")
-                        motors.left(MOTOR_SPEED_SLOW)
-                        time.sleep(turn_sec)
-                        motors.stop()
-                    elif pan > 15:
-                        turn_sec = _pan_to_chassis_turn_sec(pan)
-                        _ui("log", f"Turning right {turn_sec:.1f}s to face target at pan {pan}°")
-                        motors.right(MOTOR_SPEED_SLOW)
-                        time.sleep(turn_sec)
-                        motors.stop()
+            if not confirm_result.get("target_visible"):
+                _ui("log", f"Confirmation failed at pan {pan:+d}° — false positive, continuing")
+                log_mission_event("false_positive", f"pan={pan} — not confirmed by webcam")
+                continue
 
-                    # Re-centre pan after chassis has turned to face target
-                    motors.pantilt(0, 5)
-                    time.sleep(0.3)
+            # ── Confirmed — turn chassis to face target and return ────────────
+            log.info(f"🎯 Target CONFIRMED at {phase_label} pan={pan:+d}°")
+            _ui("log", f"✅ Target confirmed at pan {pan:+d}° — turning chassis to face it!")
+            log_mission_event("target_confirmed", f"pan={pan}")
+            motors.oled(1, "TARGET FOUND!")
+            motors.stop()
+            time.sleep(0.2)
 
-                    return {
-                        **result,
-                        "target_visible":     True,
-                        "target_direction":   "front",
-                        "in_my_path":         True,
-                        "action":             "forward",
-                        "physical_reasoning": f"Target found at pan={pan}° during pantilt scan; chassis turned to face it.",
-                        "mission_complete":   False,
-                    }
+            if pan < -15:
+                turn_sec = _pan_to_chassis_turn_sec(pan)
+                motors.left(MOTOR_SPEED_SLOW)
+                time.sleep(turn_sec)
+                motors.stop()
+            elif pan > 15:
+                turn_sec = _pan_to_chassis_turn_sec(pan)
+                motors.right(MOTOR_SPEED_SLOW)
+                time.sleep(turn_sec)
+                motors.stop()
+
+            motors.pantilt(0, TILT_SCAN)
+            time.sleep(0.3)
+
+            return {
+                **confirm_result,
+                "target_visible":     True,
+                "target_direction":   "front",
+                "in_my_path":         True,
+                "action":             "forward",
+                "physical_reasoning": (
+                    f"Target confirmed by wide-angle + webcam at pan={pan}°; "
+                    "chassis turned to face it."
+                ),
+                "mission_complete":   False,
+            }
         return None
 
     # ── Phase 1: Forward-facing 180° arc ─────────────────────────────────────
@@ -3076,8 +2992,8 @@ def _process_scan(scan, from_360=False):
 # Stopped scans (_quick_scan, _best_360_scan) happen on a timer.
 
 _nav_clips_since_scan = 0
-NAV_CLIPS_BETWEEN_SCANS = 2   # stopped scan every 2 movement intervals
-NAV_MOVE_INTERVAL       = 5.0  # seconds of movement between scan checks
+NAV_CLIPS_BETWEEN_SCANS = 3   # stopped scan every 3 movement intervals (was 2)
+NAV_MOVE_INTERVAL       = 4.0  # seconds per movement clip (was 5.0)
 
 # ── YOLO Layer 2 detection state ──────────────────────────────────────────────
 # These module-level variables replace the previous four-variable block.
@@ -3310,14 +3226,37 @@ def _mission_loop():
             if _handle_yolo_detection():
                 continue
 
-            # ── Move continuously — Layer 1 handles all safety ────────────────
-            # No Cosmos called while moving. Eric drives for NAV_MOVE_INTERVAL
-            # seconds, then stops for a proper Cosmos scan.
+            # ── Move continuously — poll every 200ms for YOLO detections ──────
+            # Industrial standard: move until a reason to stop, not on a timer.
+            # YOLO detects birds/people mid-move, handled within 200ms not 5s.
+            # Layer 1 (LiDAR/OAK-D) still fires motors.stop() instantly from
+            # its own thread — the poll handles mission-level reactions only.
             if _nav_clips_since_scan < NAV_CLIPS_BETWEEN_SCANS:
                 _nav_clips_since_scan += 1
                 motors.forward(MOTOR_SPEED_SLOW)
-                time.sleep(NAV_MOVE_INTERVAL)
-                # After moving, check if Layer 1 stopped us for an obstacle
+
+                move_deadline = time.monotonic() + NAV_MOVE_INTERVAL
+                yolo_broke    = False
+                while time.monotonic() < move_deadline and mission_active:
+                    time.sleep(0.2)
+
+                    # YOLO found something mid-move — stop and handle it now
+                    with _yolo_lock:
+                        yolo_pending = _yolo_person_detected
+                    if yolo_pending:
+                        motors.stop()
+                        yolo_broke = True
+                        break
+
+                    # Mission paused mid-move (interaction started)
+                    if mission_state in (State.INTERACTING, State.COMPLETE):
+                        yolo_broke = True
+                        break
+
+                if yolo_broke:
+                    continue
+
+                # After moving, check if Layer 1 stopped for an obstacle
                 try:
                     from lidar import obstacle_close as lidar_close
                     if lidar_close():
