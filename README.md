@@ -1091,6 +1091,32 @@ sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
 ---
+Project Status
+ModuleStatusNotesCosmos Reason 2 via vLLM✅ Working5–9s per vision call, ~40–50 tok/s text, ~16–17 tok/s imageMotor control (UGV Beast ESP32)✅ WorkingSerial UART, JSON protocol, byte-by-byte send, simulation fallbackPan-tilt 360° scan✅ Working7 pan × 3 tilt × 2 phases, async Cosmos call, blur rejectionTTS (Piper danny-low)✅ WorkingCPU only, zero VRAM, non-blocking queue, gTTS fallbackAlarm system (alarm.py)✅ Working4 alarm types, LED strobe, pygame tones, TTS prefixStructured logger (logger.py)✅ WorkingActivity buffer + AI JSONL + mission JSONLMission YAML engine✅ Working13 missions, multi-step parser, alarm flags, photo on find3-layer avoidance (avoidance.py)✅ WorkingBackup → arc scan → Cosmos escape directorVoid / drop detection✅ WorkingOAK-D floor-drop + LiDAR return sparsity + Cosmos visualTerrain-based speed control✅ Working57-keyword map, auto-adjusts motor speed per scan resultEye-contact gate✅ WorkingCosmos single-frame check before every greetingBackground camera readers✅ WorkingDaemon threads per camera, prevents V4L2 buffer stall during inferenceDigital zoom / multi-zoom scan✅ Workingcrop + upscale, 1 wide + 4 cropped in one Cosmos callGradio cockpit GUI✅ WorkingDual cameras, telemetry, manual override, character commsD500 LiDAR safety monitor✅ WorkingRequires ROS2 Humble; graceful fallback if not runningOAK-D Lite depth perception✅ WorkingDepthAI 3.x pipeline; graceful fallback if not connectedROS2 Nav2 integration⚠️ OptionalWired up with fallback to direct motor; not required for demoMulti-robot coordination❌ Not builtERIC-2 roadmap itemThermal / gas sensors❌ Not builtERIC-2 roadmap — FLIR Lepton + MQ-2/MQ-7Two-way audio relay❌ Not builtERIC-2 roadmap item
+Built: Feb 20 – Mar 5, 2026 (13 days) · Solo developer · No CS credentials
+
+Challenges
+These are real problems hit during the build — not theoretical.
+Cosmos inference blocks everything
+The single biggest architectural problem. Cosmos takes 5–9 seconds per vision call. During that time, Python is blocked — nobody reads from the cameras, the GUI freezes, motor commands queue up. Solved with two changes: (1) a ThreadPoolExecutor with 2 workers so nav checks and 360° scan analysis can overlap, and (2) persistent background _CameraReader daemon threads per camera that drain the V4L2 buffer continuously regardless of what the main thread is doing. Without the camera readers, V4L2 would stall after ~1 second of no reads and produce a stream of select() timeout errors during every Cosmos call.
+V4L2 camera stalls on JetPack 6.2
+cv2.VideoCapture on Jetson with V4L2 fills its kernel buffer when nobody reads. The fix is one daemon thread per camera in a tight cap.read() loop, storing the latest frame in a 1-slot buffer. capture_frame() just grabs from the buffer — it never touches the camera directly. GStreamer pipeline (v4l2src io-mode=2, appsink drop=1 max-buffers=1) is tried first as it handles this better natively.
+Void detection was backwards
+The original LiDAR void check treated 999m (no return) as clear — safe to move forward. This is wrong. The D500 scans horizontally at ~20cm height. At the top of a staircase the laser beam falls through open air and returns nothing. Zero returns means floor is gone. The fix: count valid returns in the front arc — if fewer than 15% of beams return a valid distance, the floor ahead is flagged as void. The OAK-D depth check looks for the same signature: a sudden drop in the bottom strip of the frame (y=0.85) and fewer than 5% valid depth pixels.
+Motor direction is inverted on UGV Beast
+The Waveshare UGV Beast ESP32 wires motors such that negative speed = forward. This is not documented clearly. Added a correction layer in motors.py so all callers use natural semantics (forward(), backward()) while the underlying JSON gets the sign flip applied transparently.
+UART byte corruption on JetPack 6.2
+Serial commands sent as whole strings occasionally corrupted at the ESP32 end on JetPack 6.2 — likely a DMA buffer issue. Fixed by sending every command byte-by-byte with a 1ms inter-byte delay. Slow but reliable.
+Pan-tilt 360° vs full chassis rotation
+The original 360° scan rotated the full chassis in 8 × 45° steps — slow (45–90 seconds), significant drift, and the tracked chassis doesn't turn precisely in small increments. Replaced with a pan-tilt head sweep across 7 positions at 3 tilt angles, with only one 180° chassis turn to cover the rear hemisphere. Faster (15–25 seconds), more frames (up to 42 vs 16), and chassis drift is much smaller with only one turn.
+Wide-angle camera loses small objects
+The pan-tilt camera is wide-angle — Lego figures and small objects are only a few pixels wide in a 640×480 frame. Cosmos misidentifies or misses them at this resolution. Solved with multi_zoom_scan() — one wide frame for context plus 4 digitally cropped and upscaled horizontal strips in the same Cosmos call. Cosmos gets both the scene layout and the magnified detail simultaneously.
+Cosmos JSON output is inconsistent
+Cosmos Reason 2 does not always output clean JSON despite explicit prompting. Sometimes it wraps the response in markdown code fences, sometimes it adds explanation text before or after the JSON block, sometimes it returns a JSON array instead of an object, sometimes it returns multiple JSON objects. _parse_json() in mission.py handles all these cases: strips fences, finds the first { and last }, handles array-wrapped single objects, and falls back gracefully to a safe default rather than crashing the mission loop.
+TTS blocks motor control
+Piper TTS is synchronous — feed(text).play() blocks until audio finishes. During a 3–5 second TTS playback the mission loop stalls. Solved with a dedicated background TTS worker thread and a 1-slot queue. eric_say() clears stale items and puts the new text in the queue — it returns instantly. The worker thread handles the blocking call in the background.
+Alarm tones need no internet and no audio files
+The robot operates in areas with no network. Importing pre-recorded alarm sounds was ruled out (file management overhead, format issues on some Jetson audio configs). All alarm tones (rising siren, triple beep, staccato burst, gentle pulse) are generated mathematically at runtime using struct.pack to build raw PCM waveforms at 22050 Hz and played via pygame. Zero external files, works offline everywhere.
 
 ## Built by
 
