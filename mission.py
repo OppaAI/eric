@@ -2402,69 +2402,6 @@ def _face_direction(direction: str):
 
 
 # ─── Obstacle Avoidance ───────────────────────────────────────────────────────
-# Full avoidance logic (back up → LiDAR arc scan → Cosmos reason → turn → verify)
-# lives in avoidance.py. This is just a thin shim so existing call sites work.
-
-def _avoid_obstacle(wall_ahead: bool, small_obstacle: bool) -> bool:
-    """
-    Delegate to avoidance.py's smart pipeline:
-      1. Instant backup
-      2. LiDAR full-arc scan → pick clearest direction
-      3. Cosmos Reason 2 (camera + sensor data) → refine direction + turn_sec
-      4. Execute turn → verify path clear → retry or force 360
-
-    Returns True if a full 360° scan should be forced.
-    """
-    try:
-        from avoidance import avoid_obstacle
-        return avoid_obstacle(wall_ahead=wall_ahead, small_obstacle=small_obstacle)
-    except ImportError:
-        log.error("avoidance.py not found — using legacy inline avoidance")
-        return _avoid_obstacle_legacy(wall_ahead, small_obstacle)
-
-
-def _avoid_obstacle_legacy(wall_ahead: bool, small_obstacle: bool) -> bool:
-    """
-    Fallback if avoidance.py is missing. Mirrors original behaviour.
-    """
-    global _avoid_attempts, mission_state
-    _avoid_attempts += 1
-    mission_state = State.AVOIDING
-    _ui("status", "AVOIDING")
-
-    if wall_ahead:
-        _ui("log", f"Wall — attempt {_avoid_attempts}")
-        motors.oled(1, "Wall! Back up...")
-        motors.stop(); time.sleep(0.3)
-        motors.backward(MOTOR_SPEED_SLOW); time.sleep(1.5)
-        motors.stop(); time.sleep(0.3)
-        turn_sec = min(1.8 + (_avoid_attempts * 0.4), 3.5)
-        direction = "right" if _avoid_attempts % 2 == 1 else "left"
-        _turn_nav2_or_direct(direction, turn_sec)
-        motors.stop(); time.sleep(0.5)
-        if _avoid_attempts >= MAX_AVOID_ATTEMPTS:
-            _avoid_attempts = 0
-            eric_say("Too many obstacles. Let me scan the full area.")
-            return True
-        rescan = _quick_scan()
-        if rescan.get("wall_ahead") or rescan.get("obstacle_close"):
-            return _avoid_obstacle_legacy(wall_ahead=True, small_obstacle=False)
-    elif small_obstacle:
-        _ui("log", "Small obstacle — stepping around")
-        motors.oled(1, "Step around...")
-        motors.stop(); time.sleep(0.2)
-        motors.right(MOTOR_SPEED_SLOW); time.sleep(1.1)
-        motors.stop(); time.sleep(0.2)
-        motors.forward(MOTOR_SPEED_SLOW); time.sleep(1.2)
-        motors.stop(); time.sleep(0.2)
-        motors.left(MOTOR_SPEED_SLOW);   time.sleep(1.1)
-        motors.stop(); time.sleep(0.4)
-        rescan = _quick_scan()
-        if rescan.get("wall_ahead") or rescan.get("obstacle_close"):
-            return _avoid_obstacle_legacy(wall_ahead=True, small_obstacle=False)
-    return False
-
-
 # ─── Mission Complete ─────────────────────────────────────────────────────────
 
 def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
@@ -2959,7 +2896,8 @@ def _approach_target():
         if check.get("wall_ahead") or check.get("obstacle_close"):
             _ui("log", f"Obstacle during approach — avoiding (obj={obj})")
             log_action("AVOID_DURING_APPROACH", f"obj={obj}")
-            force_360 = _avoid_obstacle(
+            from avoidance import avoid_obstacle
+            force_360 = avoid_obstacle(
                 wall_ahead=check.get("wall_ahead", False),
                 small_obstacle=check.get("small_obstacle", False)
             )
@@ -3169,7 +3107,8 @@ def _process_scan(scan, from_360=False):
         if speak_tx: eric_say(speak_tx)
         is_wall = wall_ahead or (obj == "wall")
         log_action("AVOID", f"wall={wall_ahead} obstacle_close={obstacle_close} obj={obj}")
-        force_360 = _avoid_obstacle(wall_ahead=is_wall, small_obstacle=small_obs)
+        from avoidance import avoid_obstacle
+        force_360 = avoid_obstacle(wall_ahead=is_wall, small_obstacle=small_obs)
         if force_360:
             _scans_since_360 = SCANS_BEFORE_360
         else:
@@ -3178,7 +3117,8 @@ def _process_scan(scan, from_360=False):
         return
 
     if small_obs and not target_visible:
-        _avoid_obstacle(wall_ahead=False, small_obstacle=True)
+        from avoidance import avoid_obstacle
+        avoid_obstacle(wall_ahead=False, small_obstacle=True)
         motors.forward(MOTOR_SPEED_SLOW)
 
     if not wall_ahead and not obstacle_close and not small_obs:
@@ -3325,7 +3265,8 @@ def _process_scan(scan, from_360=False):
         log_action("IMPASSABLE_TERRAIN", terrain)
         motors.stop()
         eric_say(f"I see {terrain} ahead. I cannot cross that. Finding another way.")
-        force_360 = _avoid_obstacle(wall_ahead=True, small_obstacle=False)
+        from avoidance import avoid_obstacle
+        force_360 = avoid_obstacle(wall_ahead=True, small_obstacle=False)
         if force_360:
             _scans_since_360 = SCANS_BEFORE_360
         else:
@@ -3793,7 +3734,8 @@ def _mission_loop():
                     if lidar_close():
                         _ui("log", "LiDAR: obstacle — avoiding")
                         log_action("LAYER1_OBSTACLE", "lidar triggered avoidance")
-                        force_360 = _avoid_obstacle(wall_ahead=True, small_obstacle=False)
+                        from avoidance import avoid_obstacle
+                        force_360 = avoid_obstacle(wall_ahead=True, small_obstacle=False)
                         if force_360:
                             _scans_since_360 = SCANS_BEFORE_360
                             _nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS
