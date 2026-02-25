@@ -721,13 +721,8 @@ def _sensor_context() -> str:
             elif ls.get("obstacle_near"):
                 lines.append("⚠️  LiDAR caution: obstacle within 0.60m — slow or stop")
 
-            # Void check — sparse returns = floor disappeared
-            void = lidar_void_ahead()
-            if void["void_detected"]:
-                lines.append(
-                    f"🕳️  LIDAR VOID WARNING ({void['confidence']} confidence): "
-                    f"{void['reason']} — STOP, do NOT move forward"
-                )
+            # LiDAR void check removed — D500 is horizontal and unreliable for drops.
+            # OAK-D stereo depth handles floor-drop detection below.
     except Exception:
         pass
 
@@ -743,15 +738,15 @@ def _sensor_context() -> str:
                 elif d < 0.60:
                     lines.append("⚠️  OAK-D: obstacle within caution range (<0.60m) — slow down")
 
-            # Floor-drop check — depth jump at bottom of frame = stairs/cliff
+            # Floor-drop check — HIGH confidence only to avoid false positives
             drop = get_floor_drop()
-            if drop["void_detected"]:
+            if drop["void_detected"] and drop["confidence"] == "high":
                 edge = drop["floor_edge_m"]
                 mid  = drop["floor_mid_m"]
                 edge_str = f"{edge:.1f}m" if edge is not None else "none"
                 mid_str  = f"{mid:.1f}m"  if mid  is not None else "none"
                 lines.append(
-                    f"🕳️  OAK-D FLOOR DROP WARNING ({drop['confidence']} confidence): "
+                    f"🕳️  OAK-D FLOOR DROP WARNING (HIGH confidence): "
                     f"floor at mid={mid_str} but drops to {edge_str} at edge — "
                     f"{drop['reason']} — STOP, do NOT move forward"
                 )
@@ -820,60 +815,36 @@ def _sensor_context() -> str:
 
 def _void_check() -> dict:
     """
-    Central void/drop safety gate. Checks both OAK-D floor-drop and LiDAR
-    return-sparsity before any forward movement.
+    Central void/drop safety gate.
 
-    Called by _move_forward() and _nav_check() BEFORE motors run.
-    Does NOT call Cosmos — purely hardware sensor based for instant reaction.
+    Only OAK-D stereo depth is used — LiDAR is a horizontal 2D scanner and
+    cannot reliably detect floor drops. OAK-D has vertical FOV and sees the
+    floor directly.
+
+    Only HIGH confidence triggers a stop — medium was causing false positives
+    on flat open floors indoors (0.3% return ratio everywhere).
 
     Returns:
       {"void": bool, "confidence": str, "reason": str, "source": str}
     """
-    results = []
-
-    # ── OAK-D floor-drop check ────────────────────────────────────────────
+    # ── OAK-D floor-drop check (HIGH confidence only) ─────────────────────
     try:
         from oakd import get_floor_drop, oakd_available
         if oakd_available():
             drop = get_floor_drop()
-            if drop["void_detected"]:
-                results.append({
+            if drop["void_detected"] and drop["confidence"] == "high":
+                return {
                     "void":       True,
                     "confidence": drop["confidence"],
                     "reason":     drop["reason"],
                     "source":     "OAK-D",
-                })
+                    "sources":    ["OAK-D"],
+                }
     except Exception:
         pass
 
-    # ── LiDAR void check ─────────────────────────────────────────────────
-    try:
-        from lidar import lidar_void_ahead, lidar_available
-        if lidar_available():
-            void = lidar_void_ahead()
-            if void["void_detected"]:
-                results.append({
-                    "void":       True,
-                    "confidence": void["confidence"],
-                    "reason":     void["reason"],
-                    "source":     "LiDAR",
-                })
-    except Exception:
-        pass
-
-    if not results:
-        return {"void": False, "confidence": "low",
-                "reason": "no void signal", "source": "none"}
-
-    # Any sensor seeing a void = stop. Pick the highest-confidence report.
-    best = max(results, key=lambda r: {"high": 2, "medium": 1, "low": 0}[r["confidence"]])
-    return {
-        "void":       True,
-        "confidence": best["confidence"],
-        "reason":     best["reason"],
-        "source":     best["source"],
-        "sources":    [r["source"] for r in results],
-    }
+    return {"void": False, "confidence": "low",
+            "reason": "no void signal", "source": "none"}
 
 
 def _move_forward(duration_sec: float = 2.0, distance_m: float = 1.5):

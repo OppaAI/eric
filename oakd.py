@@ -318,7 +318,7 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
     cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-    cam_rgb.setFps(5)                  # 5 fps — reduce Myriad X load
+    cam_rgb.setFps(5)
 
     nn = pipeline.create(dai.node.SpatialDetectionNetwork)
     nn.setBlobPath(str(YOLO_BLOB_PATH))
@@ -469,29 +469,28 @@ def _safety_check(floor_check_interval: float):
                     "valid (possible glass/white wall) — using available patches"
                 )
             front = samples["min_m"]
-            if front < OAKD_STOP_DIST:
-                motors.stop()
-                log.warning(f"🚧 OAK-D STOP — obstacle at {front:.2f}m "
-                            f"({samples['valid_patches']}/3 patches)")
-            elif front < OAKD_SLOW_DIST:
-                motors.slow()
-                log.info(f"⚠️  OAK-D slow — obstacle at {front:.2f}m "
-                         f"({samples['valid_patches']}/3 patches)")
+            # Check if avoidance turn is in progress — suppress stop if so
+            _avoidance_in_progress = False
+            try:
+                from lidar import _avoidance_active
+                _avoidance_in_progress = _avoidance_active
+            except Exception:
+                pass
+            if not _avoidance_in_progress:
+                if front < OAKD_STOP_DIST:
+                    motors.stop()
+                    log.warning(f"🚧 OAK-D STOP — obstacle at {front:.2f}m "
+                                f"({samples['valid_patches']}/3 patches)")
+                elif front < OAKD_SLOW_DIST:
+                    motors.slow()
+                    log.info(f"⚠️  OAK-D slow — obstacle at {front:.2f}m "
+                             f"({samples['valid_patches']}/3 patches)")
 
         # ── Check 2: floor drop / void ─────────────────────────────────────────
-        now = time.monotonic()
-        if now - _last_floor_check >= floor_check_interval:
-            _last_floor_check = now
-            drop = get_floor_drop()
-            if drop["void_detected"]:
-                conf = drop["confidence"]
-                if conf == "high":
-                    motors.stop()
-                    log.warning(f"🕳️  OAK-D VOID STOP (HIGH) — {drop['reason']}")
-                elif conf == "medium":
-                    motors.stop()
-                    log.warning(f"🕳️  OAK-D VOID STOP (MEDIUM) — {drop['reason']} "
-                                "— may be wide doorway; check if false positive")
+        # DISABLED — OAK-D floor drop generates too many false positives on
+        # flat floors (0.3% return ratio triggers everywhere indoors).
+        # LiDAR void detection handles this instead.
+        pass
 
     except Exception as e:
         log.debug(f"OAK-D safety check error: {e}")
@@ -736,11 +735,11 @@ def get_depth_map() -> dict | None:
 # ─── Floor-drop / void detection ─────────────────────────────────────────────
 
 def get_floor_drop(
-    strip_y_ratio:    float = 0.85,
-    strip_height_px:  int   = 20,
+    strip_y_ratio:    float = 0.90,   # raised — sample closer to bottom edge
+    strip_height_px:  int   = 15,     # narrower strip — less noise
     patch_cols:       int   = 5,
-    normal_max_m:     float = 3.0,
-    drop_threshold_m: float = 1.2,
+    normal_max_m:     float = 5.0,    # raised — large open rooms won't false-trigger
+    drop_threshold_m: float = 2.0,    # raised — need bigger drop to trigger
 ) -> dict:
     """
     Detect floor discontinuity (holes, stairs, cliffs) from stereo depth.
@@ -816,7 +815,7 @@ def get_floor_drop(
     total_edge_pixels = edge_strip.size
     return_ratio      = valid_count / max(total_edge_pixels, 1)
 
-    if return_ratio < 0.05 and total_edge_pixels > 100:
+    if return_ratio < 0.02 and total_edge_pixels > 100:
         void_detected = True
         confidence    = "high"
         reason        = (f"floor edge returns sparse ({return_ratio:.1%}) "

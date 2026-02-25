@@ -491,18 +491,33 @@ def _run_avoidance(wall_ahead: bool, small_obstacle: bool) -> bool:
 # ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def _execute_turn(direction: str, duration_sec: float):
-    """Execute a turn in the given direction for duration_sec seconds."""
-    if direction == "left":
-        motors.left(MOTOR_SPEED_SLOW)
-        time.sleep(duration_sec)
-    elif direction == "right":
-        motors.right(MOTOR_SPEED_SLOW)
-        time.sleep(duration_sec)
-    elif direction == "back":
-        # 180° turn — use double duration on one side
-        motors.right(MOTOR_SPEED_SLOW)
-        time.sleep(duration_sec * 2.0)
-    motors.stop()
+    """Execute a turn in the given direction for duration_sec seconds.
+    Suppresses LiDAR motor.stop() during the turn so it can complete.
+    """
+    try:
+        from lidar import set_avoidance_active
+        set_avoidance_active(True)
+    except Exception:
+        pass
+
+    try:
+        if direction == "left":
+            motors.left(MOTOR_SPEED_SLOW)
+            time.sleep(duration_sec)
+        elif direction == "right":
+            motors.right(MOTOR_SPEED_SLOW)
+            time.sleep(duration_sec)
+        elif direction == "back":
+            # 180° turn — use double duration on one side
+            motors.right(MOTOR_SPEED_SLOW)
+            time.sleep(duration_sec * 2.0)
+        motors.stop()
+    finally:
+        try:
+            from lidar import set_avoidance_active
+            set_avoidance_active(False)
+        except Exception:
+            pass
 
 
 def _path_is_clear(min_clearance: float = 0.50) -> bool:

@@ -77,6 +77,7 @@ _obstacle_near  = False    # within SLOW_DIST
 _void_active    = False    # True when a void/drop was last detected
 _min_distance   = 999.0    # minimum distance in front arc (meters)
 _safety_active  = True     # can be disabled for testing
+_avoidance_active = False  # True while avoidance.py is executing a turn
 
 _node           = None
 _sub            = None
@@ -123,6 +124,18 @@ def set_safety_active(active: bool):
     log.info(f"LiDAR safety: {'ENABLED' if active else 'DISABLED'}")
 
 
+def set_avoidance_active(active: bool):
+    """
+    Call set_avoidance_active(True) before executing a turn in avoidance.py,
+    and set_avoidance_active(False) after. While True, LiDAR still detects
+    obstacles and updates state flags, but will NOT call motors.stop() —
+    so the turn can complete without being interrupted.
+    """
+    global _avoidance_active
+    _avoidance_active = active
+    log.info(f"LiDAR avoidance mode: {'ACTIVE — stop suppressed' if active else 'INACTIVE — stop enabled'}")
+
+
 def get_last_scan():
     """Return the most recent raw LaserScan message (for avoidance.py)."""
     with _lock:
@@ -132,8 +145,8 @@ def get_last_scan():
 # ─── Void / floor-drop detection ─────────────────────────────────────────────
 
 def lidar_void_ahead(
-    min_return_ratio: float = 0.15,  # fraction of arc indices with valid returns
-    front_arc_deg:    int   = 40,    # narrow arc for void (tighter than obstacle arc)
+    min_return_ratio: float = 0.06,  # raised from 0.15 — reduce false positives on flat floors
+    front_arc_deg:    int   = 30,    # narrowed from 40 — tighter arc, less likely to miss floor
 ) -> dict:
     """
     Detect floor voids (holes, staircase tops, cliff edges) using D500 scan.
@@ -458,38 +471,23 @@ def _scan_callback(msg):
                 _obstacle_near  = is_near
                 sa = _safety_active  # read under lock
 
-            if sa:
+            if sa and not _avoidance_active:
                 if is_close:
                     _motors_stop("LIDAR STOP",
                                  f"obstacle at {min_dist:.2f}m")
                 elif is_near:
                     _motors_slow("LiDAR slow",
                                  f"obstacle at {min_dist:.2f}m")
+            elif sa and _avoidance_active and is_close:
+                log.debug(f"LiDAR: obstacle at {min_dist:.2f}m — suppressed during avoidance turn")
 
         # ── 3. Void / floor-drop check ────────────────────────────────────────
-        # Runs on every scan — void_ahead() reuses the msg we just stored.
-        # Only skip if we already stopped for an obstacle (obstacle_close)
-        # since they can't both be true simultaneously in normal operation.
+        # DISABLED — D500 LiDAR is a horizontal 2D scanner and cannot reliably
+        # detect floor drops. Sparse horizontal returns ≠ floor void.
+        # OAK-D stereo depth handles floor-drop detection instead.
+        # lidar_void_ahead() function kept for reference but not called here.
         with _lock:
-            sa2 = _safety_active
-            obs_close = _obstacle_close
-        if sa2 and not obs_close:
-            void = lidar_void_ahead()
-            if void["void_detected"]:
-                conf = void["confidence"]
-                if conf == "high":
-                    _motors_stop("LIDAR VOID STOP (HIGH)",
-                                 void["reason"])
-                    with _lock:
-                        _void_active = True
-                elif conf == "medium":
-                    # Medium confidence: still stop — stairs are fatal.
-                    # Logged at WARNING but labelled MEDIUM so operators know
-                    # it may be a wide doorway or large open space.
-                    _motors_stop("LIDAR VOID STOP (MEDIUM)",
-                                 void["reason"])
-                    with _lock:
-                        _void_active = True
+            _void_active = False
                 # low confidence → no action
             else:
                 with _lock:
