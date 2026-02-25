@@ -450,12 +450,34 @@ def action_status():
 # ─── CSS & layout constants ───────────────────────────────────────────────────
 
 _CSS = """
+@import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
+
 /* ── Global reset ──────────────────────────────────────────────────── */
 body, .gradio-container {
     background: #080b08 !important;
-    font-family: 'Courier New', monospace !important;
+    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
+    background-image:
+        linear-gradient(rgba(45,90,45,0.12) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(45,90,45,0.12) 1px, transparent 1px);
+    background-size: 40px 40px;
 }
 footer { display:none !important; }
+
+/* Subtle scanline */
+body::after {
+    content: '';
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: repeating-linear-gradient(
+        0deg,
+        rgba(0,255,0,0.015) 0px,
+        rgba(0,255,0,0.015) 1px,
+        transparent 1px,
+        transparent 4px
+    );
+    pointer-events: none;
+    z-index: 9999;
+}
 
 /* ── Header ─────────────────────────────────────────────────────────── */
 .eric-header {
@@ -471,13 +493,14 @@ footer { display:none !important; }
     font-weight: bold;
     letter-spacing: 0.2em;
     color: #88d400;
-    font-family: 'Courier New', monospace;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
+    text-shadow: 0 0 10px #88d40055;
 }
 .eric-sub {
     font-size: 0.82em;
     color: #7aaa7a;
     letter-spacing: 0.05em;
-    font-family: 'Courier New', monospace;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
 }
 
 /* ── STOP button — round red, sits beside joystick ──────────────────── */
@@ -492,7 +515,7 @@ footer { display:none !important; }
     font-size: 0.78em !important;
     font-weight: bold !important;
     letter-spacing: 0.15em !important;
-    font-family: 'Courier New', monospace !important;
+    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
     box-shadow: 0 0 18px #cc000066, inset 0 2px 4px #ff666644 !important;
     transition: box-shadow 0.15s, transform 0.1s !important;
     line-height: 1.2 !important;
@@ -513,7 +536,7 @@ footer { display:none !important; }
     border: 1px solid #76b900 !important;
     color: #000 !important;
     letter-spacing: 0.12em !important;
-    font-family: 'Courier New', monospace !important;
+    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
     font-size: 0.95em !important;
     font-weight: bold !important;
 }
@@ -526,7 +549,7 @@ textarea, input[type=text] {
     background: #0d130d !important;
     border: 1px solid #2d5a2d !important;
     color: #d8f0d8 !important;
-    font-family: 'Courier New', monospace !important;
+    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
     font-size: 0.95em !important;
     border-radius: 4px !important;
 }
@@ -541,7 +564,7 @@ label span, .gr-label {
     font-size: 0.85em !important;
     letter-spacing: 0.08em !important;
     text-transform: uppercase !important;
-    font-family: 'Courier New', monospace !important;
+    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
 }
 
 /* ── Eric Says speech panel ──────────────────────────────────────────── */
@@ -565,7 +588,7 @@ label span, .gr-label {
     background: #0d1a0d !important;
     border: 1px solid #2d5a2d !important;
     color: #88d400 !important;
-    font-family: 'Courier New', monospace !important;
+    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
     font-size: 1.1em !important;
     font-weight: bold !important;
     border-radius: 4px !important;
@@ -607,7 +630,7 @@ label span, .gr-label {
     font-weight: bold;
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    font-family: 'Courier New', monospace;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
     margin-bottom: 1px;
     padding-left: 2px;
 }
@@ -619,7 +642,7 @@ label span, .gr-label {
     font-weight: bold;
     letter-spacing: 0.15em;
     text-transform: uppercase;
-    font-family: 'Courier New', monospace;
+    font-family: 'Share Tech Mono', 'Courier New', monospace;
     border-bottom: 1px solid #2d5a2d;
     padding-bottom: 4px;
     margin-bottom: 6px;
@@ -631,11 +654,11 @@ _HEADER_HTML = """
 <div class="eric-header">
     <span class="eric-title">E.R.I.C.</span>
     <span class="eric-sub">
-        EDGE ROBOTICS INNOVATION BY COSMOS &nbsp;·&nbsp;
-        NVIDIA COSMOS COOKOFF 2026 &nbsp;·&nbsp;
-        JETSON ORIN NANO SUPER 8GB &nbsp;·&nbsp;
-        WAVESHARE UGV BEAST &nbsp;·&nbsp;
-        VANCOUVER BC &nbsp;·&nbsp; ~$750 CAD
+        EDGE ROBOTICS INNOVATION BY COSMOS &nbsp;&#x2502;&nbsp;
+        NVIDIA COSMOS COOKOFF 2026 &nbsp;&#x2502;&nbsp;
+        JETSON ORIN NANO SUPER 8GB &nbsp;&#x2502;&nbsp;
+        WAVESHARE UGV BEAST &nbsp;&#x2502;&nbsp;
+        VANCOUVER BC &nbsp;&#x2502;&nbsp; ~$750 CAD
     </span>
 </div>
 """
