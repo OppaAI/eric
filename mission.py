@@ -3325,11 +3325,10 @@ def _mission_loop():
     _register_yolo_callback()
 
     # ── Initial situational awareness sweep ──────────────────────────────────
-    # Pan-tilt sweeps ±60° at start while robot is stationary.
-    # Cosmos reasons over 5 positions to build a spatial picture BEFORE moving.
-    # This is what a cautious professional operator would do:
-    #   "Look around first. Know your environment. Then act."
-    # If a target is spotted immediately, Eric approaches without driving blind.
+    # Chassis turns 60° × 3 steps to cover a 180° forward arc, pan-tilt fixed
+    # at level (0°, 0°) — wide-angle captures the full scene at each stop.
+    # Returns chassis to original heading before proceeding.
+    # Consistent with the main 360 scan which also uses chassis turns.
     _ui("log", "🔍 Initial situational awareness sweep...")
     _ui("status", "INITIAL SWEEP")
     motors.oled(0, "ERIC ACTIVE")
@@ -3339,17 +3338,36 @@ def _mission_loop():
     sweep_frames: list[str] = []
     sweep_found = False
 
-    for pan_angle in [-60, -30, 0, 30, 60]:
+    TURN_60_SEC = TURN_90_SEC * (60 / 90)
+
+    motors.pantilt(0, 0, speed=60)   # level — wide-angle covers the full scene
+    time.sleep(0.3)
+
+    # Capture centre frame first (heading 0°)
+    f = _capture_sharp(CAMERA_PANTILT)
+    if f:
+        sweep_frames.append(f)
+    _ui("log", "Sweep 0° (centre)")
+
+    # Turn left 60°, capture, turn right 120° (past centre), capture, return left 60°
+    # Net result: chassis returns exactly to starting heading (0°)
+    for direction, deg in [("left", 60), ("right", 120), ("left", 60)]:
         if not mission_active:
             break
-        motors.pantilt(pan_angle, 5, speed=60)   # 5° down — standard search angle
-        time.sleep(0.35)
+        turn_sec = TURN_90_SEC * (deg / 90)
+        if direction == "left":
+            motors.left(MOTOR_SPEED_SLOW)
+        else:
+            motors.right(MOTOR_SPEED_SLOW)
+        time.sleep(turn_sec)
+        motors.stop()
+        time.sleep(0.3)
         f = _capture_sharp(CAMERA_PANTILT)
         if f:
             sweep_frames.append(f)
-        _ui("log", f"Sweep {pan_angle:+d}°")
+        _ui("log", f"Sweep {direction} {deg}°")
 
-    motors.pantilt(0, 5)
+    motors.pantilt(0, 0)
 
     if sweep_frames and mission_active:
         sensor_ctx  = _sensor_context()
