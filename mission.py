@@ -102,12 +102,11 @@ class State:
 #   • Thread-safety  — attribute access is atomic; no partial-update windows
 #   • Testability    — reset() gives a clean slate without a module reload
 #   • Debuggability  — repr() dumps all state in one log line
-#   • Readability    — _ms._ms.mission_active is explicit, not a mystery global
+#   • Readability    — _ms.mission_active is explicit, not a mystery global
 #
-# External callers (GUI, etc.) use the backward-compat aliases below _ms, or
-# import _ms directly:
+# External callers (GUI, etc.) import _ms directly:
 #     from mission import _ms
-#     if _ms._ms.mission_active: ...
+#     if _ms.mission_active: ...
 # ─────────────────────────────────────────────────────────────────────────────
 
 @dataclasses.dataclass
@@ -115,9 +114,9 @@ class MissionState:
     """Single source of truth for all mutable mission state."""
 
     # ── Core control ──────────────────────────────────────────────────────────
-    _ms.mission_active:       bool  = False
-    _ms.mission_state:        str   = State.IDLE
-    _ms.conversation_history: list  = dataclasses.field(default_factory=list)
+    mission_active:       bool  = False
+    mission_state:        str   = State.IDLE
+    conversation_history: list  = dataclasses.field(default_factory=list)
 
     # ── Search / avoidance counters ───────────────────────────────────────────
     empty_scans:          int   = 0
@@ -159,7 +158,7 @@ class MissionState:
 
     def reset_for_new_mission(self):
         """Full reset — call at mission start."""
-        self._ms.conversation_history    = []
+        self.conversation_history    = []
         self.mission_find_count      = 0
         self.mission_hazard_log      = []
         self.pending_nav             = None
@@ -174,7 +173,7 @@ class MissionState:
 
     def __repr__(self) -> str:
         return (
-            f"MissionState(active={self._ms.mission_active}, state={self._ms.mission_state}, "
+            f"MissionState(active={self.mission_active}, state={self.mission_state}, "
             f"step={self.current_step_idx}/{len(self.mission_steps)}, "
             f"empty={self.empty_scans}, avoid={self.avoid_attempts}, "
             f"spotted={self.target_spotted_count})"
@@ -190,11 +189,9 @@ _yolo_lock = threading.Lock()
 # ── UI callback registry (infrastructure, not mission state) ──────────────────
 _ui_callbacks: dict = {"eric_says": None, "status": None, "log": None}
 
-# ── Backward-compat aliases so external code can still do: ────────────────────
-#   from mission import _ms.mission_active, _ms.mission_state
-# (These are read-only snapshots — always use _ms directly for writes.)
-_ms.mission_active = _ms._ms.mission_active  # alias
-_ms.mission_state  = _ms._ms.mission_state   # alias
+# ── Backward-compat module-level properties ───────────────────────────────────
+# External code can still read: mission_active, mission_state at module level.
+# Always use _ms.mission_active / _ms.mission_state for reads and writes.
 
 # ── Tuning constants (never mutated at runtime) ──────────────────────────────
 EMPTY_SCAN_LIMIT      = 1   # trigger 360 after just 1 empty scan
@@ -429,7 +426,7 @@ Return ONLY the JSON array. No markdown. No explanation. No extra text.
         log.info(f"Parsed {len(steps)} mission steps: {[s.target for s in steps]}")
         return steps
     except Exception as e:
-        log_exception("_parse_ms.mission_steps", e)
+        log_exception("_parse_mission_steps", e)
         return [MissionStep(step_num=1, target="target", action="find_and_approach")]
 
 
