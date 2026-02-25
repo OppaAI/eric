@@ -62,6 +62,29 @@ announce_location: false
 generate_report:   true
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# SCAN AND BEHAVIOUR STRATEGY
+# ═══════════════════════════════════════════════════════════════
+# scan_strategy: target_hunt  — async frame-per-position, early-exit on find (default)
+#                               Best for: SAR, find missions, security, character missions
+#               video_sweep   — continuous rotation + full panoramic video inference
+#                               Best for: patrol, inspection, nature, terrain survey
+#
+# loop_mission: true  — restart from step 1 after all steps complete (patrol loop)
+#               false — end mission after final step (default)
+#
+# approach_on_detect: true  — YOLO person detected → approach and greet (SAR, find)
+#                    false  — YOLO person detected → stop and observe (security, patrol)
+#
+# detect_distance: metres at which YOLO hands off to Cosmos for interaction
+# ═══════════════════════════════════════════════════════════════
+
+scan_strategy:      video_sweep
+loop_mission:       true
+approach_on_detect: false
+detect_distance:    2.0   # metres
+
 characters:
   - name: "Naturalist Guide"
     hint: "Expert companion who adds scientific context to Eric's discoveries. Enthusiastic, knowledgeable, encourages Eric to look more closely at interesting finds."

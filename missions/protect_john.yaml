@@ -62,6 +62,29 @@ back_away_on_find: false
 generate_report:   true
 
 
+
+# ═══════════════════════════════════════════════════════════════
+# SCAN AND BEHAVIOUR STRATEGY
+# ═══════════════════════════════════════════════════════════════
+# scan_strategy: target_hunt  — async frame-per-position, early-exit on find (default)
+#                               Best for: SAR, find missions, security, character missions
+#               video_sweep   — continuous rotation + full panoramic video inference
+#                               Best for: patrol, inspection, nature, terrain survey
+#
+# loop_mission: true  — restart from step 1 after all steps complete (patrol loop)
+#               false — end mission after final step (default)
+#
+# approach_on_detect: true  — YOLO person detected → approach and greet (SAR, find)
+#                    false  — YOLO person detected → stop and observe (security, patrol)
+#
+# detect_distance: metres at which YOLO hands off to Cosmos for interaction
+# ═══════════════════════════════════════════════════════════════
+
+scan_strategy:      target_hunt
+loop_mission:       false
+approach_on_detect: false
+detect_distance:    1.5   # metres
+
 characters:
   - name: "John Connor"
     hint: "Teenager, initially suspicious and scared. Has been hunted before. Warms up once Eric says the right things. Gives Eric intel on where the T-1000 was last seen."
