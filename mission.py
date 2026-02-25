@@ -189,9 +189,19 @@ _yolo_lock = threading.Lock()
 # ── UI callback registry (infrastructure, not mission state) ──────────────────
 _ui_callbacks: dict = {"eric_says": None, "status": None, "log": None}
 
-# ── Backward-compat module-level properties ───────────────────────────────────
-# External code can still read: mission_active, mission_state at module level.
-# Always use _ms.mission_active / _ms.mission_state for reads and writes.
+# ── Backward-compat module-level accessors ────────────────────────────────────
+# gui.py imports: mission_active, mission_state, conversation_history
+# These are thin functions — gui.py must call them to get live state.
+# The bare-name imports in gui.py line 31 are replaced by _ms references below.
+
+def get_mission_active() -> bool:
+    return _ms.mission_active
+
+def get_mission_state() -> str:
+    return _ms.mission_state
+
+def get_conversation_history() -> list:
+    return _ms.conversation_history
 
 # ── Tuning constants (never mutated at runtime) ──────────────────────────────
 EMPTY_SCAN_LIMIT      = 1   # trigger 360 after just 1 empty scan
