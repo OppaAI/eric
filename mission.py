@@ -204,8 +204,8 @@ def get_conversation_history() -> list:
     return _ms.conversation_history
 
 # ── Tuning constants (never mutated at runtime) ──────────────────────────────
-EMPTY_SCAN_LIMIT      = 1   # trigger 360 after just 1 empty scan
-SCANS_BEFORE_360      = 2   # periodic 360 every 2 quick scans
+EMPTY_SCAN_LIMIT      = 3   # trigger 360 after 3 consecutive empty scans
+SCANS_BEFORE_360      = 6   # periodic 360 every 6 quick scans
 MAX_AVOID_ATTEMPTS    = 3   # force 360 after this many avoid failures
 TARGET_CONFIRM_NEEDED = 1   # only needs 1 positive scan to approach
 
@@ -822,14 +822,10 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
         log.info(f"Auto-correcting target_visible=True (object={result['object']})")
         result["target_visible"] = True
 
-    # ── Consistency fix: action=stop requires an obstacle OR void reason ─────
-    if (result.get("action") == "stop"
-            and not result.get("wall_ahead")
-            and not result.get("obstacle_close")
-            and not result.get("in_my_path")
-            and not result.get("void_ahead")):
-        log.info("Auto-correcting action: stop→forward (no obstacle or void present)")
-        result["action"] = "forward"
+    # ── Note: stop→forward auto-correction removed.
+    # Cosmos saying stop with no explicit obstacle flag is valid —
+    # it may have seen something the sensor fields don't capture.
+    # Hardware sensor overrides in _quick_scan/_nav_check handle false stops.
 
     # Stringify any remaining list/dict in string fields
     for field in ("terrain", "distance", "target_direction",
@@ -2096,234 +2092,232 @@ def _video_scan_at_position() -> dict:
 
 def _scan_360_pantilt() -> dict:
     """
-    Full 360° scan: pan-tilt sweeps from -90° to +90° in 30° steps (7 positions)
-    while chassis stays still, then ONE 180° chassis turn, then sweeps again.
+    360° pan-tilt sweep — async inference pipeline.
 
-    Coverage:
-      Phase 1 — chassis 0°:   pan = -90, -60, -30, 0, +30, +60, +90  (7 stops)
-      Phase 2 — chassis 180°: chassis turns 180°
-      Phase 3 — chassis 180°: pan = -90, -60, -30, 0, +30, +60, +90  (7 stops)
-    = 14 positions × 2 tilts = 28 frames maximum; chassis only rotates once.
+    Design:
+      - Fixed tilt TILT_GROUND (15°) throughout — ground-level focus, no tilt changes
+        during sweep. Tilt only moves for webcam confirmation after a candidate found.
+      - One sharp 320×240 frame per pan position — no video clips, no waiting for
+        a clip to finish recording.
+      - Cosmos called ASYNC immediately after each capture. Pan moves to the next
+        position while inference runs — inference and movement fully overlap.
+      - After all positions captured, collect all async results.
+      - First position returning target_visible=True triggers confirmation:
+          1. Pan-tilt back to the detected angle
+          2. Webcam zoom shot (640×480) for confirmation
+          3. Single confirmation Cosmos call (synchronous — decision point)
+      - No final overview pass — redundant given per-position inference.
 
-    At each pan position: tilt to ground level (TILT_LOW) then mid-range (TILT_MID).
-    If target found mid-scan, chassis is turned to face it and scan returns immediately.
-    One final Cosmos overview pass is run over all collected frames if no target found.
+    Timing (Jetson Orin Nano, Cosmos 2B):
+      Capture:  ~0.05s per frame
+      Pan move: ~0.3s settle
+      Inference: ~4-6s (overlaps with next pan move)
+      Total for 7-position phase: ~3s capture + ~5s final wait = ~8s
+      vs old design: 7 × (1.5s clip + 0.5s tilt + ~5s inference) = ~49s
     """
     _ms.mission_state = State.SCANNING_360
     _ui("status", "360 SCANNING")
     motors.oled(0, "360 Scan")
     motors.stop()
-    time.sleep(0.3)
-    log.info("Starting pan-tilt 360 scan (7×30° steps + 180° chassis turn)")
-    log_mission_event("scan_360_start", "pan-tilt sweep 7×30° + 180° chassis")
+    time.sleep(0.2)
+    log.info("Starting pan-tilt 360 scan — async inference pipeline")
+    log_mission_event("scan_360_start", "async sweep 7×30° + 180° chassis")
 
-    all_frames: list[str] = []
-
-    # Pan positions: 7 stops covering -90° to +90° in 30° increments
-    PAN_STEPS  = [-90, -60, -30, 0, 30, 60, 90]
-    TILT_SCAN  = 5    # standard search angle — sees objects at 1-3m
-    TILT_LOW   = 20   # lower angle — sees ground/objects at 0.5-1.5m (posts, low obstacles)
-    TILT_STEEP = 25   # only used for void pre-check
-    PAN_SETTLE = 0.25  # seconds after pantilt() before capture
+    # ── Constants ─────────────────────────────────────────────────────────────
+    PAN_STEPS    = [-90, -60, -30, 0, 30, 60, 90]
+    TILT_GROUND  = 15   # fixed ground-level tilt throughout sweep — no tilt changes
+    PAN_SETTLE   = 0.25 # seconds after pantilt() before capture
 
     def _pan_to_chassis_turn_sec(pan: int) -> float:
-        """Estimate chassis turn duration to face a target spotted at pan angle pan."""
-        # At ±90° the robot needs a full 90° chassis turn to face forward.
-        # We already know TURN_90_SEC for 90° at MOTOR_SPEED_SLOW.
         return abs(pan) / 90.0 * TURN_90_SEC
 
-    def _sweep(phase_label: str) -> dict | None:
+    def _confirm_candidate(pan: int, scan_frame: str,
+                           sensor_ctx: str, mission_ov: str) -> dict | None:
         """
-        Industrial-standard sweep: pan-tilt wide-angle only during search.
-        At each pan position:
-          1. Quick void pre-check at steep tilt (hardware safety, no Cosmos)
-          2. Settle at TILT_SCAN (5°) — the industrial standard search angle
-          3. Capture 2-second video clip (3 frames) — motion artifacts avoided
-          4. Send to Cosmos — pan-tilt only, no webcam yet
-          5. If candidate found (target_visible=true) → THEN fire webcam for
-             confirmation zoom shot before committing to approach
-          6. 2-of-3 frame confidence gate before treating as confirmed target
+        Candidate found at pan angle. Tilt pan-tilt to exact detected angle,
+        capture webcam zoom shot, run synchronous confirmation call.
+        Returns confirmed result dict or None if false positive.
+        """
+        _ui("log", f"🔍 Candidate at pan {pan:+d}° — aiming & webcam confirmation...")
+        log_mission_event("candidate_found", f"pan={pan}")
 
-        Webcam (longer focal length) only activates on a confirmed candidate,
-        exactly as professional platforms use telephoto for confirmation only.
+        # Pan-tilt to detected angle for webcam alignment
+        motors.pantilt(pan, TILT_GROUND, speed=80)
+        time.sleep(PAN_SETTLE + 0.1)
+
+        wc_frame = capture_frame(CAMERA_WEBCAM, 640, 480)
+        if wc_frame and _is_pitch_black(wc_frame):
+            motors.lights(base=180, head=255)
+            time.sleep(0.2)
+            wc_frame = capture_frame(CAMERA_WEBCAM, 640, 480) or wc_frame
+            motors.lights(0, 0)
+
+        confirm_frames = [scan_frame]
+        if wc_frame:
+            confirm_frames.append(wc_frame)
+
+        confirm_prompt = (
+            mission_ov +
+            "CONFIRMATION: Wide-angle scan flagged a possible target at this bearing. "
+            "The second image is a webcam zoom shot aimed at that exact angle. "
+            "Confirm or deny: is the mission target actually present? "
+            "Set target_visible=true ONLY if 60%+ confident. Be conservative.\n\n"
+        ) + (sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT)
+
+        try:
+            resp = _cosmos_frames(confirm_frames, confirm_prompt,
+                                  max_tokens=150, temp=0.1)
+            result = _parse_json(resp, dict(_SCAN_FALLBACK),
+                                 label=f"CONFIRM pan={pan}")
+        except Exception as e:
+            log_exception(f"confirm pan={pan}", e)
+            return None
+
+        if not result.get("target_visible"):
+            _ui("log", f"❌ False positive at pan {pan:+d}° — continuing")
+            log_mission_event("false_positive", f"pan={pan}")
+            return None
+
+        # Confirmed — turn chassis to face target
+        log.info(f"🎯 Target CONFIRMED at pan={pan:+d}°")
+        _ui("log", f"✅ Target confirmed at pan {pan:+d}° — turning chassis")
+        log_mission_event("target_confirmed", f"pan={pan}")
+        motors.oled(1, "TARGET FOUND!")
+        motors.stop()
+        time.sleep(0.15)
+
+        if pan < -15:
+            motors.left(MOTOR_SPEED_SLOW)
+            time.sleep(_pan_to_chassis_turn_sec(pan))
+            motors.stop()
+        elif pan > 15:
+            motors.right(MOTOR_SPEED_SLOW)
+            time.sleep(_pan_to_chassis_turn_sec(pan))
+            motors.stop()
+
+        motors.pantilt(0, TILT_GROUND)
+        time.sleep(0.2)
+
+        return {
+            **result,
+            "target_visible":     True,
+            "target_direction":   "front",
+            "in_my_path":         True,
+            "action":             "forward",
+            "physical_reasoning": (
+                f"Target confirmed by wide-angle + webcam at pan={pan}°; "
+                "chassis turned to face."
+            ),
+            "mission_complete": False,
+        }
+
+    def _sweep_async(phase_label: str) -> dict | None:
         """
+        Capture all positions first, submit Cosmos async for each,
+        then collect results. Inference and panning fully overlap.
+        """
+        # ── Stage 1: pan through all positions, capture one frame each ────────
+        # Submit async inference immediately after each capture.
+        # Pan-tilt moves to next position while Cosmos thinks about previous one.
+        sensor_ctx  = _sensor_context()
+        mission_ov  = _get_mission_scan_overlay()
+        prompt      = mission_ov + (sensor_ctx + SCAN_360_PROMPT
+                                    if sensor_ctx else SCAN_360_PROMPT)
+
+        captures: list[tuple[int, str]] = []   # (pan_angle, frame_b64)
+        futures:  list[tuple[int, str, object]] = []  # (pan, frame, future)
+
         for pan in PAN_STEPS:
             if not _ms.mission_active:
                 return None
+
             _ui("log", f"{phase_label}: pan {pan:+d}°")
             motors.oled(1, f"Pan {pan:+d}d")
 
-            # ── 1. (Void pre-check removed — too many false positives indoors)
-
-            # ── 2. Settle at standard scan tilt (5° down) ────────────────────
-            motors.pantilt(pan, TILT_SCAN, speed=60)
+            # Move pan-tilt to position (fixed tilt — no tilt change)
+            motors.pantilt(pan, TILT_GROUND, speed=70)
             time.sleep(PAN_SETTLE)
 
-            # ── 3. Capture at standard tilt + low tilt ───────────────────────
-            # Standard tilt: sees targets at 1-3m (people, large objects)
-            # Low tilt: sees ground-level objects at 0.5-1.5m (posts, chair legs)
-            clip_frames = capture_frames_video(CAMERA_PANTILT,
-                                               duration=1.5, fps_sample=1.5)
-            if not clip_frames:
-                f = _capture_sharp(CAMERA_PANTILT)
-                clip_frames = [f] if f else []
-            if not clip_frames:
+            # Single sharp frame — no video clip
+            frame = _capture_sharp(CAMERA_PANTILT)
+            if frame is None:
+                log.warning(f"No frame at pan={pan}° — skipping")
                 continue
 
-            # Add a low-angle frame to catch posts and low obstacles
-            motors.pantilt(pan, TILT_LOW, speed=60)
-            time.sleep(PAN_SETTLE)
-            low_frame = _capture_sharp(CAMERA_PANTILT)
-            if low_frame:
-                clip_frames.append(low_frame)
-
-            # Adaptive LED on last frame
-            if _is_pitch_black(clip_frames[-1]):
+            # Adaptive LED if dark
+            if _is_pitch_black(frame):
                 motors.lights(base=180, head=255)
-                time.sleep(0.2)
-                extra = _capture_sharp(CAMERA_PANTILT)
-                if extra:
-                    clip_frames.append(extra)
+                time.sleep(0.15)
+                frame = _capture_sharp(CAMERA_PANTILT) or frame
                 motors.lights(0, 0)
 
-            all_frames.extend(clip_frames)
+            captures.append((pan, frame))
 
-            # ── 4. Cosmos scan — pan-tilt wide-angle only ─────────────────────
-            sensor_ctx = _sensor_context()
-            mission_ov = _get_mission_scan_overlay()
-            prompt = mission_ov + (sensor_ctx + SCAN_360_PROMPT
-                                   if sensor_ctx else SCAN_360_PROMPT)
+            # Submit async Cosmos immediately — runs while we pan to next position
+            future = _cosmos_frames_async([frame], prompt, max_tokens=150, temp=0.2)
+            futures.append((pan, frame, future))
 
+            log.debug(f"Async Cosmos submitted for pan={pan}°")
+
+        if not futures:
+            return None
+
+        # ── Stage 2: collect results in order, confirm first candidate ────────
+        _ui("log", f"{phase_label}: collecting {len(futures)} inference results...")
+        for pan, frame, future in futures:
+            if not _ms.mission_active:
+                return None
             try:
-                response = _cosmos_frames(clip_frames, prompt,
-                                          max_tokens=200, temp=0.2)
-                result = _parse_json(response, dict(_SCAN_FALLBACK),
-                                     label=f"SWEEP pan={pan}")
+                # Wait for this position's result (most will already be done)
+                response = future.result(timeout=30)
+                result   = _parse_json(response, dict(_SCAN_FALLBACK),
+                                       label=f"SWEEP pan={pan}")
             except Exception as e:
-                log_exception(f"sweep pan={pan}", e)
+                log_exception(f"sweep collect pan={pan}", e)
                 continue
 
             if not result.get("target_visible"):
-                continue  # nothing here — move to next pan position
-
-            # ── 5. Candidate found — webcam confirmation zoom shot ────────────
-            # Industrial practice: wide-angle detects, telephoto confirms.
-            # Webcam has longer focal length than pan-tilt — fires only here.
-            _ui("log", f"🔍 Candidate at pan {pan:+d}° — webcam confirmation...")
-            log_mission_event("candidate_found", f"pan={pan} — confirming with webcam")
-
-            wc_frame = capture_frame(CAMERA_WEBCAM, 640, 480)
-            confirm_frames = clip_frames.copy()
-            if wc_frame:
-                if _is_pitch_black(wc_frame):
-                    motors.lights(base=180, head=255)
-                    time.sleep(0.2)
-                    wc_frame = capture_frame(CAMERA_WEBCAM, 640, 480) or wc_frame
-                    motors.lights(0, 0)
-                confirm_frames.append(wc_frame)
-
-            # ── 6. Confirmation pass with webcam — 2-of-3 confidence gate ─────
-            confirm_prompt = (
-                mission_ov +
-                "CONFIRMATION PASS: You previously detected a possible target. "
-                "The last image is a zoom shot from the close-up webcam. "
-                "Confirm or deny: is the target actually present?\n"
-                "Set target_visible=true ONLY if you are at least 60% confident.\n\n"
-            ) + (sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT)
-
-            try:
-                confirm_resp = _cosmos_frames(confirm_frames, confirm_prompt,
-                                              max_tokens=200, temp=0.1)
-                confirm_result = _parse_json(confirm_resp, dict(_SCAN_FALLBACK),
-                                             label=f"CONFIRM pan={pan}")
-            except Exception as e:
-                log_exception(f"confirm pan={pan}", e)
-                confirm_result = result  # fall back to original result
-
-            if not confirm_result.get("target_visible"):
-                _ui("log", f"Confirmation failed at pan {pan:+d}° — false positive, continuing")
-                log_mission_event("false_positive", f"pan={pan} — not confirmed by webcam")
+                log.debug(f"pan={pan}°: clear")
                 continue
 
-            # ── Confirmed — turn chassis to face target and return ────────────
-            log.info(f"🎯 Target CONFIRMED at {phase_label} pan={pan:+d}°")
-            _ui("log", f"✅ Target confirmed at pan {pan:+d}° — turning chassis to face it!")
-            log_mission_event("target_confirmed", f"pan={pan}")
-            motors.oled(1, "TARGET FOUND!")
-            motors.stop()
-            time.sleep(0.2)
+            # Candidate — confirm with webcam
+            confirmed = _confirm_candidate(pan, frame, sensor_ctx, mission_ov)
+            if confirmed:
+                return confirmed
+            # False positive — continue collecting remaining results
 
-            if pan < -15:
-                turn_sec = _pan_to_chassis_turn_sec(pan)
-                motors.left(MOTOR_SPEED_SLOW)
-                time.sleep(turn_sec)
-                motors.stop()
-            elif pan > 15:
-                turn_sec = _pan_to_chassis_turn_sec(pan)
-                motors.right(MOTOR_SPEED_SLOW)
-                time.sleep(turn_sec)
-                motors.stop()
-
-            motors.pantilt(0, TILT_SCAN)
-            time.sleep(0.3)
-
-            return {
-                **confirm_result,
-                "target_visible":     True,
-                "target_direction":   "front",
-                "in_my_path":         True,
-                "action":             "forward",
-                "physical_reasoning": (
-                    f"Target confirmed by wide-angle + webcam at pan={pan}°; "
-                    "chassis turned to face it."
-                ),
-                "mission_complete":   False,
-            }
         return None
 
-    # ── Phase 1: Forward-facing 180° arc ─────────────────────────────────────
-    found = _sweep("Front arc")
+    # ── Phase 1: Forward 180° arc ─────────────────────────────────────────────
+    found = _sweep_async("Front arc")
     if found:
         return found
 
-    # ── Phase 2: Single 180° chassis turn ────────────────────────────────────
-    _ui("log", "Turning chassis 180° for rear sweep...")
+    if not _ms.mission_active:
+        return dict(_SCAN_FALLBACK)
+
+    # ── Phase 2: Chassis 180° turn ────────────────────────────────────────────
+    _ui("log", "Turning 180° for rear sweep...")
     motors.oled(1, "Turning 180...")
-    motors.pantilt(0, 5)   # centre pan-tilt before chassis turn
-    time.sleep(0.3)
+    motors.pantilt(0, TILT_GROUND)
+    time.sleep(0.2)
     motors.right(MOTOR_SPEED_SLOW)
-    time.sleep(TURN_90_SEC * 2.0)   # 180° ≈ 2× the calibrated 90° time
+    time.sleep(TURN_90_SEC * 2.0)
     motors.stop()
-    time.sleep(0.5)
-    log_action("CHASSIS_180", "rear sweep phase")
+    time.sleep(0.4)
+    log_action("CHASSIS_180", "rear sweep")
 
-    # ── Phase 3: Rear (now forward-facing) 180° arc ───────────────────────────
-    found = _sweep("Rear arc")
+    # ── Phase 3: Rear 180° arc ────────────────────────────────────────────────
+    found = _sweep_async("Rear arc")
     if found:
         return found
 
-    # ── No target found — Cosmos overview of all collected frames ─────────────
-    motors.pantilt(0, 5)
-    _ui("log", f"360 scan done — {len(all_frames)} frames → Cosmos overview")
-    motors.oled(1, "Analyzing...")
-    log_mission_event("scan_360_complete", f"{len(all_frames)} frames, no target found")
-
-    if not all_frames:
-        return dict(_SCAN_FALLBACK)
-
-    sensor_ctx = _sensor_context()
-    mission_ov = _get_mission_scan_overlay()
-    prompt_360 = mission_ov + (sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT)
-
-    try:
-        # Use async future so we can do sensor checks while Cosmos is thinking
-        future = _cosmos_frames_async(all_frames, prompt_360, max_tokens=300, temp=0.2)
-        response = future.result(timeout=90)
-        log_ai(prompt_360[-300:], response, label="360_OVERVIEW")
-        return _parse_json(response, dict(_SCAN_FALLBACK), label="360° PAN-TILT OVERVIEW")
-    except Exception as e:
-        log_exception("_scan_360_pantilt_overview", e)
-        return dict(_SCAN_FALLBACK)
+    # ── No target found ───────────────────────────────────────────────────────
+    motors.pantilt(0, TILT_GROUND)
+    _ui("log", "360 scan complete — no target found")
+    motors.oled(1, "No target")
+    log_mission_event("scan_360_complete", "no target found")
+    return dict(_SCAN_FALLBACK)
 
 
 def _scan_360_smart() -> dict:
