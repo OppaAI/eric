@@ -385,6 +385,8 @@ def _advance_step():
         # Resume searching
         global mission_state, _empty_scans, _avoid_attempts, _scans_since_360, _target_spotted_count
         _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
+        global _nav_clips_since_scan
+        _nav_clips_since_scan = 0
         mission_state = State.SEARCHING
         motors.forward(MOTOR_SPEED_SLOW)
 
@@ -1033,10 +1035,10 @@ def start_mission(briefing: str, mission_name: str = ""):
     the YAML file. Free-text briefings default to no alarm, generic scan.
     """
     global mission_active, mission_state, conversation_history
-    global _empty_scans, _avoid_attempts, _scans_since_360
+    global _empty_scans, _avoid_attempts, _scans_since_360, _target_spotted_count
     global _mission_steps, _current_step_idx
     global _mission_alarm_type, _mission_target_objects, _mission_flags
-    global _mission_find_count, _mission_hazard_log
+    global _mission_find_count, _mission_hazard_log, _nav_clips_since_scan
 
     if mission_active:
         return "Mission already active. Disengage first."
@@ -1045,6 +1047,7 @@ def start_mission(briefing: str, mission_name: str = ""):
 
     conversation_history = []
     _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
+    _nav_clips_since_scan = 0
     _mission_find_count  = 0
     _mission_hazard_log  = []
 
@@ -1204,7 +1207,8 @@ STEP 1 — VOID/DROP CHECK (HIGHEST PRIORITY):
 STEP 2 — OBSTACLE SAFETY: Which direction has the most open space?
 
 STEP 3 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts.
-Set target_visible=true if 30%+ confident. Set target_direction to where you see it.
+Set target_visible=true if 20%+ confident (anything plausible). Set target_direction to where you see it.
+The robot will do a hardware+webcam confirmation pass anyway — do NOT hold back a detection.
 
 STEP 4 — SPEAK: One excited sentence if target found, otherwise null.
 
@@ -1242,7 +1246,8 @@ You are a tracked ground robot. You are stopped. Analyze the frames and sensor d
 RULES (in priority order):
 1. VOID/DROP — stair edge, hole, floor ending → void_ahead=true, action=stop
 2. OBSTACLE — object <60cm ahead OR filling lower frame → obstacle_close=true, action=stop
-3. TARGET — slipper/shoe/person/robot visible anywhere → target_visible=true
+3. TARGET — slipper/shoe/person/robot visible ANYWHERE, even partially, even at an angle,
+   even at the edge of frame → target_visible=true. Err on the side of detection.
 4. Otherwise → action=forward
 
 "speak": one SHORT plain sentence if target found, otherwise null. No backticks. No lists.
@@ -1663,6 +1668,96 @@ def _is_pitch_black(frame_b64: str, threshold: float = 20.0) -> bool:
         return float(img.mean()) < threshold
     except Exception:
         return False
+
+def _approach_scan() -> dict:
+    """
+    Lightweight Cosmos scan used ONLY during _approach_target().
+
+    Differences from _quick_scan():
+      1. NO webcam confirmation pass — target already confirmed at scan time.
+         The second Cosmos call was causing "approach confirms → webcam rejects"
+         false negatives on a 2B model viewing a tilted/partial target.
+      2. Prompt explicitly lowers threshold: "even a partial view counts".
+         The robot is already moving toward a confirmed sighting — it does not
+         need 60% certainty to keep going.
+      3. Always single short clip (1.5 s) — keeps approach loop latency low.
+
+    Hardware void/obstacle checks still run first (same as _quick_scan).
+    """
+    # ── Hardware void pre-check ───────────────────────────────────────────────
+    hw_void = _void_check()
+    if hw_void["void"]:
+        log.warning(f"🕳️  _approach_scan pre-check: void ({hw_void['source']}): {hw_void['reason']}")
+        log_action("VOID_PRECHECK_APPROACH", hw_void["reason"])
+        return {
+            **_SCAN_FALLBACK,
+            "wall_ahead": True, "void_ahead": True, "action": "stop",
+            "physical_reasoning": f"Hardware void pre-check: {hw_void['reason']}"
+        }
+
+    motors.pantilt(0, 5)
+    motors.lights(0, 0)
+    time.sleep(0.25)
+
+    clip_frames = capture_frames_video(CAMERA_PANTILT, duration=1.5, fps_sample=2.0)
+    if not clip_frames:
+        f = _capture_sharp(CAMERA_PANTILT)
+        clip_frames = [f] if f else []
+
+    if not clip_frames:
+        return dict(_SCAN_FALLBACK)
+
+    if _is_pitch_black(clip_frames[-1]):
+        motors.lights(base=180, head=255)
+        time.sleep(0.3)
+        extra = _capture_sharp(CAMERA_PANTILT)
+        if extra:
+            clip_frames.append(extra)
+        motors.lights(0, 0)
+
+    sensor_ctx = _sensor_context()
+    mission_ov = _get_mission_scan_overlay()
+
+    # Approach-specific prompt: lower threshold, remind Cosmos we are closing in
+    approach_note = (
+        "APPROACH MODE: You are driving toward a target you have already spotted. "
+        "Even a partial, angled, or edge view of the target counts as visible. "
+        "Set target_visible=true if there is ANY reasonable chance the target is present.\n\n"
+    )
+    prompt = mission_ov + approach_note + (sensor_ctx + QUICK_SCAN_PROMPT
+                                           if sensor_ctx else QUICK_SCAN_PROMPT)
+
+    try:
+        print(f"\n🎯 APPROACH SCAN — {len(clip_frames)} frames (no webcam confirm)...")
+        response = _cosmos_frames(clip_frames, prompt, max_tokens=200, temp=0.2)
+        result   = _parse_json(response, dict(_SCAN_FALLBACK), label="APPROACH SCAN")
+
+        # ── Sensor hard-gates (same as _quick_scan) ───────────────────────────
+        try:
+            from lidar import obstacle_close as lidar_close
+            if lidar_close():
+                result["wall_ahead"]     = True
+                result["obstacle_close"] = True
+                result["action"]         = "stop"
+        except Exception:
+            pass
+
+        try:
+            from oakd import get_front_depth, oakd_available
+            if oakd_available():
+                d = get_front_depth()
+                if d is not None and d < 0.30:
+                    result["wall_ahead"]     = True
+                    result["obstacle_close"] = True
+                    result["action"]         = "stop"
+        except Exception:
+            pass
+
+        return result
+    except Exception as e:
+        log_exception("_approach_scan", e)
+        return dict(_SCAN_FALLBACK)
+
 
 def _quick_scan() -> dict:
     """
@@ -2684,35 +2779,170 @@ def handle_character_response(character, said):
 
 def _approach_target():
     """
-    Drive toward target in 2-second steps, scanning after each.
-    Uses _move_forward() so Nav2 is used when available.
-    Stops when: close enough, obstacle hit, person seen, or 3 consecutive invisible scans.
-    On arrival, calls _execute_step_action() so multi-step missions advance properly.
+    Industrial-standard approach pipeline.
+
+    Design (Layer 3 — closes on confirmed target):
+    ────────────────────────────────────────────────
+    1. Hardware-first distance gate (OAK-D depth + YOLO position memory):
+       - If OAK-D reports < ARRIVE_DIST_M  → arrived, execute step action.
+       - If YOLO has a fresh reading < ARRIVE_DIST_M  → arrived.
+       These fire before any Cosmos call — zero extra latency.
+
+    2. Move in 1.5-second clips (shortened from 2 s to stay reactive).
+       After each clip, re-check hardware distance first.
+
+    3. Cosmos scan only every APPROACH_SCAN_INTERVAL moves (not every step).
+       This means Cosmos is called ~every 4.5 s not ~every 10 s.
+       The scan uses _approach_scan() — identical to _quick_scan() but:
+         a) No webcam confirmation pass (target already confirmed at scan time).
+         b) Lower confidence threshold hint in prompt ("even partial view").
+
+    4. Flip-flop guard (shared with _process_scan):
+       Uses the global _target_spotted_count so persistence carries across
+       the scan→approach boundary. A single "invisible" scan does NOT abort.
+       APPROACH_INVISIBLE_LIMIT consecutive bad frames → lost target.
+
+    5. Lateral steering via YOLO bearing (hardware) first, Cosmos second.
+       Proportional turn: 0.2 s at ±5°, up to 0.7 s at ±45°.
+
+    6. Pan-tilt vertical tracking — tilts down as Cosmos says "near/close".
+
+    7. Eye-contact gate for person targets (unchanged).
+
+    On arrival: calls _execute_step_action() so multi-step missions advance.
+    On lost target: resets to SEARCHING and resumes forward motion.
     """
-    global mission_state
-    _ui("log", "Approaching target...")
+    global mission_state, _target_spotted_count
+
+    _ui("log", "Approaching target (hardware-first)...")
     motors.oled(1, "Approaching...")
     _ui("status", "APPROACHING")
-    log_mission_event("approach_start", "driving toward target")
-    invisible_count = 0
+    log_mission_event("approach_start", "hardware-first approach pipeline")
 
-    _NEAR_DISTANCES = {"close", "near", "nearby", "very_close", "very close", "right there"}
-    _TARGET_OBJECTS = {"slipper", "shoe", "person", "robot"}
+    _NEAR_DISTANCES     = {"close", "near", "nearby", "very_close", "very close",
+                           "right there"}
+    _TARGET_OBJECTS     = {"slipper", "shoe", "person", "robot"}
+    ARRIVE_DIST_M       = 0.80   # hardware gate: execute step if within this range
+    APPROACH_MOVE_SEC   = 1.5    # shorter clips → more hardware checks per meter
+    APPROACH_SCAN_EVERY = 3      # Cosmos scan every N move clips (was every 1)
+    APPROACH_MAX_MOVES  = 25     # max total move clips (~37.5 s)
+    APPROACH_INVISIBLE_LIMIT = 5 # consecutive Cosmos misses before "lost target"
 
-    for attempt in range(12):       # max ~24s total approach
+    invisible_count   = 0
+    moves_since_scan  = 0
+
+    # ── Seed flip-flop counter so the first bad frame doesn't abort us ────────
+    # We enter _approach_target because _process_scan just confirmed the target.
+    # Make sure _target_spotted_count reflects that so the guard has headroom.
+    if _target_spotted_count < 2:
+        _target_spotted_count = 2
+        log.debug("approach: seeded _target_spotted_count=2 from confirmed entry")
+
+    for attempt in range(APPROACH_MAX_MOVES):
         if not mission_active:
             break
-        _move_forward(duration_sec=2.0, distance_m=0.5)
-        motors.stop()
-        time.sleep(0.4)
-        check = _quick_scan()
-        dist  = str(check.get("distance", "far")).lower()
-        obj   = check.get("object", "unknown")
-        tdir  = str(check.get("target_direction", "front")).lower().strip()
 
-        # ── Obstacle → avoid and continue approach ───────────────────────────
+        # ── Hardware distance gate BEFORE moving ─────────────────────────────
+        # Check OAK-D depth
+        try:
+            from oakd import get_front_depth, oakd_available
+            if oakd_available():
+                hw_dist = get_front_depth()
+                if hw_dist is not None and hw_dist < ARRIVE_DIST_M:
+                    _ui("log", f"✅ OAK-D arrival: {hw_dist:.2f}m — executing step action")
+                    log_mission_event("hw_arrival_oakd", f"{hw_dist:.2f}m")
+                    motors.stop()
+                    motors.pantilt(0, 20)
+                    time.sleep(0.3)
+                    _execute_step_action(None)
+                    return
+        except Exception:
+            pass
+
+        # Check YOLO position memory (hardware depth — more accurate than Cosmos text)
+        try:
+            from oakd import get_last_yolo_position, yolo_available, oakd_available
+            if oakd_available() and yolo_available():
+                step = _current_step()
+                # Map mission step target to YOLO class labels
+                _YOLO_LABEL_MAP = {
+                    "person": ["person"], "robot": ["person"],
+                    "slipper": [], "shoe": [],   # YOLO doesn't detect footwear
+                }
+                target_key = (step.target.lower() if step else "").split()[0]
+                yolo_labels = _YOLO_LABEL_MAP.get(target_key, ["person"])
+                for lbl in yolo_labels:
+                    ypos = get_last_yolo_position(lbl)
+                    if ypos:
+                        age = time.monotonic() - ypos.get("timestamp", 0)
+                        if age < 3.0 and ypos["dist_m"] < ARRIVE_DIST_M:
+                            _ui("log", f"✅ YOLO arrival: {lbl} at {ypos['dist_m']:.2f}m "
+                                       f"({age:.1f}s ago) — executing step action")
+                            log_mission_event("hw_arrival_yolo", f"{lbl} {ypos['dist_m']:.2f}m")
+                            motors.stop()
+                            motors.pantilt(0, 15)
+                            time.sleep(0.3)
+                            _execute_step_action(lbl)
+                            return
+        except Exception:
+            pass
+
+        # ── YOLO bearing-based steering (hardware, before moving) ─────────────
+        try:
+            from oakd import get_last_yolo_position, yolo_available, oakd_available
+            if oakd_available() and yolo_available():
+                ypos = get_last_yolo_position("person")
+                if ypos and (time.monotonic() - ypos.get("timestamp", 0)) < 3.0:
+                    bearing_deg = ypos.get("bearing_deg", 0.0)
+                    if abs(bearing_deg) > 8.0:
+                        turn_sec = max(0.15, min(0.7, abs(bearing_deg) / 45.0 * 0.7))
+                        direction = "left" if bearing_deg < 0 else "right"
+                        _ui("log", f"YOLO steer: {direction} {bearing_deg:+.0f}° ({turn_sec:.2f}s)")
+                        _turn_nav2_or_direct(direction, turn_sec)
+        except Exception:
+            pass
+
+        # ── Move one clip ─────────────────────────────────────────────────────
+        _move_forward(duration_sec=APPROACH_MOVE_SEC, distance_m=0.4)
+        motors.stop()
+        time.sleep(0.25)
+        moves_since_scan += 1
+
+        # ── Hardware distance gate AFTER moving ───────────────────────────────
+        try:
+            from oakd import get_front_depth, oakd_available
+            if oakd_available():
+                hw_dist = get_front_depth()
+                if hw_dist is not None:
+                    if hw_dist < ARRIVE_DIST_M:
+                        _ui("log", f"✅ OAK-D post-move arrival: {hw_dist:.2f}m")
+                        log_mission_event("hw_arrival_oakd_post", f"{hw_dist:.2f}m")
+                        motors.pantilt(0, 20)
+                        time.sleep(0.3)
+                        _execute_step_action(None)
+                        return
+                    elif hw_dist < 0.50:
+                        # Very close — avoid crushing the target with another move
+                        _ui("log", f"OAK-D: {hw_dist:.2f}m — very close, scanning now")
+                        moves_since_scan = APPROACH_SCAN_EVERY  # force scan now
+        except Exception:
+            pass
+
+        # ── Cosmos approach scan (every APPROACH_SCAN_EVERY moves) ───────────
+        if moves_since_scan < APPROACH_SCAN_EVERY:
+            continue   # skip Cosmos this clip — rely on hardware only
+
+        moves_since_scan = 0
+        check = _approach_scan()   # no webcam confirmation, lower threshold
+
+        dist    = str(check.get("distance", "far")).lower()
+        obj     = check.get("object", "unknown")
+        tdir    = str(check.get("target_direction", "front")).lower().strip()
+        in_path = check.get("in_my_path", False)
+
+        # ── Obstacle → avoid ─────────────────────────────────────────────────
         if check.get("wall_ahead") or check.get("obstacle_close"):
-            _ui("log", "Obstacle during approach — avoiding")
+            _ui("log", f"Obstacle during approach — avoiding (obj={obj})")
             log_action("AVOID_DURING_APPROACH", f"obj={obj}")
             force_360 = _avoid_obstacle(
                 wall_ahead=check.get("wall_ahead", False),
@@ -2721,25 +2951,28 @@ def _approach_target():
             if force_360:
                 mission_state = State.SEARCHING
                 return
+            # After avoidance, reseed counter so we don't immediately declare lost
+            if _target_spotted_count < 2:
+                _target_spotted_count = 2
             continue
 
         if check.get("mission_complete"):
             _execute_step_action(check.get("object_name"))
             return
 
-        # ── Close enough — execute the step action ───────────────────────────
+        # ── Cosmos distance confirmation — back up the hardware gate ──────────
         if check.get("target_visible") and obj in _TARGET_OBJECTS and dist in _NEAR_DISTANCES:
-            _ui("log", f"Target confirmed close ({dist}) — executing step action")
-            log_mission_event("target_reached", f"obj={obj} dist={dist}")
+            _ui("log", f"Cosmos: target close ({dist}) — executing step action")
+            log_mission_event("cosmos_arrival", f"obj={obj} dist={dist}")
             _execute_step_action(check.get("object_name") or obj)
             return
 
-        if dist in _NEAR_DISTANCES or check.get("in_my_path"):
-            _ui("log", f"Close to target ({dist}) — executing step action")
+        if dist in _NEAR_DISTANCES or in_path:
+            _ui("log", f"Cosmos: close/in-path ({dist}) — executing step action")
             _execute_step_action(check.get("object_name") or obj)
             return
 
-        # ── Target dropped below camera → already on top of it ───────────────
+        # ── Target directly below camera → already on top of it ──────────────
         if tdir in ("down", "below"):
             _ui("log", "Target below camera — arrived!")
             motors.pantilt(0, 20)
@@ -2747,13 +2980,22 @@ def _approach_target():
             _execute_step_action(check.get("object_name") or obj)
             return
 
-        # ── Lateral steering ─────────────────────────────────────────────────
-        if tdir in ("left", "left_side"):
-            _ui("log", "Target drifted left — correcting")
-            motors.left(MOTOR_SPEED_SLOW); time.sleep(0.4); motors.stop()
-        elif tdir in ("right", "right_side"):
-            _ui("log", "Target drifted right — correcting")
-            motors.right(MOTOR_SPEED_SLOW); time.sleep(0.4); motors.stop()
+        # ── Cosmos lateral steering (only if YOLO bearing not fresh) ─────────
+        try:
+            from oakd import get_last_yolo_position, yolo_available, oakd_available
+            yolo_fresh = (oakd_available() and yolo_available() and
+                          get_last_yolo_position("person") is not None and
+                          (time.monotonic() - (get_last_yolo_position("person") or {}).get("timestamp", 0)) < 2.0)
+        except Exception:
+            yolo_fresh = False
+
+        if not yolo_fresh:
+            if tdir in ("left", "left_side"):
+                _ui("log", "Cosmos: target drifted left — correcting")
+                motors.left(MOTOR_SPEED_SLOW); time.sleep(0.35); motors.stop()
+            elif tdir in ("right", "right_side"):
+                _ui("log", "Cosmos: target drifted right — correcting")
+                motors.right(MOTOR_SPEED_SLOW); time.sleep(0.35); motors.stop()
 
         # ── Pan-tilt vertical tracking ────────────────────────────────────────
         tilt_map = {"far": 5, "medium": 10, "mid": 10,
@@ -2761,14 +3003,12 @@ def _approach_target():
         motors.pantilt(0, tilt_map.get(dist, 5), 60)
 
         # ── Person nearby → eye-contact gate before greeting ─────────────────
-        if obj == "person" and (dist in _NEAR_DISTANCES or check.get("in_my_path")):
+        if obj == "person" and (dist in _NEAR_DISTANCES or in_path):
             name = check.get("object_name") or "person"
             _ui("log", "Person nearby during approach — checking eye contact...")
             motors.oled(1, "Person!")
-
-            # Eye-contact check
             ec_frame = capture_frame(CAMERA_PANTILT, 320, 240)
-            greet    = True
+            greet = True
             if ec_frame:
                 try:
                     ec_payload = {
@@ -2792,7 +3032,6 @@ def _approach_target():
                         _ui("log", f"Person not facing Eric — skipping greeting ({ec.get('reasoning','')})")
                 except Exception as e:
                     log_exception("eye_contact_approach", e)
-
             if greet:
                 _ui("status", f"FOUND — {name}")
                 greeting = ask_cosmos(
@@ -2804,20 +3043,35 @@ def _approach_target():
                 mission_state = State.INTERACTING
                 return
 
-        if not check.get("target_visible", False):
-            invisible_count += 1
-            _ui("log", f"Target not visible ({invisible_count}/3)")
-            if invisible_count >= 3:
-                _ui("log", "Lost target — resuming search")
-                log_mission_event("target_lost", "resuming search after 3 invisible scans")
-                mission_state = State.SEARCHING
-                motors.forward(MOTOR_SPEED_SLOW)
-                return
-        else:
+        # ── Flip-flop persistence guard ───────────────────────────────────────
+        target_visible = check.get("target_visible", False)
+        if target_visible:
+            _target_spotted_count += 1
             invisible_count = 0
+        else:
+            if _target_spotted_count > 0:
+                _target_spotted_count -= 1
+            if _target_spotted_count > 0:
+                log.info(f"Approach flip-flop: forcing visible "
+                         f"(lock remaining={_target_spotted_count})")
+                invisible_count = 0   # don't count this against us
+            else:
+                invisible_count += 1
+                _ui("log", f"Target not visible in approach "
+                           f"({invisible_count}/{APPROACH_INVISIBLE_LIMIT})")
+                if invisible_count >= APPROACH_INVISIBLE_LIMIT:
+                    _ui("log", "Lost target after 5 consecutive bad scans — resuming search")
+                    log_mission_event("target_lost",
+                                      "5 consecutive invisible Cosmos scans in approach")
+                    mission_state = State.SEARCHING
+                    motors.forward(MOTOR_SPEED_SLOW)
+                    return
 
-    _ui("log", "Approach complete — INTERACTING")
+    # ── Approach timeout — treat as arrived rather than give up ──────────────
+    _ui("log", "Approach timeout — assuming arrived, executing step action")
+    log_mission_event("approach_timeout", f"{APPROACH_MAX_MOVES} moves")
     mission_state = State.INTERACTING
+    _execute_step_action(None)
 
 
 def _process_scan(scan, from_360=False):
@@ -3276,9 +3530,8 @@ def _handle_yolo_detection() -> bool:
             motors.forward(MOTOR_SPEED_SLOW)
         return True
 
-    # ── Close enough — stop and hand to Cosmos ────────────────────────────────
+    # ── Close enough — stop and execute step action or greet ─────────────────
     motors.stop()
-    mission_state = State.INTERACTING
     motors.oled(0, label[:16])
     motors.oled(1, f"{dist_m:.1f}m {bearing}")
     _ui("status", f"YOLO FOUND — {label.upper()}")
@@ -3288,6 +3541,39 @@ def _handle_yolo_detection() -> bool:
     sensor_ctx = _sensor_context()
     step = _current_step()
     step_info = f"Current mission step: find {step.target} and {step.action}." if step else ""
+
+    # ── Check if YOLO label matches the current mission step target ────────────
+    # If it does, YOLO hardware has confirmed the target at close range — no
+    # need for a Cosmos vision call. Execute the step action directly.
+    # "person" YOLO label matches any human-target step (Leia, John, Alex etc.)
+    _YOLO_TARGET_STEPS = {"person", "robot"}
+    step_is_person_target = (step is not None and
+                             any(kw in step.target.lower()
+                                 for kw in ("person", "man", "woman", "human",
+                                            "leia", "john", "luke", "rey", "alex",
+                                            "jamie", "r2", "droid", "robot")))
+
+    if approach and step_is_person_target and label in _YOLO_TARGET_STEPS:
+        _ui("log", f"✅ YOLO hardware confirms step target '{step.target}' "
+                   f"at {dist_m:.2f}m — executing step action directly")
+        log_mission_event("yolo_step_complete",
+                          f"{label} at {dist_m:.2f}m matches step target={step.target}")
+        # Greet briefly before executing (1 sentence — non-blocking feel)
+        greeting = ask_cosmos(
+            f"Your YOLO sensors just confirmed {label} at {dist_m:.2f}m to your {bearing}. "
+            f"{step_info} "
+            "Greet them warmly in ONE sentence.",
+            max_tokens=60
+        )
+        eric_say(greeting)
+        motors.pantilt(0, 15)
+        time.sleep(0.3)
+        mission_state = State.INTERACTING
+        _execute_step_action(label)
+        return True
+
+    # ── Not a step-target match — normal greeting / observation ───────────────
+    mission_state = State.INTERACTING
 
     if approach:
         _ui("log", f"YOLO: {label} confirmed at {dist_m:.1f}m — handing to Cosmos")
