@@ -300,7 +300,6 @@ def get_buffered_frames(device: int, n: int = 6) -> list[str]:
     frame = capture_frame(device, 160, 120)
     return [frame] if frame else []
 
-
 def _get_reader(device: int) -> _CameraReader:
     if device not in _readers:
         reader = _CameraReader(device)
@@ -383,6 +382,9 @@ def capture_frame_raw(device: int = CAMERA_WEBCAM):
             return None
         if device == CAMERA_WEBCAM:
             frame = _cv2.rotate(frame, _cv2.ROTATE_90_COUNTERCLOCKWISE)
+            # After rotation frame is portrait (480w × 640h) — resize to landscape
+            # so Gradio displays it horizontally matching the column width
+            frame = _cv2.resize(frame, (320, 240))
         return _cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB)
     except Exception:
         return None

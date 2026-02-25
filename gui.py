@@ -479,16 +479,16 @@ footer { display:none !important; }
     font-family: 'Courier New', monospace;
 }
 
-/* ── STOP button — round red ─────────────────────────────────────────── */
+/* ── STOP button — round red, sits beside joystick ──────────────────── */
 #stop-btn {
-    width: 90px !important;
-    height: 90px !important;
-    min-width: 90px !important;
+    width: 72px !important;
+    height: 72px !important;
+    min-width: 72px !important;
     border-radius: 50% !important;
     background: radial-gradient(circle at 38% 35%, #ff3333, #880000) !important;
     border: 3px solid #cc0000 !important;
     color: #fff !important;
-    font-size: 0.85em !important;
+    font-size: 0.78em !important;
     font-weight: bold !important;
     letter-spacing: 0.15em !important;
     font-family: 'Courier New', monospace !important;
@@ -559,16 +559,19 @@ label span, .gr-label {
     min-height: 110px !important;
 }
 
-/* ── Manual control buttons ──────────────────────────────────────────── */
+/* ── Manual control buttons — compact squares ────────────────────────── */
 .ctrl-btn button {
     background: #0d1a0d !important;
     border: 1px solid #2d5a2d !important;
     color: #88d400 !important;
     font-family: 'Courier New', monospace !important;
-    font-size: 0.92em !important;
+    font-size: 1.1em !important;
     font-weight: bold !important;
-    letter-spacing: 0.06em !important;
     border-radius: 4px !important;
+    width: 44px !important;
+    height: 44px !important;
+    min-width: 44px !important;
+    padding: 0 !important;
 }
 .ctrl-btn button:hover {
     border-color: #76b900 !important;
@@ -577,11 +580,16 @@ label span, .gr-label {
 .ctrl-stop button {
     border-color: #883300 !important;
     color: #ff8844 !important;
-    font-weight: bold !important;
 }
 .ctrl-stop button:hover {
     background: #1a0a00 !important;
     border-color: #ff6600 !important;
+}
+.ctrl-wide button {
+    width: 96px !important;
+    height: 44px !important;
+    min-width: 96px !important;
+    font-size: 0.82em !important;
 }
 
 /* ── Accordion ───────────────────────────────────────────────────────── */
@@ -594,35 +602,27 @@ label span, .gr-label {
 /* ── Camera images ───────────────────────────────────────────────────── */
 .cam-label {
     color: #7aaa7a;
-    font-size: 0.82em;
+    font-size: 0.78em;
     font-weight: bold;
     letter-spacing: 0.1em;
     text-transform: uppercase;
     font-family: 'Courier New', monospace;
-    margin-bottom: 2px;
+    margin-bottom: 1px;
     padding-left: 2px;
-}
-
-/* Webcam is portrait (rotated 90°) — constrain so it doesn't blow up tall */
-#webcam-feed img, #webcam-feed .svelte-1udb6db {
-    object-fit: contain !important;
-    max-width: 100% !important;
-    max-height: 160px !important;
-    width: auto !important;
 }
 
 /* ── Section headers ─────────────────────────────────────────────────── */
 .panel-head {
     color: #88d400;
-    font-size: 0.82em;
+    font-size: 0.78em;
     font-weight: bold;
     letter-spacing: 0.15em;
     text-transform: uppercase;
     font-family: 'Courier New', monospace;
     border-bottom: 1px solid #2d5a2d;
-    padding-bottom: 5px;
-    margin-bottom: 8px;
-    margin-top: 10px;
+    padding-bottom: 4px;
+    margin-bottom: 6px;
+    margin-top: 8px;
 }
 """
 
@@ -653,29 +653,33 @@ def build_ui():
         with gr.Row(equal_height=False):
 
             # ═══════════════════════════════════════════════════════════════
-            # LEFT COLUMN — narrow camera feeds only
+            # LEFT COLUMN — cameras + module status + sensors
             # ═══════════════════════════════════════════════════════════════
             with gr.Column(scale=2, min_width=200):
 
-                gr.HTML('<div class="cam-label">📡 PAN-TILT — WIDE</div>')
+                gr.HTML('<div class="cam-label">📡 PAN-TILT</div>')
                 pantilt_img = gr.Image(
-                    streaming=True, height=200, label="",
+                    streaming=True, height=180, label="",
                     show_label=False
                 )
 
-                gr.HTML('<div class="cam-label" style="margin-top:8px">🔬 WEBCAM — CLOSE</div>')
+                gr.HTML('<div class="cam-label" style="margin-top:4px">🔬 WEBCAM</div>')
                 webcam_img = gr.Image(
-                    streaming=True, height=160, label="",
-                    show_label=False, elem_id="webcam-feed"
+                    streaming=True, height=140, label="",
+                    show_label=False
                 )
 
-                # Compact LiDAR + OAK-D under cameras
-                gr.HTML('<div class="panel-head" style="margin-top:12px">SENSORS</div>')
+                # Module status — moved here from right column
+                gr.HTML('<div class="panel-head" style="margin-top:6px">MODULE STATUS</div>')
+                module_status = gr.HTML(value=get_module_status_html())
+
+                # Sensors below module status
+                gr.HTML('<div class="panel-head">SENSORS</div>')
                 lidar_display = gr.HTML(value=get_lidar_html())
                 oakd_display  = gr.HTML(value=get_oakd_html())
 
             # ═══════════════════════════════════════════════════════════════
-            # CENTRE COLUMN — mission briefing + comms
+            # CENTRE COLUMN — mission briefing + comms + log
             # ═══════════════════════════════════════════════════════════════
             with gr.Column(scale=3, min_width=320):
 
@@ -748,67 +752,70 @@ def build_ui():
                 )
 
             # ═══════════════════════════════════════════════════════════════
-            # RIGHT COLUMN — STOP button, module lights, gauges, controls
+            # RIGHT COLUMN — joystick + STOP (top), drive gauge, utilities
             # ═══════════════════════════════════════════════════════════════
             with gr.Column(scale=3, min_width=280):
 
-                # ── STOP button centred at top ────────────────────────────
-                with gr.Row():
-                    gr.HTML('<div style="flex:1"></div>')
-                    stop_btn = gr.Button("STOP", elem_id="stop-btn")
-                    gr.HTML('<div style="flex:1"></div>')
+                gr.HTML('<div class="panel-head">MANUAL OVERRIDE</div>')
 
-                gr.HTML('<div style="color:#cc2200;font-size:0.65em;letter-spacing:0.18em;'
-                        'text-align:center;margin-top:4px;margin-bottom:12px;'
-                        'font-family:\'Courier New\',monospace">EMERGENCY HALT</div>')
+                # ── Joystick + STOP side by side at top ───────────────────
+                with gr.Row(equal_height=True):
 
-                # ── Module status lights ──────────────────────────────────
-                gr.HTML('<div class="panel-head">MODULE STATUS</div>')
-                module_status = gr.HTML(value=get_module_status_html())
+                    # Joystick d-pad (left side)
+                    with gr.Column(scale=3, min_width=0):
+                        speed_slider = gr.Slider(
+                            minimum=0.05, maximum=0.50, value=0.20, step=0.05,
+                            label="Speed (m/s)"
+                        )
+                        with gr.Row():
+                            gr.HTML('<div style="flex:1"></div>')
+                            btn_fwd = gr.Button("▲", min_width=44, elem_classes=["ctrl-btn"])
+                            gr.HTML('<div style="flex:1"></div>')
+                        with gr.Row():
+                            btn_left  = gr.Button("◀", min_width=44, elem_classes=["ctrl-btn"])
+                            btn_halt  = gr.Button("■", min_width=44, elem_classes=["ctrl-btn", "ctrl-stop"])
+                            btn_right = gr.Button("▶", min_width=44, elem_classes=["ctrl-btn"])
+                        with gr.Row():
+                            gr.HTML('<div style="flex:1"></div>')
+                            btn_back = gr.Button("▼", min_width=44, elem_classes=["ctrl-btn"])
+                            gr.HTML('<div style="flex:1"></div>')
+                        with gr.Row():
+                            btn_spin_l = gr.Button("↺ L", min_width=44, elem_classes=["ctrl-btn", "ctrl-wide"])
+                            btn_spin_r = gr.Button("↻ R", min_width=44, elem_classes=["ctrl-btn", "ctrl-wide"])
 
-                # ── Motor telemetry ───────────────────────────────────────
-                gr.HTML('<div class="panel-head">PROPULSION</div>')
+                    # STOP button (right side, vertically centred)
+                    with gr.Column(scale=1, min_width=0):
+                        gr.HTML('<div style="height:20px"></div>')
+                        stop_btn = gr.Button("STOP", elem_id="stop-btn")
+                        gr.HTML(
+                            '<div style="color:#cc2200;font-size:0.6em;letter-spacing:0.12em;'
+                            'text-align:center;margin-top:4px;font-family:\'Courier New\',monospace">'
+                            'E-HALT</div>'
+                        )
+
+                # Motor status text
+                motor_status = gr.Textbox(
+                    label="", show_label=False,
+                    interactive=False, max_lines=1,
+                    value="STOPPED",
+                    placeholder="Motor status"
+                )
+
+                # ── Drive system gauge — directly below joystick ──────────
+                gr.HTML('<div class="panel-head">DRIVE SYSTEM</div>')
                 motor_display = gr.HTML(value=_motor_telemetry_html("stopped", 0.0, 0.0))
-
-                # ── Manual controls ───────────────────────────────────────
-                with gr.Accordion("MANUAL OVERRIDE", open=True):
-                    speed_slider = gr.Slider(
-                        minimum=0.05, maximum=0.50, value=0.20, step=0.05,
-                        label="Speed (m/s)"
-                    )
-                    with gr.Row():
-                        gr.HTML('<div style="flex:1"></div>')
-                        btn_fwd  = gr.Button("▲", min_width=52, elem_classes=["ctrl-btn"])
-                        gr.HTML('<div style="flex:1"></div>')
-                    with gr.Row():
-                        btn_left  = gr.Button("◀", min_width=52, elem_classes=["ctrl-btn"])
-                        btn_halt  = gr.Button("■", min_width=52, elem_classes=["ctrl-btn", "ctrl-stop"])
-                        btn_right = gr.Button("▶", min_width=52, elem_classes=["ctrl-btn"])
-                    with gr.Row():
-                        gr.HTML('<div style="flex:1"></div>')
-                        btn_back  = gr.Button("▼", min_width=52, elem_classes=["ctrl-btn"])
-                        gr.HTML('<div style="flex:1"></div>')
-                    with gr.Row():
-                        btn_spin_l = gr.Button("↺ SPIN L", min_width=80, elem_classes=["ctrl-btn"])
-                        btn_spin_r = gr.Button("↻ SPIN R", min_width=80, elem_classes=["ctrl-btn"])
-                    motor_status = gr.Textbox(
-                        label="", show_label=False,
-                        interactive=False, max_lines=1,
-                        value="STOPPED",
-                        placeholder="Motor status"
-                    )
 
                 # ── Utilities ─────────────────────────────────────────────
                 with gr.Accordion("UTILITIES", open=False):
                     util_out = gr.Textbox(label="", show_label=False, lines=5, interactive=False)
                     with gr.Row():
-                        gr.Button("INTRODUCE", elem_classes=["ctrl-btn"]).click(
+                        gr.Button("INTRODUCE", elem_classes=["ctrl-btn", "ctrl-wide"]).click(
                             action_introduce, outputs=util_out
                         )
-                        gr.Button("LOOK",      elem_classes=["ctrl-btn"]).click(
+                        gr.Button("LOOK",      elem_classes=["ctrl-btn", "ctrl-wide"]).click(
                             action_look, outputs=util_out
                         )
-                        gr.Button("STATUS",    elem_classes=["ctrl-btn"]).click(
+                        gr.Button("STATUS",    elem_classes=["ctrl-btn", "ctrl-wide"]).click(
                             action_status, outputs=util_out
                         )
 
@@ -820,13 +827,9 @@ def build_ui():
             outputs=mission_dd
         )
 
-        # STOP — single button for everything
         stop_btn.click(action_stop, outputs=eric_says_box)
-
-        # ENGAGE
         engage_btn.click(action_engage, inputs=briefing_box, outputs=eric_says_box)
 
-        # Character comms
         char_btn.click(
             action_char_reply,
             inputs=[char_name, char_says],
@@ -864,20 +867,13 @@ def build_ui():
         )
 
         # ── Live polling timers ────────────────────────────────────────────
-        # Camera feeds
-        gr.Timer(1.0).tick(get_webcam,          outputs=webcam_img)
-        gr.Timer(1.0).tick(get_pantilt,         outputs=pantilt_img)
-
-        # AI speech — updates only when mission sets _eric_says
-        gr.Timer(1.0).tick(get_eric,            outputs=eric_says_box)
-
-        # System log — separate from speech
-        gr.Timer(1.5).tick(get_log,             outputs=log_box)
-
-        # Sensor + telemetry panels
-        gr.Timer(0.5).tick(get_motor_telemetry, outputs=motor_display)
-        gr.Timer(1.0).tick(get_lidar_html,      outputs=lidar_display)
-        gr.Timer(1.0).tick(get_oakd_html,       outputs=oakd_display)
+        gr.Timer(1.0).tick(get_webcam,             outputs=webcam_img)
+        gr.Timer(1.0).tick(get_pantilt,            outputs=pantilt_img)
+        gr.Timer(1.0).tick(get_eric,               outputs=eric_says_box)
+        gr.Timer(1.5).tick(get_log,                outputs=log_box)
+        gr.Timer(0.5).tick(get_motor_telemetry,    outputs=motor_display)
+        gr.Timer(1.0).tick(get_lidar_html,         outputs=lidar_display)
+        gr.Timer(1.0).tick(get_oakd_html,          outputs=oakd_display)
         gr.Timer(2.0).tick(get_module_status_html, outputs=module_status)
 
     return demo
