@@ -86,10 +86,30 @@ def main():
     # ── Optional: OAK-D Lite depth camera ────────────────────────────────────
     if USE_OAKD:
         log.info("📷 OAK-D Lite enabled — initializing stereo depth...")
-        from oakd import init_oakd, oakd_available
+        from oakd import (init_oakd, oakd_available,
+                          set_yolo_callback, set_yolo_active, yolo_available)
         init_oakd()
         if oakd_available():
             log.info("✅ OAK-D depth perception active")
+
+            # Register YOLO callback so mission.py hears detections
+            def _on_yolo_detection(label: str, dist_m: float,
+                                   bearing: str, bearing_deg: float):
+                log.info(
+                    f"🎯 YOLO: {label} at {dist_m:.1f}m "
+                    f"({bearing}, {bearing_deg:+.1f}°)"
+                )
+                # TODO: forward to mission.py when ready, e.g.:
+                # from mission import on_detection
+                # on_detection(label, dist_m, bearing, bearing_deg)
+
+            set_yolo_callback(_on_yolo_detection)
+            set_yolo_active(True)
+
+            if yolo_available():
+                log.info("✅ OAK-D YOLO Layer 2 active — person/animal detection on Myriad X")
+            else:
+                log.warning("⚠️  OAK-D YOLO unavailable — check blob file in models/")
         else:
             log.warning("⚠️  OAK-D unavailable — no depth perception")
 

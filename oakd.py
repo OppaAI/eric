@@ -95,7 +95,7 @@ _safety_active    = True
 _last_floor_check = 0.0
 
 # ── Layer 2 YOLO constants ────────────────────────────────────────────────────
-YOLO_BLOB_PATH      = Path("models/yolov8n_openvino_2022.1_6shave.blob")
+YOLO_BLOB_PATH      = Path("models/yolov8n_openvino_2022.1_4shave.blob")
 YOLO_MIN_CONFIDENCE = 0.55   # minimum detection confidence
 YOLO_SLOW_DIST      = 3.0    # meters — slow when target within this range
 YOLO_STOP_DIST      = 2.0    # meters — stop when target within this range
@@ -242,9 +242,11 @@ def init_oakd() -> bool:
         mono_left.setResolution(
             dai.MonoCameraProperties.SensorResolution.THE_400_P)
         mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
+        mono_left.setFps(15)
         mono_right.setResolution(
             dai.MonoCameraProperties.SensorResolution.THE_400_P)
         mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
+        mono_right.setFps(15)
 
         stereo.setLeftRightCheck(True)
         stereo.setExtendedDisparity(False)
@@ -306,35 +308,39 @@ def init_oakd() -> bool:
 def _add_yolo_pipeline(pipeline, stereo) -> bool:
     """
     Add YOLOv8n spatial detection to an existing pipeline.
+    DepthAI 3.x API — YOLO config goes via nn.detectionParser sub-node.
     Colour camera feeds YOLO; stereo depth provides spatial coordinates.
     """
     import depthai as dai
 
     cam_rgb = pipeline.create(dai.node.ColorCamera)
     cam_rgb.setPreviewSize(416, 416)   # YOLOv8n input size
+    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-    cam_rgb.setFps(10)                 # 10 fps — sufficient for person detect
+    cam_rgb.setFps(5)                  # 5 fps — reduce Myriad X load
 
-    nn = pipeline.create(dai.node.YoloSpatialDetectionNetwork)
+    nn = pipeline.create(dai.node.SpatialDetectionNetwork)
     nn.setBlobPath(str(YOLO_BLOB_PATH))
     nn.setConfidenceThreshold(YOLO_MIN_CONFIDENCE)
-    nn.setNumClasses(80)
-    nn.setCoordinateSize(4)
-    nn.setAnchors([
+    nn.setBoundingBoxScaleFactor(0.5)
+    nn.setDepthLowerThreshold(100)    # mm — ignore depth < 10 cm
+    nn.setDepthUpperThreshold(8000)   # mm — ignore depth > 8 m
+
+    # DepthAI 3.x — YOLO-specific config lives in detectionParser sub-node
+    nn.detectionParser.setNumClasses(80)
+    nn.detectionParser.setCoordinateSize(4)
+    nn.detectionParser.setAnchors([
         10, 13, 16, 30, 33, 23,
         30, 61, 62, 45, 59, 119,
         116, 90, 156, 198, 373, 326
     ])
-    nn.setAnchorMasks({
+    nn.detectionParser.setAnchorMasks({
         "side52": [0, 1, 2],
         "side26": [3, 4, 5],
         "side13": [6, 7, 8]
     })
-    nn.setIouThreshold(0.5)
-    nn.setBoundingBoxScaleFactor(0.5)
-    nn.setDepthLowerThreshold(100)    # mm — ignore depth < 10 cm
-    nn.setDepthUpperThreshold(8000)   # mm — ignore depth > 8 m
+    nn.detectionParser.setIouThreshold(0.5)
 
     stereo.depth.link(nn.inputDepth)
     cam_rgb.preview.link(nn.input)
