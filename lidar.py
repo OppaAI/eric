@@ -133,7 +133,7 @@ def set_avoidance_active(active: bool):
     """
     global _avoidance_active
     _avoidance_active = active
-    log.info(f"LiDAR avoidance mode: {'ACTIVE — stop suppressed' if active else 'INACTIVE — stop enabled'}")
+    log.debug(f"LiDAR avoidance mode: {'ACTIVE — stop suppressed' if active else 'INACTIVE — stop enabled'}")
 
 
 def get_last_scan():
@@ -488,10 +488,6 @@ def _scan_callback(msg):
         # lidar_void_ahead() function kept for reference but not called here.
         with _lock:
             _void_active = False
-                # low confidence → no action
-            else:
-                with _lock:
-                    _void_active = False
 
     except Exception as e:
         log.error(f"LiDAR scan callback error: {e}")

@@ -502,8 +502,7 @@ def _parse_json(response, fallback, label="COSMOS"):
             return _finalize_result(result, fallback, label)
 
     except Exception:
-        log.warning(f"JSON parse failed: {response[:100]}")
-        print(f"\n⚠️  RAW RESPONSE ({label}): {response[:400]}\n")
+        log.debug(f"JSON parse failed (label={label}): {response[:80]}")
     return fallback
 
 
@@ -592,6 +591,76 @@ def _merge_array_items(items: list, fallback: dict) -> dict:
 
 def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
     """Normalize types, infer category from name, fill fallback, print."""
+
+    # ── Step 0: remap aliased field names Cosmos (2B) frequently hallucinates ─
+    # The model invents slight variations of canonical names. Catch them all here
+    # before any downstream logic sees them. "canonical" wins if both exist.
+    _FIELD_ALIASES: dict[str, str] = {
+        # speak
+        "speaker":             "speak",
+        "speech":              "speak",
+        "say":                 "speak",
+        "spoken":              "speak",
+        "tts":                 "speak",
+        "announcement":        "speak",
+        "narration":           "speak",
+        "response":            "speak",
+        # target_visible
+        "target_visibility":   "target_visible",
+        "targetvisible":       "target_visible",
+        "target_found":        "target_visible",
+        "found":               "target_visible",
+        "detected":            "target_visible",
+        # physical_reasoning
+        "reasoning":           "physical_reasoning",
+        "reason":              "physical_reasoning",
+        "explanation":         "physical_reasoning",
+        "analysis":            "physical_reasoning",
+        "observation":         "physical_reasoning",
+        "notes":               "physical_reasoning",
+        "summary":             "physical_reasoning",
+        # object_name
+        "name":                "object_name",
+        "label":               "object_name",
+        "object_label":        "object_name",
+        # action
+        "movement":            "action",
+        "next_action":         "action",
+        "recommended_action":  "action",
+        # clearest_direction
+        "clear_direction":     "clearest_direction",
+        "best_direction":      "clearest_direction",
+        "open_direction":      "clearest_direction",
+        # target_direction
+        "direction":           "target_direction",
+        "target_location":     "target_direction",
+        "target_side":         "target_direction",
+    }
+    for alias, canonical in _FIELD_ALIASES.items():
+        if alias in result:
+            if canonical not in result:
+                log.info(f"Field alias: '{alias}' → '{canonical}'")
+                result[canonical] = result.pop(alias)
+            else:
+                result.pop(alias)   # canonical already present — drop the duplicate
+
+    # ── Step 0b: strip unknown fields so they don't pollute the debug print ───
+    _VALID_FIELDS = {
+        "object", "object_name", "terrain", "distance", "in_my_path",
+        "wall_ahead", "obstacle_close", "small_obstacle", "void_ahead",
+        "target_visible", "target_direction", "clearest_direction",
+        "action", "speak", "physical_reasoning", "mission_complete",
+        # nav-check only
+        "person_visible",
+        # optional / extended
+        "severity", "social_intent", "risk_assessment",
+    }
+    stray = [k for k in list(result) if k not in _VALID_FIELDS]
+    if stray:
+        log.info(f"Dropping unknown fields from Cosmos output: {stray}")
+        for k in stray:
+            result.pop(k)
+
     # Flatten dict-type "object" field
     obj = result.get("object")
     if isinstance(obj, dict):
@@ -1123,26 +1192,23 @@ Now analyze the frames and output ONLY the JSON object above. No markdown. No ex
 
 SCAN_360_PROMPT = """
 You are a tracked ground robot. These images are from a full 360-degree scan — pan-tilt sweep.
-At each position the camera tilted down (floor view) then mid-range. You are completely stopped.
+You are completely stopped.
 
-STEP 1 — VOID/DROP CHECK (HIGHEST PRIORITY — look at ALL floor-level frames):
+STEP 1 — VOID/DROP CHECK (HIGHEST PRIORITY):
 - Stair edges, step edges, ledge lips, holes, gaps → void_ahead = true
 - Floor texture ends and open space / lower level is visible → void_ahead = true
 - Floor suddenly much further away or missing → void_ahead = true
 - If sensor data includes VOID WARNING → void_ahead = true
 - NEVER set clearest_direction toward a void
 
-STEP 2 — OBSTACLE SAFETY: Look at all floor-level frames. Which direction has the most open space?
+STEP 2 — OBSTACLE SAFETY: Which direction has the most open space?
 
-STEP 3 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts. Set target_visible=true if 30%+ confident.
+STEP 3 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts.
+Set target_visible=true if 30%+ confident. Set target_direction to where you see it.
 
-STEP 4 — SPEAK: If you see the target, set speak to an excited 1-sentence reaction. Otherwise null.
+STEP 4 — SPEAK: One excited sentence if target found, otherwise null.
 
-OUTPUT: A single JSON object. Every field is REQUIRED. Use ONLY the exact field names shown.
-"object" must be one word: person, robot, slipper, shoe, obstacle, wall, clear, or unknown — NOT a list or dict.
-Boolean fields: true or false only.
-
-Example output:
+OUTPUT: A single JSON object. Use ONLY these exact field names — no others:
 {
   "object": "clear",
   "object_name": null,
@@ -1150,6 +1216,7 @@ Example output:
   "distance": "far",
   "in_my_path": false,
   "wall_ahead": false,
+  "obstacle_close": false,
   "small_obstacle": false,
   "void_ahead": false,
   "target_visible": false,
@@ -1161,92 +1228,35 @@ Example output:
   "mission_complete": false
 }
 
-Now analyze the images and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
+"object" must be ONE word: person | robot | slipper | shoe | obstacle | wall | clear | unknown
+"speak" = speech output. NOT "speaker". NOT "speech". NOT "tts".
+"physical_reasoning" = reasoning. NOT "reasoning". NOT "explanation".
+"target_visible" = detection flag. NOT "target_visibility". NOT "target_found".
+Do NOT add "location", "type", "confidence", "target_confidence", or any unlisted field.
+No markdown. No explanation. Output ONLY the JSON object.
 """
 
 QUICK_SCAN_PROMPT = """
-You are a tracked ground robot. You are completely stopped. These frames are from your pan-tilt and webcam cameras.
+You are a tracked ground robot. You are stopped. Analyze the frames and sensor data.
 
-IF SENSOR DATA IS PROVIDED ABOVE: read it carefully first.
-- Use YOLO L2 distance/bearing as ground truth for spatial reasoning.
-- Use LiDAR distances to confirm or override your visual estimates.
-- If Nav2 pose is shown, reference your map position in physical_reasoning.
+RULES (in priority order):
+1. VOID/DROP — stair edge, hole, floor ending → void_ahead=true, action=stop
+2. OBSTACLE — object <60cm ahead OR filling lower frame → obstacle_close=true, action=stop
+3. TARGET — slipper/shoe/person/robot visible anywhere → target_visible=true
+4. Otherwise → action=forward
 
-STEP 1 — VOID / DROP CHECK (CRITICAL — check before anything else):
-Look at the LOWER THIRD of every image for signs of floor disappearing:
-- Stair edges, step lips, ledge edges, trap doors, holes, gaps → void_ahead = true
-- Floor texture abruptly ends and you see open air, lower level, or distant ground → void_ahead = true
-- The ground is clearly lower ahead (you're at a stair top or cliff edge) → void_ahead = true
-- If sensor data above includes a VOID or FLOOR DROP WARNING → void_ahead = true
-When void_ahead = true: action = "stop", wall_ahead = true. NEVER forward into a void.
+"speak": one SHORT plain sentence if target found, otherwise null. No backticks. No lists.
+"physical_reasoning": one plain sentence describing what you see. No backticks.
 
-STEP 2 — OBSTACLE CHECK (lower half of every image):
-- Anything filling/touching the bottom edge → wall_ahead = true
-- Object within ~60cm directly ahead → obstacle_close = true AND in_my_path = true
-- LiDAR or OAK-D shows obstacle closer than 0.60m → obstacle_close = true
-- When in doubt → obstacle_close = true
+Output ONLY this JSON — no markdown, no extra fields:
+{"object":"clear","object_name":null,"terrain":"tiles","distance":"far","in_my_path":false,"wall_ahead":false,"obstacle_close":false,"small_obstacle":false,"void_ahead":false,"target_visible":false,"target_direction":"unknown","clearest_direction":"front","action":"forward","speak":null,"physical_reasoning":"Path clear.","mission_complete":false}
 
-STEP 3 — MISSION TARGET CHECK:
-- If you set object to "slipper", "shoe", "person", or "robot" → you MUST set target_visible = true
-- Any slipper, shoe, person, or robot visible anywhere in any frame → target_visible = true
-- If YOLO sensor data above shows a person/animal detection → include that in your reasoning
-- target_visible = false ONLY if none of those objects appear anywhere AND no YOLO detections
-
-STEP 4 — PHYSICAL REASONING (important for judges):
-Write 1-2 sentences that COMBINE what you see visually WITH the sensor data above.
-Example: "LiDAR confirms 2.3m to nearest obstacle. YOLO detects a person 1.8m to my left — 
-I can see them in the left frame. Path to the right appears clear."
-
-STEP 5 — ACTION:
-- action = "stop" is ONLY valid when wall_ahead=true OR obstacle_close=true OR void_ahead=true
-- If path is clear and no obstacle or void: action = "forward"
-
-OUTPUT: A single JSON object. Every field is REQUIRED.
-"object": one word from: person, robot, slipper, shoe, obstacle, wall, clear, unknown
-"object_name": short string or null
-Boolean fields: true or false only.
-
-Example when target found via YOLO sensor data:
-{
-  "object": "person",
-  "object_name": "person 1.8m left",
-  "terrain": "tiles",
-  "distance": "near",
-  "in_my_path": false,
-  "wall_ahead": false,
-  "obstacle_close": false,
-  "small_obstacle": false,
-  "void_ahead": false,
-  "target_visible": true,
-  "target_direction": "left",
-  "clearest_direction": "right",
-  "action": "forward",
-  "speak": "I can see someone nearby to my left — YOLO confirms 1.8 meters.",
-  "physical_reasoning": "YOLO L2 detects person at 1.8m bearing left (-22°). Visible in pan-tilt frame. LiDAR clear to 2.1m front. Turning left to approach.",
-  "mission_complete": false
-}
-
-Example when path is clear:
-{
-  "object": "clear",
-  "object_name": null,
-  "terrain": "tiles",
-  "distance": "far",
-  "in_my_path": false,
-  "wall_ahead": false,
-  "obstacle_close": false,
-  "small_obstacle": false,
-  "void_ahead": false,
-  "target_visible": false,
-  "target_direction": "unknown",
-  "clearest_direction": "front",
-  "action": "forward",
-  "speak": null,
-  "physical_reasoning": "Path is clear. LiDAR reads 1.4m to nearest object. No target visible.",
-  "mission_complete": false
-}
-
-Now analyze the frames and output ONLY the JSON object above. No markdown. No explanation. No extra fields.
+"object": person|robot|slipper|shoe|obstacle|wall|clear|unknown
+"distance": near|mid|far
+"target_direction": front|left|right|unknown
+"clearest_direction": front|left|right
+"action": forward|stop|turn_left|turn_right
+Output ONLY the JSON object. No explanation before or after.
 """
 
 _SCAN_FALLBACK = {
@@ -1712,7 +1722,7 @@ def _quick_scan() -> dict:
 
     try:
         print(f"\n📷 QUICK SCAN — {len(clip_frames)} frames (pan-tilt 5°)...")
-        response = _cosmos_frames(clip_frames, prompt, max_tokens=250, temp=0.3)
+        response = _cosmos_frames(clip_frames, prompt, max_tokens=300, temp=0.3)
         result = _parse_json(response, dict(_SCAN_FALLBACK), label="QUICK SCAN")
 
         # ── 3. Candidate found — webcam confirmation ───────────────────────────
@@ -1918,9 +1928,10 @@ def _scan_360_pantilt() -> dict:
 
     # Pan positions: 7 stops covering -90° to +90° in 30° increments
     PAN_STEPS  = [-90, -60, -30, 0, 30, 60, 90]
-    TILT_SCAN  = 5    # industrial standard: 5° down — sees ground 1-3m ahead clearly
-    TILT_STEEP = 25   # only used for void pre-check at each position (not normal scan)
-    PAN_SETTLE = 0.25  # seconds after pantilt() before capture (was 0.35)
+    TILT_SCAN  = 5    # standard search angle — sees objects at 1-3m
+    TILT_LOW   = 20   # lower angle — sees ground/objects at 0.5-1.5m (posts, low obstacles)
+    TILT_STEEP = 25   # only used for void pre-check
+    PAN_SETTLE = 0.25  # seconds after pantilt() before capture
 
     def _pan_to_chassis_turn_sec(pan: int) -> float:
         """Estimate chassis turn duration to face a target spotted at pan angle pan."""
@@ -1949,32 +1960,29 @@ def _scan_360_pantilt() -> dict:
             _ui("log", f"{phase_label}: pan {pan:+d}°")
             motors.oled(1, f"Pan {pan:+d}d")
 
-            # ── 1. Void pre-check at steep tilt (hardware only, no Cosmos) ───
-            motors.pantilt(pan, TILT_STEEP, speed=60)
-            time.sleep(PAN_SETTLE)
-            hw_void = _void_check()
-            if hw_void["void"]:
-                log.warning(f"🕳️  Void at pan={pan}°: {hw_void['reason']}")
-                log_action("VOID_360_SCAN", f"pan={pan}: {hw_void['reason']}")
-                _ui("log", f"🕳️  Void at pan {pan}° — skipping direction")
-                continue
+            # ── 1. (Void pre-check removed — too many false positives indoors)
 
             # ── 2. Settle at standard scan tilt (5° down) ────────────────────
             motors.pantilt(pan, TILT_SCAN, speed=60)
             time.sleep(PAN_SETTLE)
 
-            # ── 3. Capture short video clip — 2s, 3 frames ───────────────────
-            # Short video beats single frame: motion artifacts averaged out,
-            # Cosmos gets temporal context (something moving = more confident).
-            # 3 frames at 640×480 ≈ same token cost as 1 frame at 1280×720.
+            # ── 3. Capture at standard tilt + low tilt ───────────────────────
+            # Standard tilt: sees targets at 1-3m (people, large objects)
+            # Low tilt: sees ground-level objects at 0.5-1.5m (posts, chair legs)
             clip_frames = capture_frames_video(CAMERA_PANTILT,
-                                               duration=2.0, fps_sample=1.5)
+                                               duration=1.5, fps_sample=1.5)
             if not clip_frames:
-                # Fallback to single sharp frame
                 f = _capture_sharp(CAMERA_PANTILT)
                 clip_frames = [f] if f else []
             if not clip_frames:
                 continue
+
+            # Add a low-angle frame to catch posts and low obstacles
+            motors.pantilt(pan, TILT_LOW, speed=60)
+            time.sleep(PAN_SETTLE)
+            low_frame = _capture_sharp(CAMERA_PANTILT)
+            if low_frame:
+                clip_frames.append(low_frame)
 
             # Adaptive LED on last frame
             if _is_pitch_black(clip_frames[-1]):
@@ -3432,7 +3440,12 @@ def _mission_loop():
                 move_deadline = time.monotonic() + NAV_MOVE_INTERVAL
                 yolo_broke    = False
                 while time.monotonic() < move_deadline and mission_active:
-                    time.sleep(0.2)
+                    time.sleep(0.1)  # 100ms poll — faster stop response
+
+                    # ── IMMEDIATE STOP if mission deactivated ─────────────────
+                    if not mission_active:
+                        motors.stop()
+                        break
 
                     # YOLO found something mid-move — stop and handle it now
                     with _yolo_lock:
@@ -3444,8 +3457,13 @@ def _mission_loop():
 
                     # Mission paused mid-move (interaction started)
                     if mission_state in (State.INTERACTING, State.COMPLETE):
+                        motors.stop()
                         yolo_broke = True
                         break
+
+                if not mission_active:
+                    motors.stop()
+                    break
 
                 if yolo_broke:
                     continue
@@ -3485,8 +3503,10 @@ def _mission_loop():
                 scan = _best_360_scan()
                 _scans_since_360 = _empty_scans = 0
                 _process_scan(scan, from_360=True)
+                # Only resume forward if mission still active and not blocked
                 if mission_active and mission_state == State.SEARCHING:
-                    motors.forward(MOTOR_SPEED_SLOW)
+                    if not _void_check()["void"]:
+                        motors.forward(MOTOR_SPEED_SLOW)
             else:
                 _ui("log", "Quick scan (stopped)...")
                 motors.oled(1, "Scanning...")

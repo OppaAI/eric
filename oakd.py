@@ -89,7 +89,7 @@ RECONNECT_INTERVAL_S = 10.0
 # ── Layer 1 Safety constants ──────────────────────────────────────────────────
 OAKD_STOP_DIST   = 0.30    # meters — stop if obstacle closer than this
 OAKD_SLOW_DIST   = 0.60    # meters — slow if obstacle closer than this
-FLOOR_CHECK_HZ   = 5.0     # floor-drop check rate (numpy-heavy — rate limit it)
+FLOOR_CHECK_HZ   = 1.0     # floor-drop check rate — 1Hz enough, numpy is heavy + eases USB load
 
 _safety_active    = True
 _last_floor_check = 0.0
@@ -735,38 +735,32 @@ def get_depth_map() -> dict | None:
 # ─── Floor-drop / void detection ─────────────────────────────────────────────
 
 def get_floor_drop(
-    strip_y_ratio:    float = 0.90,   # raised — sample closer to bottom edge
-    strip_height_px:  int   = 15,     # narrower strip — less noise
+    strip_y_ratio:    float = 0.75,   # 15cm mount: floor visible at y≈0.65-0.80, not 0.90
+    strip_height_px:  int   = 25,     # taller strip gives better statistics at this height
     patch_cols:       int   = 5,
-    normal_max_m:     float = 5.0,    # raised — large open rooms won't false-trigger
-    drop_threshold_m: float = 2.0,    # raised — need bigger drop to trigger
+    normal_max_m:     float = 6.0,    # larger rooms won't false-trigger
+    drop_threshold_m: float = 3.0,    # 15cm height — small step looks like large drop
 ) -> dict:
     """
     Detect floor discontinuity (holes, stairs, cliffs) from stereo depth.
 
-    Strategy:
-      - Sample a horizontal strip near the bottom of frame (y≈0.85),
-        where the floor appears when the camera is at ground-looking angle.
-      - Compare mid-frame floor depth (y≈0.5) vs bottom-strip edge depth.
-        Large jump → void ahead.
-      - Also flag sparse returns in the bottom strip (open air = drop).
+    Camera mount: OAK-D is ~15cm off the ground. At this height the camera
+    sees the floor at a very shallow angle — the bottom strip of the frame
+    is floor at 20-40cm. Stereo depth on low-texture carpet/tile at that
+    angle returns very few valid pixels (specular reflections, poor baseline).
+    The old 2% sparse threshold fired on every flat indoor floor.
 
-    Confidence levels (matches lidar.py):
-      high   → return_ratio < 5% OR edge depth >> normal_max_m
+    Tuning for 15cm mount:
+      strip_y_ratio:   0.90 → 0.75   sample higher where floor is more visible
+      strip_height_px: 15  → 25      more pixels for better statistics
+      sparse HIGH:     2%  → 0.5%    only truly empty = open air
+      drop_threshold:  2.0 → 3.0     shallow angle exaggerates drop apparent size
+      normal_max_m:    5.0 → 6.0     larger rooms were false-triggering
+
+    Confidence levels:
+      high   → return_ratio < 0.5% OR edge depth >> normal_max_m
       medium → drop_delta > drop_threshold_m OR no edge returns but mid valid
       low    → no anomaly
-
-    Both high AND medium now auto-stop in _safety_check() — stairs are fatal.
-
-    Returns dict:
-      {
-        "void_detected": bool,
-        "confidence":    "high" | "medium" | "low",
-        "floor_mid_m":   float | None,
-        "floor_edge_m":  float | None,
-        "valid_returns": int,
-        "reason":        str,
-      }
     """
     if not _oakd_ok:
         return {"void_detected": False, "confidence": "low",
@@ -815,7 +809,7 @@ def get_floor_drop(
     total_edge_pixels = edge_strip.size
     return_ratio      = valid_count / max(total_edge_pixels, 1)
 
-    if return_ratio < 0.02 and total_edge_pixels > 100:
+    if return_ratio < 0.005 and total_edge_pixels > 100:   # < 0.5% — truly open air only
         void_detected = True
         confidence    = "high"
         reason        = (f"floor edge returns sparse ({return_ratio:.1%}) "

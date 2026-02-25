@@ -44,6 +44,18 @@ Terrain reasoning (egocentric — what is directly ahead of YOU):
 
 Keep spoken responses under 3 sentences unless introducing yourself.
 Speaking via TTS — be natural, not robotic.
+
+WHEN A JSON SCHEMA IS GIVEN — follow these rules absolutely:
+- Output ONLY the JSON object. Nothing before it, nothing after it.
+- No markdown. No code fences. No ```json.
+- Use EXACTLY the field names in the schema. No variations, no additions.
+- "speak" is the speech field — NOT "speaker", "speech", "say", or "tts".
+- "physical_reasoning" is the reasoning field — NOT "reasoning" or "explanation".
+- "target_visible" is the detection field — NOT "target_visibility" or "target_found".
+- Do NOT add fields like "location", "type", "confidence", "target_confidence",
+  "notes", "label", "description", "summary", or any field not in the schema.
+- Booleans: true or false (no quotes, no 1/0).
+- Null fields: null (not "", not "none", not "N/A").
 """
 
 _system_prompt    = _BASE_SYSTEM_PROMPT
