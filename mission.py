@@ -328,14 +328,21 @@ def _ui(key, text):
 
 
 def eric_say(text):
-    _ui("eric_says", text)
-    log_mission_event("eric_say", text[:120])
+    if not text:
+        return
+    # Don't speak or display raw JSON — Cosmos sometimes leaks it into speak field
+    text_stripped = str(text).strip()
+    if text_stripped.startswith("{") or text_stripped.startswith("["):
+        log.warning(f"eric_say received JSON instead of plain text — suppressed: {text_stripped[:80]}")
+        return
+    _ui("eric_says", text_stripped)
+    log_mission_event("eric_say", text_stripped[:120])
     # Truncate to 2 sentences max — long Cosmos responses block TTS for too long
-    sentences = [s.strip() for s in text.replace("!", ".").replace("?", ".").split(".") if s.strip()]
+    sentences = [s.strip() for s in text_stripped.replace("!", ".").replace("?", ".").split(".") if s.strip()]
     short = ". ".join(sentences[:2])
     if short:
         short += "."
-    speak(short or text)
+    speak(short or text_stripped)
 
 
 # ─── Async Cosmos Wrapper ─────────────────────────────────────────────────────
@@ -3119,7 +3126,11 @@ def _process_scan(scan, from_360=False):
 
     if reason:
         log.info(f"Cosmos: {reason}")
-        _ui("log", f"Cosmos: {reason}")
+        # Strip JSON from UI — only show plain-language reasoning
+        reason_display = reason.strip()
+        if reason_display.startswith("{") or reason_display.startswith("["):
+            reason_display = "(scan complete)"
+        _ui("log", f"🧠 {reason_display}")
 
     # ── Social intent + risk assessment ──────────────────────────────────
     social = scan.get("social_intent")
