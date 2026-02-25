@@ -387,6 +387,11 @@ def _advance_step():
         _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
         global _nav_clips_since_scan
         _nav_clips_since_scan = 0
+        try:
+            from avoidance import reset_avoid_counter
+            reset_avoid_counter()
+        except ImportError:
+            pass
         mission_state = State.SEARCHING
         motors.forward(MOTOR_SPEED_SLOW)
 
@@ -1050,6 +1055,11 @@ def start_mission(briefing: str, mission_name: str = ""):
     _nav_clips_since_scan = 0
     _mission_find_count  = 0
     _mission_hazard_log  = []
+    try:
+        from avoidance import reset_avoid_counter
+        reset_avoid_counter()
+    except ImportError:
+        pass
 
     # ── Load YAML metadata if mission_name given ──────────────────────────────
     _mission_alarm_type     = AlarmType.HAZARD
@@ -1146,6 +1156,11 @@ def resume_after_interaction():
     global mission_state, _empty_scans, _avoid_attempts, _scans_since_360, _target_spotted_count
     if mission_active:
         _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
+        try:
+            from avoidance import reset_avoid_counter
+            reset_avoid_counter()
+        except ImportError:
+            pass
         mission_state = State.SEARCHING
         motors.pantilt(0, 5)   # ground-looking default
         motors.forward(MOTOR_SPEED_SLOW)
@@ -3807,6 +3822,11 @@ def _mission_loop():
                 scan = _best_360_scan()
                 _scans_since_360 = _empty_scans = 0
                 _process_scan(scan, from_360=True)
+                try:
+                    from avoidance import reset_avoid_counter
+                    reset_avoid_counter()
+                except ImportError:
+                    pass
                 # Only resume forward if mission still active and not blocked
                 if mission_active and mission_state == State.SEARCHING:
                     if not _void_check()["void"]:
