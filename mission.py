@@ -95,20 +95,112 @@ class State:
     COMPLETE     = "complete"
 
 
-mission_state        = State.IDLE
-mission_active       = False
-conversation_history = []
+# ─── Mission State Container ──────────────────────────────────────────────────
+# Consolidates every mutable module-level global into one typed dataclass.
+#
+# Benefits vs 20+ scattered globals:
+#   • Thread-safety  — attribute access is atomic; no partial-update windows
+#   • Testability    — reset() gives a clean slate without a module reload
+#   • Debuggability  — repr() dumps all state in one log line
+#   • Readability    — _ms._ms.mission_active is explicit, not a mystery global
+#
+# External callers (GUI, etc.) use the backward-compat aliases below _ms, or
+# import _ms directly:
+#     from mission import _ms
+#     if _ms._ms.mission_active: ...
+# ─────────────────────────────────────────────────────────────────────────────
 
-_empty_scans          = 0
-_avoid_attempts       = 0
-_scans_since_360      = 0
-_target_spotted_count = 0   # consecutive scans that saw the target — resets on miss
+@dataclasses.dataclass
+class MissionState:
+    """Single source of truth for all mutable mission state."""
+
+    # ── Core control ──────────────────────────────────────────────────────────
+    _ms.mission_active:       bool  = False
+    _ms.mission_state:        str   = State.IDLE
+    _ms.conversation_history: list  = dataclasses.field(default_factory=list)
+
+    # ── Search / avoidance counters ───────────────────────────────────────────
+    empty_scans:          int   = 0
+    avoid_attempts:       int   = 0
+    scans_since_360:      int   = 0
+    target_spotted_count: int   = 0
+    nav_clips_since_scan: int   = 0
+
+    # ── Mission step engine ───────────────────────────────────────────────────
+    mission_steps:        list  = dataclasses.field(default_factory=list)
+    current_step_idx:     int   = 0
+
+    # ── YAML mission metadata ─────────────────────────────────────────────────
+    mission_alarm_type:    str   = AlarmType.HAZARD
+    mission_target_objects: list = dataclasses.field(default_factory=list)
+    mission_flags:          dict = dataclasses.field(default_factory=dict)
+    mission_find_count:     int  = 0
+    mission_hazard_log:     list = dataclasses.field(default_factory=list)
+
+    # ── Async nav check ───────────────────────────────────────────────────────
+    pending_nav:      object = None   # concurrent.futures.Future | None
+    last_nav_result:  dict   = dataclasses.field(default_factory=dict)
+
+    # ── YOLO Layer 2 detection ────────────────────────────────────────────────
+    yolo_person_detected:    bool   = False
+    yolo_detect_label:       object = None
+    yolo_detect_distance:    object = None
+    yolo_detect_bearing:     object = None
+    yolo_detect_bearing_deg: object = None
+    yolo_detect_time:        float  = 0.0
+
+    def reset_counters(self):
+        """Reset search/avoidance counters — call when starting a new search phase."""
+        self.empty_scans          = 0
+        self.avoid_attempts       = 0
+        self.scans_since_360      = 0
+        self.target_spotted_count = 0
+        self.nav_clips_since_scan = 0
+
+    def reset_for_new_mission(self):
+        """Full reset — call at mission start."""
+        self._ms.conversation_history    = []
+        self.mission_find_count      = 0
+        self.mission_hazard_log      = []
+        self.pending_nav             = None
+        self.last_nav_result         = {}
+        self.yolo_person_detected    = False
+        self.yolo_detect_label       = None
+        self.yolo_detect_distance    = None
+        self.yolo_detect_bearing     = None
+        self.yolo_detect_bearing_deg = None
+        self.yolo_detect_time        = 0.0
+        self.reset_counters()
+
+    def __repr__(self) -> str:
+        return (
+            f"MissionState(active={self._ms.mission_active}, state={self._ms.mission_state}, "
+            f"step={self.current_step_idx}/{len(self.mission_steps)}, "
+            f"empty={self.empty_scans}, avoid={self.avoid_attempts}, "
+            f"spotted={self.target_spotted_count})"
+        )
+
+
+# ── Module-level singleton — the only mutable state in this module ────────────
+_ms = MissionState()
+
+# ── YOLO callback lock (replaces old _yolo_lock module global) ────────────────
+_yolo_lock = threading.Lock()
+
+# ── UI callback registry (infrastructure, not mission state) ──────────────────
+_ui_callbacks: dict = {"eric_says": None, "status": None, "log": None}
+
+# ── Backward-compat aliases so external code can still do: ────────────────────
+#   from mission import _ms.mission_active, _ms.mission_state
+# (These are read-only snapshots — always use _ms directly for writes.)
+_ms.mission_active = _ms._ms.mission_active  # alias
+_ms.mission_state  = _ms._ms.mission_state   # alias
+
+# ── Tuning constants (never mutated at runtime) ──────────────────────────────
 EMPTY_SCAN_LIMIT      = 1   # trigger 360 after just 1 empty scan
 SCANS_BEFORE_360      = 2   # periodic 360 every 2 quick scans
 MAX_AVOID_ATTEMPTS    = 3   # force 360 after this many avoid failures
 TARGET_CONFIRM_NEEDED = 1   # only needs 1 positive scan to approach
-
-_ui_callbacks = {"eric_says": None, "status": None, "log": None}
 
 
 # ─── Terrain Speed Map ────────────────────────────────────────────────────────
@@ -213,28 +305,19 @@ class MissionStep:
 #   wait_for_response  — just wait wait_sec for target to say something
 #   photograph         — save photo_count sharp close-range photos to disk
 
-_mission_steps:     list[MissionStep] = []
-_current_step_idx:  int = 0
-
-# ─── Mission Metadata (loaded from YAML) ──────────────────────────────────────
-# Set when a named YAML mission is loaded. Free-text briefings default to
-# no alarm, no special target list, no special flags.
-_mission_alarm_type:    str       = AlarmType.HAZARD   # default for unknown
-_mission_target_objects: list[str] = []                # extra objects to look for
-_mission_flags:          dict      = {}                # YAML flags: photo_on_find, etc.
-_mission_find_count:     int       = 0                 # how many targets found this mission
-_mission_hazard_log:     list[dict] = []               # all found hazards/targets this run
-
 
 def register_ui_callbacks(**cbs):
     _ui_callbacks.update(cbs)
 
 
 def _ui(key, text):
+    """Deliver a UI event. Never raises — a broken callback must not crash the mission."""
     cb = _ui_callbacks.get(key)
     if cb:
-        try: cb(text)
-        except Exception: pass
+        try:
+            cb(text)
+        except Exception as _exc:
+            log.warning(f"UI callback '{key}' raised: {_exc}")
 
 
 def eric_say(text):
@@ -346,53 +429,49 @@ Return ONLY the JSON array. No markdown. No explanation. No extra text.
         log.info(f"Parsed {len(steps)} mission steps: {[s.target for s in steps]}")
         return steps
     except Exception as e:
-        log_exception("_parse_mission_steps", e)
+        log_exception("_parse_ms.mission_steps", e)
         return [MissionStep(step_num=1, target="target", action="find_and_approach")]
 
 
 def _current_step() -> Optional[MissionStep]:
-    if _mission_steps and _current_step_idx < len(_mission_steps):
-        return _mission_steps[_current_step_idx]
+    if _ms.mission_steps and _ms.current_step_idx < len(_ms.mission_steps):
+        return _ms.mission_steps[_ms.current_step_idx]
     return None
 
 
 def _advance_step():
     """Mark the current step complete and move to the next, or end the mission."""
-    global _current_step_idx
     step = _current_step()
     if step:
         step.completed = True
         log_mission_event(f"step_{step.step_num}_complete", f"{step.target} — {step.action}")
 
-    _current_step_idx += 1
+    _ms.current_step_idx += 1
 
-    if _current_step_idx >= len(_mission_steps):
+    if _ms.current_step_idx >= len(_ms.mission_steps):
         # All steps done
         last_target = step.target if step else "all targets"
         _handle_mission_complete(last_target)
     else:
         nxt = _current_step()
-        msg = f"Step {_current_step_idx} complete. Now finding {nxt.target}."
+        msg = f"Step {_ms.current_step_idx} complete. Now finding {nxt.target}."
         eric_say(msg)
         _ui("status", f"STEP {nxt.step_num}: {nxt.target.upper()}")
         _ui("log", msg)
         # Update Cosmos system prompt so it searches for the next target
         set_mission_briefing(
-            f"CURRENT STEP {nxt.step_num} of {len(_mission_steps)}: "
+            f"CURRENT STEP {nxt.step_num} of {len(_ms.mission_steps)}: "
             f"Find {nxt.target} and {nxt.action.replace('_', ' ')}.\n"
             f"Original mission: {get_mission_briefing()}"
         )
         # Resume searching
-        global mission_state, _empty_scans, _avoid_attempts, _scans_since_360, _target_spotted_count
-        _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
-        global _nav_clips_since_scan
-        _nav_clips_since_scan = 0
+        _ms.reset_counters()
         try:
             from avoidance import reset_avoid_counter
             reset_avoid_counter()
-        except ImportError:
-            pass
-        mission_state = State.SEARCHING
+        except ImportError as _exc:
+            log.debug(f"avoidance module not loaded: {_exc}")
+        _ms.mission_state = State.SEARCHING
         motors.forward(MOTOR_SPEED_SLOW)
 
 
@@ -401,13 +480,12 @@ def _execute_step_action(obj_name: str):
     Called when Eric arrives at the current step's target.
     Executes the required action (speak, photograph, wait, etc.) then advances.
     """
-    global mission_state
     step = _current_step()
     if not step:
         _handle_mission_complete(obj_name)
         return
 
-    mission_state = State.INTERACTING
+    _ms.mission_state = State.INTERACTING
     motors.stop()
     log_mission_event("step_arrived", f"step={step.step_num} target={step.target} action={step.action}")
     log.info(f"Executing step {step.step_num}: {step.action} for {step.target}")
@@ -508,7 +586,8 @@ def _parse_json(response, fallback, label="COSMOS"):
             result = json.loads(clean[s:e])
             return _finalize_result(result, fallback, label)
 
-    except Exception:
+    except Exception as _exc:  # optional component
+        log.debug(f"optional component error: {_exc}")
         log.debug(f"JSON parse failed (label={label}): {response[:80]}")
     return fallback
 
@@ -799,8 +878,8 @@ def _sensor_context() -> str:
 
             # LiDAR void check removed — D500 is horizontal and unreliable for drops.
             # OAK-D stereo depth handles floor-drop detection below.
-    except Exception:
-        pass
+    except Exception as _exc:  # lidar
+        log.debug(f"lidar unavailable: {_exc}")
 
     # ── OAK-D obstacle + floor-drop ───────────────────────────────────────
     try:
@@ -826,8 +905,8 @@ def _sensor_context() -> str:
                     f"floor at mid={mid_str} but drops to {edge_str} at edge — "
                     f"{drop['reason']} — STOP, do NOT move forward"
                 )
-    except Exception:
-        pass
+    except Exception as _exc:  # oakd/yolo
+        log.debug(f"oakd/yolo unavailable: {_exc}")
 
     # ── YOLO Layer 2 — live person/animal positions (ground truth) ────────
     # These are hardware detections from the OAK-D Myriad X VPU — not visual
@@ -841,7 +920,8 @@ def _sensor_context() -> str:
                 from oakd import _last_yolo_positions, _yolo_lock
                 with _yolo_lock:
                     positions = dict(_last_yolo_positions)
-            except Exception:
+            except Exception as _exc:  # oakd/yolo
+                log.debug(f"oakd/yolo error: {_exc}")
                 positions = {}
             fresh = {
                 label: pos for label, pos in positions.items()
@@ -859,8 +939,8 @@ def _sensor_context() -> str:
                     "↑ These are hardware depth measurements from the OAK-D VPU — "
                     "more accurate than visual distance estimates."
                 )
-    except Exception:
-        pass
+    except Exception as _exc:  # optional component
+        log.debug(f"optional component unavailable: {_exc}")
 
     # ── Nav2 pose + navigation state ──────────────────────────────────────
     try:
@@ -874,8 +954,8 @@ def _sensor_context() -> str:
                     f"Nav2 pose: x={pose['x']:.2f}m y={pose['y']:.2f}m "
                     f"yaw={math.degrees(pose['yaw']):.0f}° — {nav_str}"
                 )
-    except Exception:
-        pass
+    except Exception as _exc:  # nav2
+        log.debug(f"nav2 unavailable: {_exc}")
 
     if not lines:
         return ""
@@ -916,8 +996,8 @@ def _void_check() -> dict:
                     "source":     "OAK-D",
                     "sources":    ["OAK-D"],
                 }
-    except Exception:
-        pass
+    except Exception as _exc:  # oakd/yolo
+        log.debug(f"oakd/yolo unavailable: {_exc}")
 
     return {"void": False, "confidence": "low",
             "reason": "no void signal", "source": "none"}
@@ -953,7 +1033,7 @@ def _move_forward(duration_sec: float = 2.0, distance_m: float = 1.5):
                 send_goal(tx, ty, yaw)
                 # Wait for Nav2 to finish or timeout
                 deadline = time.time() + duration_sec + 8.0
-                while is_navigating() and time.time() < deadline and mission_active:
+                while is_navigating() and time.time() < deadline and _ms.mission_active:
                     time.sleep(0.2)
                 return
         except Exception as e:
@@ -985,7 +1065,7 @@ def _turn_nav2_or_direct(direction: str, duration_sec: float = 1.5):
                 # Stay in place — same x,y, just new heading
                 send_goal(pose["x"], pose["y"], target_yaw)
                 deadline = time.time() + duration_sec + 5.0
-                while is_navigating() and time.time() < deadline and mission_active:
+                while is_navigating() and time.time() < deadline and _ms.mission_active:
                     time.sleep(0.2)
                 return
         except Exception as e:
@@ -1039,32 +1119,23 @@ def start_mission(briefing: str, mission_name: str = ""):
     If mission_name is provided, alarm_type and target_objects are loaded from
     the YAML file. Free-text briefings default to no alarm, generic scan.
     """
-    global mission_active, mission_state, conversation_history
-    global _empty_scans, _avoid_attempts, _scans_since_360, _target_spotted_count
-    global _mission_steps, _current_step_idx
-    global _mission_alarm_type, _mission_target_objects, _mission_flags
-    global _mission_find_count, _mission_hazard_log, _nav_clips_since_scan
 
-    if mission_active:
+    if _ms.mission_active:
         return "Mission already active. Disengage first."
     if not briefing.strip():
         return "No mission briefing provided."
 
-    conversation_history = []
-    _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
-    _nav_clips_since_scan = 0
-    _mission_find_count  = 0
-    _mission_hazard_log  = []
+    _ms.reset_for_new_mission()
     try:
         from avoidance import reset_avoid_counter
         reset_avoid_counter()
-    except ImportError:
-        pass
+    except ImportError as _exc:
+        log.debug(f"avoidance module not loaded: {_exc}")
 
     # ── Load YAML metadata if mission_name given ──────────────────────────────
-    _mission_alarm_type     = AlarmType.HAZARD
-    _mission_target_objects = []
-    _mission_flags          = {}
+    _ms.mission_alarm_type     = AlarmType.HAZARD
+    _ms.mission_target_objects = []
+    _ms.mission_flags          = {}
 
     if mission_name:
         yaml_data = load_mission_file(mission_name)
@@ -1073,18 +1144,18 @@ def start_mission(briefing: str, mission_name: str = ""):
             # Normalize "none" string → AlarmType.NONE so sound_alarm handles it correctly
             if str(raw_alarm).lower() in ("none", "null", ""):
                 raw_alarm = AlarmType.NONE
-            _mission_alarm_type     = raw_alarm
-            _mission_target_objects = yaml_data.get("target_objects", [])
-            _mission_flags          = {k: v for k, v in yaml_data.items()
+            _ms.mission_alarm_type     = raw_alarm
+            _ms.mission_target_objects = yaml_data.get("target_objects", [])
+            _ms.mission_flags          = {k: v for k, v in yaml_data.items()
                                        if k not in ("briefing", "name", "alarm_type",
                                                     "target_objects")}
-            log.info(f"Mission YAML loaded: alarm={_mission_alarm_type} "
-                     f"targets={_mission_target_objects} flags={list(_mission_flags)}")
+            log.info(f"Mission YAML loaded: alarm={_ms.mission_alarm_type} "
+                     f"targets={_ms.mission_target_objects} flags={list(_ms.mission_flags)}")
 
     # ── Parse mission into steps ──────────────────────────────────────────────
-    _mission_steps    = _parse_mission_steps(briefing)
-    _current_step_idx = 0
-    step_summaries    = [f"[{s.step_num}] {s.target} → {s.action}" for s in _mission_steps]
+    _ms.mission_steps    = _parse_mission_steps(briefing)
+    _ms.current_step_idx = 0
+    step_summaries    = [f"[{s.step_num}] {s.target} → {s.action}" for s in _ms.mission_steps]
 
     # ── Start mission log ─────────────────────────────────────────────────────
     start_mission_log(briefing[:60], steps=step_summaries)
@@ -1094,7 +1165,7 @@ def start_mission(briefing: str, mission_name: str = ""):
     first_step = _current_step()
     if first_step and first_step.target != "target":
         set_mission_briefing(
-            f"CURRENT STEP 1 of {len(_mission_steps)}: "
+            f"CURRENT STEP 1 of {len(_ms.mission_steps)}: "
             f"Find {first_step.target} and {first_step.action.replace('_', ' ')}.\n"
             f"Original mission: {briefing}"
         )
@@ -1105,7 +1176,7 @@ def start_mission(briefing: str, mission_name: str = ""):
     motors.lights(0, 0)    # LEDs off — only turn on if scene is pitch black
     time.sleep(0.5)
 
-    step_info = f"I have {len(_mission_steps)} step{'s' if len(_mission_steps) > 1 else ''}: {', '.join(step_summaries)}." if len(_mission_steps) > 1 else ""
+    step_info = f"I have {len(_ms.mission_steps)} step{'s' if len(_ms.mission_steps) > 1 else ''}: {', '.join(step_summaries)}." if len(_ms.mission_steps) > 1 else ""
     ack = ask_cosmos(
         f"Mission briefing:\n\"{briefing}\"\n\n"
         + (f"Parsed steps: {step_info}\n\n" if step_info else "")
@@ -1115,11 +1186,11 @@ def start_mission(briefing: str, mission_name: str = ""):
     eric_say(ack)
     log_mission_event("mission_acknowledged", ack[:150])
 
-    if len(_mission_steps) > 1:
-        _ui("log", f"Multi-step mission: {' → '.join(s.target for s in _mission_steps)}")
+    if len(_ms.mission_steps) > 1:
+        _ui("log", f"Multi-step mission: {' → '.join(s.target for s in _ms.mission_steps)}")
 
-    mission_active = True
-    mission_state  = State.SEARCHING
+    _ms.mission_active = True
+    _ms.mission_state  = State.SEARCHING
     _ui("status", "SEARCHING")
     motors.oled(0, "ERIC ACTIVE")
     motors.oled(1, "Searching...")
@@ -1129,9 +1200,8 @@ def start_mission(briefing: str, mission_name: str = ""):
 
 
 def stop_mission():
-    global mission_active, mission_state
-    mission_active = False
-    mission_state  = State.IDLE
+    _ms.mission_active = False
+    _ms.mission_state  = State.IDLE
     motors.stop()
     # Cancel any in-progress Nav2 goal
     try:
@@ -1140,8 +1210,8 @@ def stop_mission():
             from nav2 import cancel_goal, nav2_available
             if nav2_available():
                 cancel_goal()
-    except Exception:
-        pass
+    except Exception as _exc:  # nav2
+        log.debug(f"nav2 unavailable: {_exc}")
     motors.lights(0, 0)
     motors.pantilt(0, 5)
     motors.oled(0, "ERIC STOPPED")
@@ -1153,15 +1223,14 @@ def stop_mission():
 
 
 def resume_after_interaction():
-    global mission_state, _empty_scans, _avoid_attempts, _scans_since_360, _target_spotted_count
-    if mission_active:
-        _empty_scans = _avoid_attempts = _scans_since_360 = _target_spotted_count = 0
+    if _ms.mission_active:
+        _ms.reset_counters()
         try:
             from avoidance import reset_avoid_counter
             reset_avoid_counter()
-        except ImportError:
-            pass
-        mission_state = State.SEARCHING
+        except ImportError as _exc:
+            log.debug(f"avoidance module not loaded: {_exc}")
+        _ms.mission_state = State.SEARCHING
         motors.pantilt(0, 5)   # ground-looking default
         motors.forward(MOTOR_SPEED_SLOW)
         motors.oled(0, "ERIC ACTIVE")
@@ -1327,8 +1396,8 @@ def _nav_check() -> dict:
                     "physical_reasoning": "LiDAR: obstacle within 0.30m stop zone"}
         if lidar_near():
             log.info("Nav check: LiDAR near — slowing")
-    except Exception:
-        pass
+    except Exception as _exc:  # lidar
+        log.debug(f"lidar unavailable: {_exc}")
 
     try:
         from oakd import get_front_depth, oakd_available
@@ -1340,8 +1409,8 @@ def _nav_check() -> dict:
                 return {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
                         "action": "stop",
                         "physical_reasoning": f"OAK-D: obstacle at {d:.2f}m — within stop distance"}
-    except Exception:
-        pass
+    except Exception as _exc:  # oakd/yolo
+        log.debug(f"oakd/yolo unavailable: {_exc}")
 
     # ── Hardware safety: void/drop check ──────────────────────────────────
     void = _void_check()
@@ -1429,7 +1498,7 @@ No markdown. No explanation. No extra fields.
             return {**result, "wall_ahead": True, "obstacle_close": True, "action": "stop"}
 
         # ── Eye-contact gate: only greet if person is close AND facing Eric ──
-        if result.get("person_visible") and mission_active:
+        if result.get("person_visible") and _ms.mission_active:
             motors.stop()
             _ui("log", "👤 Person spotted — checking proximity and eye contact...")
 
@@ -1499,7 +1568,6 @@ def _nav_check_async() -> dict:
 
     Falls back to _nav_check() (single frame, synchronous) if buffer is empty.
     """
-    global _pending_nav, _last_nav_result
 
     # ── Hardware safety always first — no Cosmos delay ────────────────────
     try:
@@ -1509,10 +1577,10 @@ def _nav_check_async() -> dict:
             result = {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
                       "action": "stop",
                       "physical_reasoning": "LiDAR: obstacle within 0.30m stop zone"}
-            _last_nav_result = result
+            _ms.last_nav_result = result
             return result
-    except Exception:
-        pass
+    except Exception as _exc:  # lidar
+        log.debug(f"lidar unavailable: {_exc}")
 
     try:
         from oakd import get_front_depth, oakd_available
@@ -1523,10 +1591,10 @@ def _nav_check_async() -> dict:
                 result = {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
                           "action": "stop",
                           "physical_reasoning": f"OAK-D: obstacle at {d:.2f}m"}
-                _last_nav_result = result
+                _ms.last_nav_result = result
                 return result
-    except Exception:
-        pass
+    except Exception as _exc:  # oakd/yolo
+        log.debug(f"oakd/yolo unavailable: {_exc}")
 
     void = _void_check()
     if void["void"]:
@@ -1536,13 +1604,13 @@ def _nav_check_async() -> dict:
         result = {**_NAV_FALLBACK, "wall_ahead": True, "obstacle_close": True,
                   "action": "stop",
                   "physical_reasoning": f"Void: {void['reason']}"}
-        _last_nav_result = result
+        _ms.last_nav_result = result
         return result
 
     # ── Collect previous Cosmos result if ready ───────────────────────────
-    if _pending_nav is not None and _pending_nav.done():
+    if _ms.pending_nav is not None and _ms.pending_nav.done():
         try:
-            raw = _pending_nav.result(timeout=0)
+            raw = _ms.pending_nav.result(timeout=0)
             parsed = _parse_json(raw, dict(_NAV_FALLBACK), label="NAV_ASYNC")
             log_ai("nav_check_async", raw, label="NAV_ASYNC")
 
@@ -1554,7 +1622,7 @@ def _nav_check_async() -> dict:
                 parsed.update({"wall_ahead": True, "obstacle_close": True, "action": "stop"})
 
             # Eye-contact gate — person visible in buffered frames
-            if parsed.get("person_visible") and mission_active:
+            if parsed.get("person_visible") and _ms.mission_active:
                 motors.stop()
                 _ui("log", "👤 Person in video frames — checking proximity...")
                 ec_frame = capture_frame(CAMERA_PANTILT, 320, 240)
@@ -1593,13 +1661,13 @@ def _nav_check_async() -> dict:
                         log_exception("eye_contact_async", e)
                         motors.forward(MOTOR_SPEED_SLOW)
 
-            _last_nav_result = parsed
+            _ms.last_nav_result = parsed
         except Exception as e:
             log_exception("_nav_check_async collect", e)
-        _pending_nav = None
+        _ms.pending_nav = None
 
     # ── Fire next Cosmos call async — does not block ──────────────────────
-    if _pending_nav is None:
+    if _ms.pending_nav is None:
         frames = get_buffered_frames(CAMERA_PANTILT, n=6)
         if not frames:
             # Buffer cold — fall back to synchronous single-frame check
@@ -1653,17 +1721,17 @@ OUTPUT — single JSON, no markdown:
                 log_exception("nav_async_call", e)
                 return ""
 
-        _pending_nav = _cosmos_executor.submit(_call)
+        _ms.pending_nav = _cosmos_executor.submit(_call)
         _ui("log", f"📹 Async video nav ({len(frames)} frames) fired — acting on last result")
 
     # ── Return last known result immediately — never waits ────────────────
-    if _last_nav_result:
-        return _last_nav_result
+    if _ms.last_nav_result:
+        return _ms.last_nav_result
 
     # Very first call — no result yet, fall back to fast single-frame check
     _ui("log", "📷 Nav check (first call, sync)...")
     result = _nav_check()
-    _last_nav_result = result
+    _ms.last_nav_result = result
     return result
 
 
@@ -1681,7 +1749,8 @@ def _is_pitch_black(frame_b64: str, threshold: float = 20.0) -> bool:
         if img is None:
             return False
         return float(img.mean()) < threshold
-    except Exception:
+    except Exception as _exc:  # optional component
+        log.debug(f"optional component error: {_exc}")
         return False
 
 def _approach_scan() -> dict:
@@ -1754,8 +1823,8 @@ def _approach_scan() -> dict:
                 result["wall_ahead"]     = True
                 result["obstacle_close"] = True
                 result["action"]         = "stop"
-        except Exception:
-            pass
+        except Exception as _exc:  # lidar
+            log.debug(f"lidar unavailable: {_exc}")
 
         try:
             from oakd import get_front_depth, oakd_available
@@ -1765,8 +1834,8 @@ def _approach_scan() -> dict:
                     result["wall_ahead"]     = True
                     result["obstacle_close"] = True
                     result["action"]         = "stop"
-        except Exception:
-            pass
+        except Exception as _exc:  # oakd/yolo
+            log.debug(f"oakd/yolo unavailable: {_exc}")
 
         return result
     except Exception as e:
@@ -1878,8 +1947,8 @@ def _quick_scan() -> dict:
                 result["wall_ahead"] = True
                 result["obstacle_close"] = True
                 result["action"] = "stop"
-        except Exception:
-            pass
+        except Exception as _exc:  # lidar
+            log.debug(f"lidar unavailable: {_exc}")
 
         try:
             from oakd import get_front_depth, oakd_available
@@ -1890,8 +1959,8 @@ def _quick_scan() -> dict:
                     result["wall_ahead"] = True
                     result["obstacle_close"] = True
                     result["action"] = "stop"
-        except Exception:
-            pass
+        except Exception as _exc:  # oakd/yolo
+            log.debug(f"oakd/yolo unavailable: {_exc}")
 
         return result
     except Exception as e:
@@ -1924,7 +1993,8 @@ def _is_blurry(frame_b64: str) -> bool:
         score = cv2.Laplacian(img, cv2.CV_64F).var()
         log.debug(f"Sharpness score: {score:.1f}")
         return score < BLUR_THRESHOLD
-    except Exception:
+    except Exception as _exc:  # optional component
+        log.debug(f"optional component error: {_exc}")
         return False
 
 
@@ -1990,8 +2060,8 @@ def _video_scan_at_position() -> dict:
                 result["wall_ahead"] = True
                 result["obstacle_close"] = True
                 result["action"] = "stop"
-        except Exception:
-            pass
+        except Exception as _exc:  # lidar
+            log.debug(f"lidar unavailable: {_exc}")
 
         try:
             from oakd import get_front_depth, oakd_available
@@ -2001,8 +2071,8 @@ def _video_scan_at_position() -> dict:
                     result["wall_ahead"] = True
                     result["obstacle_close"] = True
                     result["action"] = "stop"
-        except Exception:
-            pass
+        except Exception as _exc:  # oakd/yolo
+            log.debug(f"oakd/yolo unavailable: {_exc}")
 
         return result
     except Exception as e:
@@ -2025,8 +2095,7 @@ def _scan_360_pantilt() -> dict:
     If target found mid-scan, chassis is turned to face it and scan returns immediately.
     One final Cosmos overview pass is run over all collected frames if no target found.
     """
-    global mission_state
-    mission_state = State.SCANNING_360
+    _ms.mission_state = State.SCANNING_360
     _ui("status", "360 SCANNING")
     motors.oled(0, "360 Scan")
     motors.stop()
@@ -2065,7 +2134,7 @@ def _scan_360_pantilt() -> dict:
         exactly as professional platforms use telephoto for confirmation only.
         """
         for pan in PAN_STEPS:
-            if not mission_active:
+            if not _ms.mission_active:
                 return None
             _ui("log", f"{phase_label}: pan {pan:+d}°")
             motors.oled(1, f"Pan {pan:+d}d")
@@ -2249,8 +2318,7 @@ def _scan_360_smart() -> dict:
     Kept as fallback if pan-tilt hardware is unavailable.
     Prefer _scan_360_pantilt() for normal operation.
     """
-    global mission_state
-    mission_state = State.SCANNING_360
+    _ms.mission_state = State.SCANNING_360
     _ui("status", "360 SCANNING (chassis)")
     motors.oled(0, "360 Scan")
     log.info("Starting legacy chassis 360 scan (8×45°)")
@@ -2415,13 +2483,12 @@ def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
     severity:      CRITICAL / WARNING / ADVISORY (hazard patrol) or just context
     frame_b64:     if provided and YAML photo_on_find=True, saves a timestamped photo
     """
-    global _mission_find_count, _mission_hazard_log
 
-    _mission_find_count += 1
+    _ms.mission_find_count += 1
     ts = datetime.datetime.now().strftime("%H:%M:%S")
 
     # ── Build spoken announcement ─────────────────────────────────────────────
-    alarm_type = _mission_alarm_type
+    alarm_type = _ms.mission_alarm_type
 
     if alarm_type == AlarmType.SIREN:
         msg = (f"EMERGENCY! I have found {obj_name}! "
@@ -2433,7 +2500,7 @@ def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
                f"Alerting security personnel immediately. Do NOT approach.")
     elif alarm_type == AlarmType.NATURE:
         # Respect announce_location flag — don't announce location for wildlife (may startle)
-        if _mission_flags.get("announce_location", True):
+        if _ms.mission_flags.get("announce_location", True):
             loc_str = f" {location_hint or 'Right here in front of me'}."
         else:
             loc_str = ""
@@ -2449,23 +2516,23 @@ def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
 
     # ── Log the find ──────────────────────────────────────────────────────────
     entry = {
-        "find_num":  _mission_find_count,
+        "find_num":  _ms.mission_find_count,
         "time":      ts,
         "obj":       obj_name,
         "severity":  severity,
         "location":  location_hint,
         "alarm":     alarm_type,
     }
-    _mission_hazard_log.append(entry)
+    _ms.mission_hazard_log.append(entry)
     log_mission_event("target_alarm", f"[{severity}] {obj_name} @ {location_hint}")
-    _ui("log", f"🚨 [{alarm_type.upper()}] #{_mission_find_count}: {obj_name} — {severity}")
+    _ui("log", f"🚨 [{alarm_type.upper()}] #{_ms.mission_find_count}: {obj_name} — {severity}")
 
     # ── Save photo if configured ──────────────────────────────────────────────
-    if _mission_flags.get("photo_on_find") and frame_b64:
+    if _ms.mission_flags.get("photo_on_find") and frame_b64:
         import base64 as _b64
         safe_obj = obj_name.replace(" ", "_")[:20]
         fname = (pathlib.Path("missions/photos") /
-                 f"{alarm_type}_{_mission_find_count:02d}_{safe_obj}_{ts.replace(':','')}.jpg")
+                 f"{alarm_type}_{_ms.mission_find_count:02d}_{safe_obj}_{ts.replace(':','')}.jpg")
         fname.parent.mkdir(parents=True, exist_ok=True)
         try:
             fname.write_bytes(_b64.b64decode(frame_b64))
@@ -2486,7 +2553,7 @@ def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
     _ui("status", f"🚨 {alarm_type.upper()}: {obj_name}")
 
     # ── Security sweep: back away after alerting ──────────────────────────────
-    if alarm_type == AlarmType.SUSPICIOUS and _mission_flags.get("back_away_on_find"):
+    if alarm_type == AlarmType.SUSPICIOUS and _ms.mission_flags.get("back_away_on_find"):
         _ui("log", "Security protocol: backing away from suspicious object")
         log_action("BACK_AWAY_SUSPICIOUS", obj_name)
         motors.backward(MOTOR_SPEED_SLOW)
@@ -2499,13 +2566,13 @@ def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
         motors.stop()
 
     # ── Search and rescue: stay with target ───────────────────────────────────
-    if alarm_type == AlarmType.SIREN and _mission_flags.get("stay_with_target"):
+    if alarm_type == AlarmType.SIREN and _ms.mission_flags.get("stay_with_target"):
         _ui("log", "SAR protocol: staying with casualty — repeating location broadcast")
         log_action("SAR_STAY", obj_name)
         # Repeat broadcast every 15s for 60s while rescuers come
         for i in range(4):
             time.sleep(15)
-            if not mission_active:
+            if not _ms.mission_active:
                 break
             from tts import speak
             speak(f"Still with casualty: {obj_name}. {location_hint}. "
@@ -2517,19 +2584,19 @@ def _mission_report() -> str:
     Build a plain-text summary report of everything found this mission.
     Called at mission end or on request.
     """
-    if not _mission_hazard_log:
+    if not _ms.mission_hazard_log:
         return "Mission complete. No hazards or targets were found during this patrol."
 
-    lines = [f"MISSION REPORT — {len(_mission_hazard_log)} finding(s):"]
-    for e in _mission_hazard_log:
+    lines = [f"MISSION REPORT — {len(_ms.mission_hazard_log)} finding(s):"]
+    for e in _ms.mission_hazard_log:
         lines.append(
             f"  #{e['find_num']:02d} [{e['time']}] [{e['severity']}] "
             f"{e['obj']} — {e['location'] or 'location unrecorded'}"
         )
 
     # Severity summary for hazard/security missions
-    criticals = sum(1 for e in _mission_hazard_log if e["severity"] == "CRITICAL")
-    warnings  = sum(1 for e in _mission_hazard_log if e["severity"] == "WARNING")
+    criticals = sum(1 for e in _ms.mission_hazard_log if e["severity"] == "CRITICAL")
+    warnings  = sum(1 for e in _ms.mission_hazard_log if e["severity"] == "WARNING")
     if criticals or warnings:
         lines.append(f"\nSUMMARY: {criticals} CRITICAL, {warnings} WARNING items require action.")
 
@@ -2542,11 +2609,11 @@ def _get_mission_scan_overlay() -> str:
     This customises what Cosmos looks for based on the active mission type.
     Includes character hints and current stage goal from YAML if available.
     """
-    if not _mission_target_objects and not _mission_alarm_type:
+    if not _ms.mission_target_objects and not _ms.mission_alarm_type:
         return ""
 
-    alarm = _mission_alarm_type
-    targets = _mission_target_objects
+    alarm = _ms.mission_alarm_type
+    targets = _ms.mission_target_objects
 
     if alarm == AlarmType.SIREN:
         target_list = ", ".join(targets) if targets else "injured or unconscious people"
@@ -2615,7 +2682,7 @@ def _get_character_context() -> str:
     Build a character hint block from the YAML 'characters' list.
     Injected into Cosmos prompts so Eric knows how to interact with each character.
     """
-    characters = _mission_flags.get("characters", [])
+    characters = _ms.mission_flags.get("characters", [])
     if not characters:
         return ""
     lines = ["CHARACTER GUIDE (how to interact with each person you meet):"]
@@ -2633,10 +2700,10 @@ def _get_stage_context() -> str:
     Return the current mission stage goal from the YAML 'mission_stages' list.
     Gives Cosmos a focused sub-goal that matches the current step index.
     """
-    stages = _mission_flags.get("mission_stages", [])
-    if not stages or _current_step_idx >= len(stages):
+    stages = _ms.mission_flags.get("mission_stages", [])
+    if not stages or _ms.current_step_idx >= len(stages):
         return ""
-    stage = stages[_current_step_idx]
+    stage = stages[_ms.current_step_idx]
     goal  = stage.get("goal", "") if isinstance(stage, dict) else str(stage)
     if not goal:
         return ""
@@ -2644,10 +2711,9 @@ def _get_stage_context() -> str:
 
 
 def _handle_mission_complete(obj_name):
-    global mission_active, mission_state
     log.info(f"MISSION COMPLETE — {obj_name}")
     log_mission_event("mission_complete", obj_name or "target")
-    mission_state = State.COMPLETE
+    _ms.mission_state = State.COMPLETE
     motors.stop()
     stop_alarm()   # cancel any running alarm pattern
     try:
@@ -2656,8 +2722,8 @@ def _handle_mission_complete(obj_name):
             from nav2 import cancel_goal, nav2_available
             if nav2_available():
                 cancel_goal()
-    except Exception:
-        pass
+    except Exception as _exc:  # nav2
+        log.debug(f"nav2 unavailable: {_exc}")
     motors.oled(0, "MISSION DONE!")
     motors.oled(1, (obj_name or "Target")[:16])
     _ui("status", "MISSION COMPLETE")
@@ -2672,12 +2738,12 @@ def _handle_mission_complete(obj_name):
 
     # Build report for patrol/security missions
     report = _mission_report()
-    if _mission_hazard_log:
+    if _ms.mission_hazard_log:
         _ui("log", f"📋 MISSION REPORT:\n{report}")
 
     announcement = ask_cosmos(
         f"You found: {obj_name or 'the target'}. Mission complete. "
-        + (f"You found {len(_mission_hazard_log)} item(s) during the mission. " if _mission_hazard_log else "")
+        + (f"You found {len(_ms.mission_hazard_log)} item(s) during the mission. " if _ms.mission_hazard_log else "")
         + "Warm triumphant 2-3 sentence announcement.",
         max_tokens=120
     )
@@ -2688,7 +2754,7 @@ def _handle_mission_complete(obj_name):
 
     end_mission_log(completed=True)
 
-    mission_active = False
+    _ms.mission_active = False
     _ui("status", "MISSION COMPLETE")
     motors.oled(0, "TARGET FOUND!")
     motors.oled(1, "Mission done!")
@@ -2697,14 +2763,13 @@ def _handle_mission_complete(obj_name):
 # ─── Character Interaction ────────────────────────────────────────────────────
 
 def handle_character_response(character, said):
-    global conversation_history
-    conversation_history.append({"character": character, "said": said, "time": time.time()})
-    history = "\n".join(f"- {e['character']}: {e['said']}" for e in conversation_history[-5:])
-    n = sum(1 for e in conversation_history if e["character"] == character)
+    _ms.conversation_history.append({"character": character, "said": said, "time": time.time()})
+    history = "\n".join(f"- {e['character']}: {e['said']}" for e in _ms.conversation_history[-5:])
+    n = sum(1 for e in _ms.conversation_history if e["character"] == character)
 
     # Include per-character hint from YAML if available
     char_hint = ""
-    for c in _mission_flags.get("characters", []):
+    for c in _ms.mission_flags.get("characters", []):
         if c.get("name", "").lower() == character.lower():
             char_hint = f"Character note: {c.get('hint', '')}\n" if c.get("hint") else ""
             break
@@ -2750,7 +2815,7 @@ def _approach_target():
          b) Lower confidence threshold hint in prompt ("even partial view").
 
     4. Flip-flop guard (shared with _process_scan):
-       Uses the global _target_spotted_count so persistence carries across
+       Uses the global _ms.target_spotted_count so persistence carries across
        the scan→approach boundary. A single "invisible" scan does NOT abort.
        APPROACH_INVISIBLE_LIMIT consecutive bad frames → lost target.
 
@@ -2764,7 +2829,6 @@ def _approach_target():
     On arrival: calls _execute_step_action() so multi-step missions advance.
     On lost target: resets to SEARCHING and resumes forward motion.
     """
-    global mission_state, _target_spotted_count
 
     _ui("log", "Approaching target (hardware-first)...")
     motors.oled(1, "Approaching...")
@@ -2785,13 +2849,13 @@ def _approach_target():
 
     # ── Seed flip-flop counter so the first bad frame doesn't abort us ────────
     # We enter _approach_target because _process_scan just confirmed the target.
-    # Make sure _target_spotted_count reflects that so the guard has headroom.
-    if _target_spotted_count < 2:
-        _target_spotted_count = 2
-        log.debug("approach: seeded _target_spotted_count=2 from confirmed entry")
+    # Make sure _ms.target_spotted_count reflects that so the guard has headroom.
+    if _ms.target_spotted_count < 2:
+        _ms.target_spotted_count = 2
+        log.debug("approach: seeded _ms.target_spotted_count=2 from confirmed entry")
 
     for attempt in range(APPROACH_MAX_MOVES):
-        if not mission_active:
+        if not _ms.mission_active:
             break
 
         # ── Hardware distance gate BEFORE moving ─────────────────────────────
@@ -2808,8 +2872,8 @@ def _approach_target():
                     time.sleep(0.3)
                     _execute_step_action(None)
                     return
-        except Exception:
-            pass
+        except Exception as _exc:  # oakd/yolo
+            log.debug(f"oakd/yolo unavailable: {_exc}")
 
         # Check YOLO position memory (hardware depth — more accurate than Cosmos text)
         try:
@@ -2836,8 +2900,8 @@ def _approach_target():
                             time.sleep(0.3)
                             _execute_step_action(lbl)
                             return
-        except Exception:
-            pass
+        except Exception as _exc:  # oakd/yolo
+            log.debug(f"oakd/yolo unavailable: {_exc}")
 
         # ── YOLO bearing-based steering (hardware, before moving) ─────────────
         try:
@@ -2851,8 +2915,8 @@ def _approach_target():
                         direction = "left" if bearing_deg < 0 else "right"
                         _ui("log", f"YOLO steer: {direction} {bearing_deg:+.0f}° ({turn_sec:.2f}s)")
                         _turn_nav2_or_direct(direction, turn_sec)
-        except Exception:
-            pass
+        except Exception as _exc:  # oakd/yolo
+            log.debug(f"oakd/yolo unavailable: {_exc}")
 
         # ── Move one clip ─────────────────────────────────────────────────────
         _move_forward(duration_sec=APPROACH_MOVE_SEC, distance_m=0.4)
@@ -2877,8 +2941,8 @@ def _approach_target():
                         # Very close — avoid crushing the target with another move
                         _ui("log", f"OAK-D: {hw_dist:.2f}m — very close, scanning now")
                         moves_since_scan = APPROACH_SCAN_EVERY  # force scan now
-        except Exception:
-            pass
+        except Exception as _exc:  # oakd/yolo
+            log.debug(f"oakd/yolo unavailable: {_exc}")
 
         # ── Cosmos approach scan (every APPROACH_SCAN_EVERY moves) ───────────
         if moves_since_scan < APPROACH_SCAN_EVERY:
@@ -2902,11 +2966,11 @@ def _approach_target():
                 small_obstacle=check.get("small_obstacle", False)
             )
             if force_360:
-                mission_state = State.SEARCHING
+                _ms.mission_state = State.SEARCHING
                 return
             # After avoidance, reseed counter so we don't immediately declare lost
-            if _target_spotted_count < 2:
-                _target_spotted_count = 2
+            if _ms.target_spotted_count < 2:
+                _ms.target_spotted_count = 2
             continue
 
         if check.get("mission_complete"):
@@ -2939,7 +3003,8 @@ def _approach_target():
             yolo_fresh = (oakd_available() and yolo_available() and
                           get_last_yolo_position("person") is not None and
                           (time.monotonic() - (get_last_yolo_position("person") or {}).get("timestamp", 0)) < 2.0)
-        except Exception:
+        except Exception as _exc:  # oakd/yolo
+            log.debug(f"oakd/yolo error: {_exc}")
             yolo_fresh = False
 
         if not yolo_fresh:
@@ -2993,20 +3058,20 @@ def _approach_target():
                 )
                 eric_say(greeting)
                 log_mission_event("person_greeted_approach", name)
-                mission_state = State.INTERACTING
+                _ms.mission_state = State.INTERACTING
                 return
 
         # ── Flip-flop persistence guard ───────────────────────────────────────
         target_visible = check.get("target_visible", False)
         if target_visible:
-            _target_spotted_count += 1
+            _ms.target_spotted_count += 1
             invisible_count = 0
         else:
-            if _target_spotted_count > 0:
-                _target_spotted_count -= 1
-            if _target_spotted_count > 0:
+            if _ms.target_spotted_count > 0:
+                _ms.target_spotted_count -= 1
+            if _ms.target_spotted_count > 0:
                 log.info(f"Approach flip-flop: forcing visible "
-                         f"(lock remaining={_target_spotted_count})")
+                         f"(lock remaining={_ms.target_spotted_count})")
                 invisible_count = 0   # don't count this against us
             else:
                 invisible_count += 1
@@ -3016,20 +3081,18 @@ def _approach_target():
                     _ui("log", "Lost target after 5 consecutive bad scans — resuming search")
                     log_mission_event("target_lost",
                                       "5 consecutive invisible Cosmos scans in approach")
-                    mission_state = State.SEARCHING
+                    _ms.mission_state = State.SEARCHING
                     motors.forward(MOTOR_SPEED_SLOW)
                     return
 
     # ── Approach timeout — treat as arrived rather than give up ──────────────
     _ui("log", "Approach timeout — assuming arrived, executing step action")
     log_mission_event("approach_timeout", f"{APPROACH_MAX_MOVES} moves")
-    mission_state = State.INTERACTING
+    _ms.mission_state = State.INTERACTING
     _execute_step_action(None)
 
 
 def _process_scan(scan, from_360=False):
-    global mission_state, _empty_scans, _avoid_attempts, _scans_since_360
-    global _target_spotted_count
 
     obj            = scan.get("object", "unknown")
     obj_name       = scan.get("object_name")
@@ -3092,7 +3155,7 @@ def _process_scan(scan, from_360=False):
         else:
             motors.right(MOTOR_SPEED_SLOW); time.sleep(1.8); motors.stop()
         log_mission_event("void_avoided", f"backed + turned {away}")
-        mission_state = State.SEARCHING
+        _ms.mission_state = State.SEARCHING
         return
 
     obstacle_close = scan.get("obstacle_close", False)
@@ -3110,10 +3173,10 @@ def _process_scan(scan, from_360=False):
         from avoidance import avoid_obstacle
         force_360 = avoid_obstacle(wall_ahead=is_wall, small_obstacle=small_obs)
         if force_360:
-            _scans_since_360 = SCANS_BEFORE_360
+            _ms.scans_since_360 = SCANS_BEFORE_360
         else:
             motors.forward(MOTOR_SPEED_SLOW)
-        mission_state = State.SEARCHING
+        _ms.mission_state = State.SEARCHING
         return
 
     if small_obs and not target_visible:
@@ -3122,29 +3185,29 @@ def _process_scan(scan, from_360=False):
         motors.forward(MOTOR_SPEED_SLOW)
 
     if not wall_ahead and not obstacle_close and not small_obs:
-        _avoid_attempts = 0
+        _ms.avoid_attempts = 0
         try:
             from avoidance import reset_avoid_counter
             reset_avoid_counter()
-        except ImportError:
-            pass
+        except ImportError as _exc:
+            log.debug(f"avoidance module not loaded: {_exc}")
 
     if speak_tx:
         eric_say(speak_tx)
 
     # ── Target persistence: Cosmos often flip-flops target_visible ───────────
     if target_visible:
-        _target_spotted_count += 1
+        _ms.target_spotted_count += 1
     else:
-        if _target_spotted_count > 0:
-            _target_spotted_count -= 1
-            if _target_spotted_count > 0:
+        if _ms.target_spotted_count > 0:
+            _ms.target_spotted_count -= 1
+            if _ms.target_spotted_count > 0:
                 log.info("Target_visible=False but keeping target lock (Cosmos flip-flop guard)")
                 target_visible = True
 
     if target_visible:
-        _empty_scans = 0
-        _target_spotted_count = 0
+        _ms.empty_scans = 0
+        _ms.target_spotted_count = 0
         direction = str(target_dir).lower().strip() if target_dir else "front"
 
         # ── Mission-specific alarm: hazard/rescue/security/nature find ────────
@@ -3153,13 +3216,13 @@ def _process_scan(scan, from_360=False):
         # For hazard patrol / nature, alarm when it matches target_objects list.
         _should_alarm = False
         _alarm_severity = "WARNING"
-        if _mission_alarm_type in (AlarmType.SIREN, AlarmType.SUSPICIOUS):
+        if _ms.mission_alarm_type in (AlarmType.SIREN, AlarmType.SUSPICIOUS):
             _should_alarm = True
             _alarm_severity = "CRITICAL"
-        elif _mission_alarm_type in (AlarmType.HAZARD, AlarmType.NATURE):
+        elif _ms.mission_alarm_type in (AlarmType.HAZARD, AlarmType.NATURE):
             t_lower = str(obj_name or obj).lower()
             _should_alarm = any(kw.lower() in t_lower
-                                for kw in (_mission_target_objects or [obj]))
+                                for kw in (_ms.mission_target_objects or [obj]))
             _alarm_severity = scan.get("severity", "WARNING")
 
         if _should_alarm:
@@ -3196,9 +3259,9 @@ def _process_scan(scan, from_360=False):
     if obj in ["person", "robot"] and not target_visible:
         dist_str = str(distance).lower()
         if dist_str in _NEAR_DISTANCES or in_path:
-            _empty_scans = 0
+            _ms.empty_scans = 0
             motors.stop()
-            mission_state = State.INTERACTING
+            _ms.mission_state = State.INTERACTING
             name = obj_name or obj
             motors.oled(0, name[:16])
             motors.oled(1, "Talking...")
@@ -3230,7 +3293,7 @@ def _process_scan(scan, from_360=False):
                     should_greet = ec.get("close_and_facing", True)
                     if not should_greet:
                         _ui("log", f"Person near but not facing Eric — not greeting ({ec.get('reasoning','')})")
-                        mission_state = State.SEARCHING
+                        _ms.mission_state = State.SEARCHING
                         motors.forward(MOTOR_SPEED_SLOW)
                         return
                 except Exception as e:
@@ -3250,8 +3313,8 @@ def _process_scan(scan, from_360=False):
             _ui("log", f"Person ({obj_name or 'unknown'}) visible but {dist_str} — continuing")
 
     if obj in ["clear", "unknown"] and not target_visible:
-        _empty_scans += 1
-        _ui("log", f"Nothing found ({_empty_scans}/{EMPTY_SCAN_LIMIT})")
+        _ms.empty_scans += 1
+        _ui("log", f"Nothing found ({_ms.empty_scans}/{EMPTY_SCAN_LIMIT})")
 
     if from_360 and clear_dir != "front":
         _face_direction(clear_dir)
@@ -3268,7 +3331,7 @@ def _process_scan(scan, from_360=False):
         from avoidance import avoid_obstacle
         force_360 = avoid_obstacle(wall_ahead=True, small_obstacle=False)
         if force_360:
-            _scans_since_360 = SCANS_BEFORE_360
+            _ms.scans_since_360 = SCANS_BEFORE_360
         else:
             motors.forward(MOTOR_SPEED_SLOW)
         return
@@ -3297,7 +3360,7 @@ def _process_scan(scan, from_360=False):
     else:
         motors.forward(terrain_speed)
 
-    mission_state = State.SEARCHING
+    _ms.mission_state = State.SEARCHING
     motors.oled(0, "ERIC ACTIVE")
     motors.oled(1, "Searching...")
     _ui("status", "SEARCHING")
@@ -3309,26 +3372,11 @@ def _process_scan(scan, from_360=False):
 # Eric moves continuously — no Cosmos called while moving.
 # Stopped scans (_quick_scan, _best_360_scan) happen on a timer.
 
-_nav_clips_since_scan = 0
-NAV_CLIPS_BETWEEN_SCANS = 3   # stopped scan every 3 movement intervals (was 2)
-NAV_MOVE_INTERVAL       = 4.0  # seconds per movement clip (was 5.0)
+# ── Mission loop constants (immutable) ───────────────────────────────────────
+NAV_CLIPS_BETWEEN_SCANS = 3   # stopped scan every 3 movement intervals
+NAV_MOVE_INTERVAL       = 4.0  # seconds per movement clip
+# YOLO detection state and _yolo_lock are in _ms / module scope above
 
-# ── YOLO Layer 2 detection state ──────────────────────────────────────────────
-# These module-level variables replace the previous four-variable block.
-
-import time
-import threading
-import logging
-
-log = logging.getLogger("eric.mission")
-
-_yolo_person_detected  = False   # set by YOLO callback, cleared after handling
-_yolo_detect_label     = None    # "person" | "dog" | "cat" etc
-_yolo_detect_distance  = None    # meters
-_yolo_detect_bearing   = None    # "left" | "center" | "right"
-_yolo_detect_bearing_deg = None  # signed float degrees (−45…+45)
-_yolo_detect_time      = 0.0     # monotonic timestamp of last detection
-_yolo_lock             = threading.Lock()
 
 YOLO_POSITION_STALE_S  = 3.0    # seconds — detection data older than this is stale
 
@@ -3345,15 +3393,12 @@ def _on_yolo_detection(label: str, distance_m: float,
     Signature change: now accepts bearing_deg for proportional steering.
 
     If mission is INTERACTING: stores detection but does not set
-    _yolo_person_detected — the mission loop will pick it up on
+    _ms.yolo_person_detected — the mission loop will pick it up on
     the next iteration when the state returns to SEARCHING.
     Log entry is always written so the operator sees it in the GUI.
     """
-    global _yolo_person_detected, _yolo_detect_label
-    global _yolo_detect_distance, _yolo_detect_bearing
-    global _yolo_detect_bearing_deg, _yolo_detect_time
 
-    if not mission_active:
+    if not _ms.mission_active:
         return
 
     # Always log — even during interaction, operator should see this
@@ -3362,19 +3407,19 @@ def _on_yolo_detection(label: str, distance_m: float,
     log_action("YOLO_DETECT", f"{label} {distance_m:.1f}m "
                                f"{bearing} {bearing_deg:+.0f}°")
 
-    if mission_state in (State.COMPLETE,):
+    if _ms.mission_state in (State.COMPLETE,):
         return  # Mission done — ignore
 
     # Store position even when INTERACTING (recovered on next SEARCHING tick)
     with _yolo_lock:
-        _yolo_detect_label       = label
-        _yolo_detect_distance    = distance_m
-        _yolo_detect_bearing     = bearing
-        _yolo_detect_bearing_deg = bearing_deg
-        _yolo_detect_time        = time.monotonic()
+        _ms.yolo_detect_label       = label
+        _ms.yolo_detect_distance    = distance_m
+        _ms.yolo_detect_bearing     = bearing
+        _ms.yolo_detect_bearing_deg = bearing_deg
+        _ms.yolo_detect_time        = time.monotonic()
 
-        if mission_state not in (State.INTERACTING,):
-            _yolo_person_detected = True
+        if _ms.mission_state not in (State.INTERACTING,):
+            _ms.yolo_person_detected = True
         # If INTERACTING: flag stays False — picked up on next SEARCHING loop
 
 
@@ -3398,8 +3443,8 @@ def _unregister_yolo_callback():
         set_yolo_active(False)
         set_yolo_callback(None)
         clear_yolo_motor_stop()
-    except Exception:
-        pass
+    except Exception as _exc:  # oakd/yolo
+        log.debug(f"oakd/yolo unavailable: {_exc}")
 
 
 # ─── Handle detection in mission loop ────────────────────────────────────────
@@ -3418,17 +3463,16 @@ def _handle_yolo_detection() -> bool:
       falls back to oakd.get_last_yolo_position() for fresh spatial data.
     • Mission-aware: approach_on_detect flag from YAML still controls behaviour.
     """
-    global _yolo_person_detected, mission_state
 
     with _yolo_lock:
-        if not _yolo_person_detected:
+        if not _ms.yolo_person_detected:
             return False
-        label       = _yolo_detect_label
-        dist_m      = _yolo_detect_distance
-        bearing     = _yolo_detect_bearing
-        bearing_deg = _yolo_detect_bearing_deg
-        detect_age  = time.monotonic() - _yolo_detect_time
-        _yolo_person_detected = False   # clear flag
+        label       = _ms.yolo_detect_label
+        dist_m      = _ms.yolo_detect_distance
+        bearing     = _ms.yolo_detect_bearing
+        bearing_deg = _ms.yolo_detect_bearing_deg
+        detect_age  = time.monotonic() - _ms.yolo_detect_time
+        _ms.yolo_person_detected = False   # clear flag
 
     # ── Stale detection guard ─────────────────────────────────────────────────
     # If the stored detection is old (Cosmos was running), get fresh position.
@@ -3445,8 +3489,8 @@ def _handle_yolo_detection() -> bool:
             else:
                 _ui("log", f"YOLO: detection {detect_age:.1f}s old, no fresh data — skipping")
                 return True  # consumed the flag, don't act on stale data
-        except Exception:
-            pass
+        except Exception as _exc:  # oakd/yolo
+            log.debug(f"oakd/yolo unavailable: {_exc}")
 
     # ── Clear the Layer 2 motor guard ────────────────────────────────────────
     # Layer 2 already called motors.stop() for this detection.
@@ -3456,12 +3500,12 @@ def _handle_yolo_detection() -> bool:
         from oakd import yolo_motor_stop_issued, clear_yolo_motor_stop
         if yolo_motor_stop_issued():
             clear_yolo_motor_stop()
-    except Exception:
-        pass
+    except Exception as _exc:  # oakd/yolo
+        log.debug(f"oakd/yolo unavailable: {_exc}")
 
     # ── Mission flag ──────────────────────────────────────────────────────────
-    approach    = _mission_flags.get("approach_on_detect", True)
-    detect_dist = float(_mission_flags.get("detect_distance", 2.0))
+    approach    = _ms.mission_flags.get("approach_on_detect", True)
+    detect_dist = float(_ms.mission_flags.get("detect_distance", 2.0))
 
     if dist_m > detect_dist:
         # ── Far detection: slow + steer proportionally toward target ──────────
@@ -3482,7 +3526,8 @@ def _handle_yolo_detection() -> bool:
             from oakd import yolo_motor_stop_issued
             if not yolo_motor_stop_issued():
                 motors.forward(MOTOR_SPEED_SLOW)
-        except Exception:
+        except Exception as _exc:  # oakd/yolo
+            log.debug(f"oakd/yolo error: {_exc}")
             motors.forward(MOTOR_SPEED_SLOW)
         return True
 
@@ -3524,12 +3569,12 @@ def _handle_yolo_detection() -> bool:
         eric_say(greeting)
         motors.pantilt(0, 15)
         time.sleep(0.3)
-        mission_state = State.INTERACTING
+        _ms.mission_state = State.INTERACTING
         _execute_step_action(label)
         return True
 
     # ── Not a step-target match — normal greeting / observation ───────────────
-    mission_state = State.INTERACTING
+    _ms.mission_state = State.INTERACTING
 
     if approach:
         _ui("log", f"YOLO: {label} confirmed at {dist_m:.1f}m — handing to Cosmos")
@@ -3560,8 +3605,6 @@ def _handle_yolo_detection() -> bool:
     return True
 
 def _mission_loop():
-    global mission_active, mission_state, _empty_scans, _scans_since_360
-    global _avoid_attempts, _nav_clips_since_scan
 
     # ── Register YOLO Layer 2 callback ────────────────────────────────────────
     _register_yolo_callback()
@@ -3594,7 +3637,7 @@ def _mission_loop():
     # Turn left 60°, capture, turn right 120° (past centre), capture, return left 60°
     # Net result: chassis returns exactly to starting heading (0°)
     for direction, deg in [("left", 60), ("right", 120), ("left", 60)]:
-        if not mission_active:
+        if not _ms.mission_active:
             break
         turn_sec = TURN_90_SEC * (deg / 90)
         if direction == "left":
@@ -3611,7 +3654,7 @@ def _mission_loop():
 
     motors.pantilt(0, 0)
 
-    if sweep_frames and mission_active:
+    if sweep_frames and _ms.mission_active:
         sensor_ctx  = _sensor_context()
         mission_ov  = _get_mission_scan_overlay()
         step        = _current_step()
@@ -3644,9 +3687,9 @@ def _mission_loop():
                 _ui("log", "🎯 TARGET SPOTTED in initial sweep — approaching immediately!")
                 motors.oled(1, "TARGET IN SIGHT!")
                 _process_scan(sweep_result, from_360=True)
-                if mission_active and mission_state == State.SEARCHING:
+                if _ms.mission_active and _ms.mission_state == State.SEARCHING:
                     motors.forward(MOTOR_SPEED_SLOW)
-                _nav_clips_since_scan = 0
+                _ms.nav_clips_since_scan = 0
             elif sweep_result.get("void_ahead") or sweep_result.get("wall_ahead"):
                 _ui("log", "⚠️  Obstacle/void in initial sweep — scanning 360°")
                 # Fall through to full 360 scan below
@@ -3666,19 +3709,19 @@ def _mission_loop():
             log_exception("initial_sweep_cosmos", e)
 
     # ── Full 360 scan if target not spotted in initial sweep ──────────────────
-    if mission_active and not sweep_found:
+    if _ms.mission_active and not sweep_found:
         _ui("log", "🔄 Full 360° scan...")
         scan = _best_360_scan()
         _process_scan(scan, from_360=True)
 
-    if mission_active and mission_state == State.SEARCHING:
+    if _ms.mission_active and _ms.mission_state == State.SEARCHING:
         motors.forward(MOTOR_SPEED_SLOW)
 
-    _nav_clips_since_scan = 0
+    _ms.nav_clips_since_scan = 0
 
-    while mission_active:
+    while _ms.mission_active:
         try:
-            if mission_state in (State.INTERACTING, State.COMPLETE):
+            if _ms.mission_state in (State.INTERACTING, State.COMPLETE):
                 time.sleep(0.5)
                 continue
 
@@ -3693,35 +3736,35 @@ def _mission_loop():
             # YOLO detects birds/people mid-move, handled within 200ms not 5s.
             # Layer 1 (LiDAR/OAK-D) still fires motors.stop() instantly from
             # its own thread — the poll handles mission-level reactions only.
-            if _nav_clips_since_scan < NAV_CLIPS_BETWEEN_SCANS:
-                _nav_clips_since_scan += 1
+            if _ms.nav_clips_since_scan < NAV_CLIPS_BETWEEN_SCANS:
+                _ms.nav_clips_since_scan += 1
                 motors.forward(MOTOR_SPEED_SLOW)
 
                 move_deadline = time.monotonic() + NAV_MOVE_INTERVAL
                 yolo_broke    = False
-                while time.monotonic() < move_deadline and mission_active:
+                while time.monotonic() < move_deadline and _ms.mission_active:
                     time.sleep(0.1)  # 100ms poll — faster stop response
 
                     # ── IMMEDIATE STOP if mission deactivated ─────────────────
-                    if not mission_active:
+                    if not _ms.mission_active:
                         motors.stop()
                         break
 
                     # YOLO found something mid-move — stop and handle it now
                     with _yolo_lock:
-                        yolo_pending = _yolo_person_detected
+                        yolo_pending = _ms.yolo_person_detected
                     if yolo_pending:
                         motors.stop()
                         yolo_broke = True
                         break
 
                     # Mission paused mid-move (interaction started)
-                    if mission_state in (State.INTERACTING, State.COMPLETE):
+                    if _ms.mission_state in (State.INTERACTING, State.COMPLETE):
                         motors.stop()
                         yolo_broke = True
                         break
 
-                if not mission_active:
+                if not _ms.mission_active:
                     motors.stop()
                     break
 
@@ -3737,40 +3780,40 @@ def _mission_loop():
                         from avoidance import avoid_obstacle
                         force_360 = avoid_obstacle(wall_ahead=True, small_obstacle=False)
                         if force_360:
-                            _scans_since_360 = SCANS_BEFORE_360
-                            _nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS
+                            _ms.scans_since_360 = SCANS_BEFORE_360
+                            _ms.nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS
                         else:
                             motors.forward(MOTOR_SPEED_SLOW)
-                except Exception:
-                    pass
+                except Exception as _exc:  # lidar
+                    log.debug(f"lidar unavailable: {_exc}")
                 continue
 
             # ── Stopped scan every NAV_CLIPS_BETWEEN_SCANS movement intervals ─
-            _nav_clips_since_scan = 0
-            _scans_since_360 += 1
+            _ms.nav_clips_since_scan = 0
+            _ms.scans_since_360 += 1
             motors.stop()
             time.sleep(0.3)
 
-            do_360 = (_empty_scans >= EMPTY_SCAN_LIMIT or
-                      _scans_since_360 >= SCANS_BEFORE_360)
+            do_360 = (_ms.empty_scans >= EMPTY_SCAN_LIMIT or
+                      _ms.scans_since_360 >= SCANS_BEFORE_360)
 
             if do_360:
-                if _empty_scans >= EMPTY_SCAN_LIMIT:
+                if _ms.empty_scans >= EMPTY_SCAN_LIMIT:
                     eric_say("Nothing found. Performing a full 360 scan.")
                 else:
                     _ui("log", "Periodic 360 scan...")
                 log_mission_event("360_scan_triggered",
-                                  f"empty={_empty_scans} scans_since={_scans_since_360}")
+                                  f"empty={_ms.empty_scans} scans_since={_ms.scans_since_360}")
                 scan = _best_360_scan()
-                _scans_since_360 = _empty_scans = 0
+                _ms.scans_since_360 = _ms.empty_scans = 0
                 _process_scan(scan, from_360=True)
                 try:
                     from avoidance import reset_avoid_counter
                     reset_avoid_counter()
-                except ImportError:
-                    pass
+                except ImportError as _exc:
+                    log.debug(f"avoidance module not loaded: {_exc}")
                 # Only resume forward if mission still active and not blocked
-                if mission_active and mission_state == State.SEARCHING:
+                if _ms.mission_active and _ms.mission_state == State.SEARCHING:
                     if not _void_check()["void"]:
                         motors.forward(MOTOR_SPEED_SLOW)
             else:
@@ -3787,6 +3830,6 @@ def _mission_loop():
 
     motors.stop()
     _unregister_yolo_callback()
-    mission_state = State.IDLE
+    _ms.mission_state = State.IDLE
     _ui("status", "IDLE")
     log.info("Mission loop ended")
