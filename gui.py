@@ -28,7 +28,8 @@ from mission import (
     start_mission, stop_mission, resume_after_interaction,
     handle_character_response, register_ui_callbacks,
     list_missions, get_briefing_from_file, get_mission_metadata,
-    mission_active, mission_state, conversation_history
+    get_mission_active, get_mission_state, get_conversation_history,
+    _ms as _mission_state,
 )
 
 log = logging.getLogger("eric.gui")
@@ -127,8 +128,8 @@ def get_module_status_html() -> str:
 
     # ── Mission active ──────────────────────────────────────────────────────
     try:
-        from mission import mission_active as ma
-        mission_ok = bool(ma)
+        from mission import _ms as _ms_ref
+        mission_ok = bool(_ms_ref.mission_active)
     except Exception:
         mission_ok = False
 
@@ -411,7 +412,7 @@ def action_char_reply(char_name: str, char_says: str):
 def action_status():
     history = "\n".join(
         f"  • {e['character']}: {e['said'][:60]}"
-        for e in conversation_history[-5:]
+        for e in get_conversation_history()[-5:]
     ) or "  (none yet)"
     sensor_lines = []
     try:
@@ -438,8 +439,8 @@ def action_status():
         pass
     sensors = "\n".join(sensor_lines) or "  (sensors not enabled)"
     return (
-        f"State:  {mission_state}\n"
-        f"Active: {mission_active}\n"
+        f"State:  {get_mission_state()}\n"
+        f"Active: {get_mission_active()}\n"
         f"TTS:    {'Piper streaming' if piper_available() else 'gTTS fallback'}\n"
         f"\nSensors:\n{sensors}"
         f"\nRecent conversations:\n{history}"
