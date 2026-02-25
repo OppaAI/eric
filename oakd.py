@@ -486,11 +486,20 @@ def _safety_check(floor_check_interval: float):
                     log.info(f"⚠️  OAK-D slow — obstacle at {front:.2f}m "
                              f"({samples['valid_patches']}/3 patches)")
 
-        # ── Check 2: floor drop / void ─────────────────────────────────────────
-        # DISABLED — OAK-D floor drop generates too many false positives on
-        # flat floors (0.3% return ratio triggers everywhere indoors).
-        # LiDAR void detection handles this instead.
-        pass
+        # ── Check 2: floor drop / void (HIGH confidence only) ────────────────
+        # Re-enabled — LiDAR void is disabled (horizontal scanner can't see drops).
+        # Only HIGH confidence fires — medium was causing flat-floor false positives.
+        # Rate-limited by FLOOR_CHECK_HZ to avoid hammering the depth frame.
+        now_fc = time.monotonic()
+        if now_fc - _last_floor_check >= 1.0 / FLOOR_CHECK_HZ:
+            _last_floor_check = now_fc
+            drop = get_floor_drop()
+            if drop["void_detected"] and drop["confidence"] == "high":
+                if not _avoidance_in_progress:
+                    motors.stop()
+                    log.warning(
+                        f"🕳️  OAK-D VOID STOP (high confidence): {drop['reason']}"
+                    )
 
     except Exception as e:
         log.debug(f"OAK-D safety check error: {e}")
