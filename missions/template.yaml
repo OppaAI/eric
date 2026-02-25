@@ -90,6 +90,14 @@ stay_with_target:  false   # SAR only: stay and repeat broadcast every 15s
 back_away_on_find: false   # security only: back 3m + turn 180° after alerting
 generate_report:   false   # at mission end: summarise all finds
 
+# ── Layer 2 YOLO detection behaviour ─────────────────────────────────────────
+# Controls what Eric does when YOLO detects a person or animal while moving.
+# These fire BEFORE Cosmos — pure hardware detection, no LLM involved.
+approach_on_detect: true   # true  = approach and greet (search and rescue, find missions)
+                            # false = stop and observe   (security, surveillance)
+detect_distance:    2.0    # meters — hand to Cosmos when target within this range
+                            # YOLO slows Eric down beyond this, stops within it
+
 
 # ═══════════════════════════════════════════════════════════════
 # CHARACTERS — People/robots Eric will encounter
