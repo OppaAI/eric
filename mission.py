@@ -1334,6 +1334,46 @@ Do NOT add "location", "type", "confidence", "target_confidence", or any unliste
 No markdown. No explanation. Output ONLY the JSON object.
 """
 
+VIDEO_SWEEP_360_PROMPT = """
+You are a tracked ground robot. These frames are from a continuous 360° panoramic sweep
+captured while my chassis rotated — ordered left to right, covering the full environment.
+I am an observation/exploration robot — I am NOT looking for one specific target.
+
+Study the full sweep and report:
+1. HAZARDS — stairs, drops, voids, obstacles, blocked paths (highest priority)
+2. ENVIRONMENT — terrain types, room layout, notable features or changes
+3. OBSERVATIONS — people, animals, objects of interest
+4. BEST DIRECTION — clearest safe path to continue
+
+"speak": One vivid sentence narrating what you see — imagine describing it to an audience.
+"physical_reasoning": Summarize the environment and why you chose that direction.
+
+Output ONLY this JSON — no markdown, no extra fields:
+{
+  "object": "clear",
+  "object_name": null,
+  "terrain": "tiles",
+  "distance": "far",
+  "in_my_path": false,
+  "wall_ahead": false,
+  "obstacle_close": false,
+  "small_obstacle": false,
+  "void_ahead": false,
+  "target_visible": false,
+  "target_direction": "unknown",
+  "clearest_direction": "front",
+  "action": "forward",
+  "speak": null,
+  "physical_reasoning": "Open area ahead, proceeding forward.",
+  "mission_complete": false
+}
+
+"object": person|robot|animal|obstacle|wall|clear|unknown
+"action": forward|stop|turn_left|turn_right
+Output ONLY the JSON object. No explanation before or after.
+"""
+
+
 QUICK_SCAN_PROMPT = """
 You are a tracked ground robot. You are stopped. Analyze the frames and sensor data.
 
@@ -2447,16 +2487,130 @@ def _scan_360_smart() -> dict:
         return dict(_SCAN_FALLBACK)
 
 
+def _scan_360_video_sweep() -> dict:
+    """
+    Observation-mode 360° scan — continuous video during chassis rotation.
+
+    Design (for nature/inspection/exploration missions):
+      - NO per-position stops or stabilization waits
+      - Start video capture → rotate chassis 360° → stop capture
+      - Send full panoramic video clip to Cosmos as ONE inference call
+      - Cosmos sees the world as a flowing panorama — best for temporal/spatial reasoning
+      - No early-exit (observation missions don't have a single target to stop for)
+      - Falls back to _scan_360_pantilt() if video capture fails
+
+    Timing:
+      Chassis 360°: TURN_90_SEC × 4 ≈ 8.8s
+      Video fps: 2 → ~17 frames covering the full rotation
+      Inference: ~6-8s
+      Total: ~17s  (vs ~8s for target hunt — acceptable for exploration)
+
+    Use when: scan_strategy = "video_sweep" in mission YAML
+    Best for: nature explorer, safety inspection, patrol, environmental survey
+    """
+    _ms.mission_state = State.SCANNING_360
+    _ui("status", "360 VIDEO SWEEP")
+    motors.oled(0, "360 Sweep")
+    motors.stop()
+    time.sleep(0.3)
+    log.info("Starting observation 360° video sweep — continuous rotation")
+    log_mission_event("scan_360_video_start", "continuous chassis rotation + video")
+
+    TILT_LEVEL = 10   # slight downward tilt — ground-level focus
+    motors.pantilt(0, TILT_LEVEL)
+    time.sleep(0.3)
+
+    # Adaptive LED — pre-check brightness before rotation starts
+    test_frame = capture_frame(CAMERA_PANTILT, 320, 240)
+    if test_frame and _is_pitch_black(test_frame):
+        motors.lights(base=150, head=200)
+        log.info("Low light — LEDs on for video sweep")
+
+    # ── Capture video WHILE rotating ─────────────────────────────────────────
+    # capture_frames_video() runs in the calling thread — chassis rotation
+    # runs as a timed motor command that we let expire naturally.
+    # We start the motor, then capture in a tight loop for the rotation duration.
+    turn_duration = TURN_90_SEC * 4.0   # full 360°
+
+    _ui("log", "🎬 Recording 360° panoramic video sweep...")
+    motors.oled(1, "Recording...")
+
+    motors.right(MOTOR_SPEED_SLOW)
+    frames = capture_frames_video(CAMERA_PANTILT,
+                                  duration=turn_duration,
+                                  fps_sample=2.0)
+    motors.stop()
+    motors.lights(0, 0)
+    time.sleep(0.3)
+    motors.pantilt(0, TILT_LEVEL)
+
+    log_mission_event("scan_360_video_captured", f"{len(frames)} frames")
+
+    if not frames:
+        log.warning("Video sweep captured no frames — falling back to pan-tilt scan")
+        return _scan_360_pantilt()
+
+    # ── Single Cosmos call with full panoramic video ──────────────────────────
+    sensor_ctx  = _sensor_context()
+    mission_ov  = _get_mission_scan_overlay()
+    prompt      = (mission_ov
+                   + (sensor_ctx + "\n\n" if sensor_ctx else "")
+                   + VIDEO_SWEEP_360_PROMPT)
+
+    _ui("log", f"🧠 Cosmos panoramic analysis ({len(frames)} frames)...")
+    motors.oled(1, "Analyzing...")
+
+    try:
+        response = _cosmos_frames(frames, prompt, max_tokens=300, temp=0.2)
+        result   = _parse_json(response, dict(_SCAN_FALLBACK), label="VIDEO SWEEP 360")
+
+        reasoning = result.get("physical_reasoning", "")
+        if reasoning:
+            _ui("log", f"👁️  Eric observes: {reasoning}")
+
+        log_mission_event("scan_360_video_complete",
+                          f"target={result.get('target_visible')} "
+                          f"dir={result.get('clearest_direction')}")
+        return result
+
+    except Exception as e:
+        log_exception("_scan_360_video_sweep", e)
+        return dict(_SCAN_FALLBACK)
+
+
 def _best_360_scan() -> dict:
     """
-    Use pan-tilt 360 scan by default. Falls back to chassis rotation if pan-tilt fails.
+    Route to the correct 360° scan strategy based on mission YAML.
+
+    scan_strategy values (set in mission YAML):
+      "target_hunt"   — async frame-per-position with early-exit (DEFAULT)
+                        Best for: search & rescue, find missions, security
+      "video_sweep"   — continuous rotation + single panoramic video inference
+                        Best for: nature explorer, inspection, patrol, survey
+
+    Falls back to chassis rotation (_scan_360_smart) if pan-tilt hardware fails.
     """
-    try:
-        return _scan_360_pantilt()
-    except Exception as e:
-        log_exception("_scan_360_pantilt", e)
-        log.warning("Pan-tilt scan failed — falling back to chassis rotation")
-        return _scan_360_smart()
+    strategy = str(_ms.mission_flags.get("scan_strategy", "target_hunt")).lower().strip()
+
+    if strategy == "video_sweep":
+        log.info("360 scan strategy: VIDEO_SWEEP (observation mode)")
+        try:
+            return _scan_360_video_sweep()
+        except Exception as e:
+            log_exception("_scan_360_video_sweep", e)
+            log.warning("Video sweep failed — falling back to pan-tilt scan")
+            return _scan_360_pantilt()
+    else:
+        # "target_hunt" or any unrecognised value → fast async early-exit scan
+        if strategy not in ("target_hunt",):
+            log.warning(f"Unknown scan_strategy '{strategy}' — using target_hunt")
+        log.info("360 scan strategy: TARGET_HUNT (async early-exit)")
+        try:
+            return _scan_360_pantilt()
+        except Exception as e:
+            log_exception("_scan_360_pantilt", e)
+            log.warning("Pan-tilt scan failed — falling back to chassis rotation")
+            return _scan_360_smart()
 
 
 # ─── Direction Control ────────────────────────────────────────────────────────
