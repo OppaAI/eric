@@ -376,6 +376,12 @@ def action_stop():
     return "ALL STOP — SYSTEMS HALTED"
 
 
+def action_disengage():
+    """Abort mission only — motors keep running."""
+    stop_mission()
+    return "MISSION ABORTED — MOTORS STILL ACTIVE"
+
+
 def action_introduce():
     resp = ask_cosmos(
         "Introduce yourself to the world. NVIDIA judges are watching. "
@@ -479,55 +485,58 @@ body::after {
     z-index: 9999;
 }
 
-/* ── Header ─────────────────────────────────────────────────────────── */
+/* ── Header — compact single line ───────────────────────────────────── */
 .eric-header {
     display: flex;
-    align-items: baseline;
-    gap: 18px;
-    padding: 10px 0 4px 0;
+    align-items: center;
+    gap: 12px;
+    padding: 4px 0 3px 0;
     border-bottom: 1px solid #2d5a2d;
-    margin-bottom: 10px;
+    margin-bottom: 6px;
 }
 .eric-title {
-    font-size: 1.6em;
+    font-size: 1.15em;
     font-weight: bold;
     letter-spacing: 0.2em;
     color: #88d400;
     font-family: 'Share Tech Mono', 'Courier New', monospace;
-    text-shadow: 0 0 10px #88d40055;
+    text-shadow: 0 0 8px #88d40055;
+    white-space: nowrap;
 }
 .eric-sub {
-    font-size: 0.82em;
-    color: #7aaa7a;
-    letter-spacing: 0.05em;
+    font-size: 0.68em;
+    color: #5a8a5a;
+    letter-spacing: 0.04em;
     font-family: 'Share Tech Mono', 'Courier New', monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
 }
 
-/* ── STOP button — round red, sits beside joystick ──────────────────── */
+/* ── STOP button — smaller round red emergency halt ──────────────────── */
 #stop-btn {
-    width: 72px !important;
-    height: 72px !important;
-    min-width: 72px !important;
+    width: 52px !important;
+    height: 52px !important;
+    min-width: 52px !important;
     border-radius: 50% !important;
     background: radial-gradient(circle at 38% 35%, #ff3333, #880000) !important;
-    border: 3px solid #cc0000 !important;
+    border: 2px solid #cc0000 !important;
     color: #fff !important;
-    font-size: 0.78em !important;
+    font-size: 0.62em !important;
     font-weight: bold !important;
-    letter-spacing: 0.15em !important;
+    letter-spacing: 0.1em !important;
     font-family: 'Share Tech Mono', 'Courier New', monospace !important;
-    box-shadow: 0 0 18px #cc000066, inset 0 2px 4px #ff666644 !important;
+    box-shadow: 0 0 14px #cc000066, inset 0 2px 4px #ff666644 !important;
     transition: box-shadow 0.15s, transform 0.1s !important;
     line-height: 1.2 !important;
     padding: 0 !important;
 }
 #stop-btn:hover {
-    box-shadow: 0 0 32px #ff0000aa, inset 0 2px 4px #ff666644 !important;
-    transform: scale(1.04) !important;
+    box-shadow: 0 0 26px #ff0000aa, inset 0 2px 4px #ff666644 !important;
+    transform: scale(1.06) !important;
 }
 #stop-btn:active {
-    transform: scale(0.97) !important;
-    box-shadow: 0 0 12px #cc000088 !important;
+    transform: scale(0.95) !important;
 }
 
 /* ── ENGAGE button ───────────────────────────────────────────────────── */
@@ -537,12 +546,22 @@ body::after {
     color: #000 !important;
     letter-spacing: 0.12em !important;
     font-family: 'Share Tech Mono', 'Courier New', monospace !important;
-    font-size: 0.95em !important;
+    font-size: 0.88em !important;
     font-weight: bold !important;
 }
-#engage-btn:hover {
-    box-shadow: 0 0 14px #76b90066 !important;
+#engage-btn:hover { box-shadow: 0 0 14px #76b90066 !important; }
+
+/* ── DISENGAGE button — red rectangle, aborts mission only ──────────── */
+#disengage-btn {
+    background: linear-gradient(135deg, #660000, #cc2200) !important;
+    border: 1px solid #cc2200 !important;
+    color: #fff !important;
+    letter-spacing: 0.1em !important;
+    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
+    font-size: 0.88em !important;
+    font-weight: bold !important;
 }
+#disengage-btn:hover { box-shadow: 0 0 14px #cc220066 !important; }
 
 /* ── Textboxes ───────────────────────────────────────────────────────── */
 textarea, input[type=text] {
@@ -589,12 +608,12 @@ label span, .gr-label {
     border: 1px solid #2d5a2d !important;
     color: #88d400 !important;
     font-family: 'Share Tech Mono', 'Courier New', monospace !important;
-    font-size: 1.1em !important;
+    font-size: 1.0em !important;
     font-weight: bold !important;
     border-radius: 4px !important;
-    width: 44px !important;
-    height: 44px !important;
-    min-width: 44px !important;
+    width: 36px !important;
+    height: 36px !important;
+    min-width: 36px !important;
     padding: 0 !important;
 }
 .ctrl-btn button:hover {
@@ -610,10 +629,10 @@ label span, .gr-label {
     border-color: #ff6600 !important;
 }
 .ctrl-wide button {
-    width: 96px !important;
-    height: 44px !important;
-    min-width: 96px !important;
-    font-size: 0.82em !important;
+    width: 80px !important;
+    height: 36px !important;
+    min-width: 80px !important;
+    font-size: 0.75em !important;
 }
 
 /* ── Accordion ───────────────────────────────────────────────────────── */
@@ -644,9 +663,9 @@ label span, .gr-label {
     text-transform: uppercase;
     font-family: 'Share Tech Mono', 'Courier New', monospace;
     border-bottom: 1px solid #2d5a2d;
-    padding-bottom: 4px;
-    margin-bottom: 6px;
-    margin-top: 8px;
+    padding-bottom: 2px;
+    margin-bottom: 4px;
+    margin-top: 4px;
 }
 """
 
@@ -683,13 +702,13 @@ def build_ui():
 
                 gr.HTML('<div class="cam-label">📡 PAN-TILT</div>')
                 pantilt_img = gr.Image(
-                    streaming=True, height=180, label="",
+                    streaming=True, height=150, label="",
                     show_label=False
                 )
 
                 gr.HTML('<div class="cam-label" style="margin-top:4px">🔬 WEBCAM</div>')
                 webcam_img = gr.Image(
-                    streaming=True, height=140, label="",
+                    streaming=True, height=120, label="",
                     show_label=False
                 )
 
@@ -722,16 +741,23 @@ def build_ui():
                     value=default_text,
                     label="",
                     show_label=False,
-                    lines=8,
-                    max_lines=14,
+                    lines=6,
+                    max_lines=10,
                     placeholder="Mission briefing…"
                 )
 
-                engage_btn = gr.Button(
-                    "▶  ENGAGE MISSION",
-                    elem_id="engage-btn",
-                    variant="primary"
-                )
+                with gr.Row():
+                    engage_btn = gr.Button(
+                        "▶  ENGAGE",
+                        elem_id="engage-btn",
+                        variant="primary",
+                        scale=3
+                    )
+                    disengage_btn = gr.Button(
+                        "✕  DISENGAGE",
+                        elem_id="disengage-btn",
+                        scale=2
+                    )
 
                 gr.HTML('<div class="panel-head">ERIC — TRANSMISSION</div>')
                 eric_says_box = gr.Textbox(
@@ -739,8 +765,8 @@ def build_ui():
                     label="",
                     show_label=False,
                     interactive=False,
-                    lines=4,
-                    max_lines=6,
+                    lines=3,
+                    max_lines=4,
                     elem_id="eric-says",
                     placeholder="Awaiting transmission…"
                 )
@@ -769,8 +795,8 @@ def build_ui():
                     label="",
                     show_label=False,
                     interactive=False,
-                    lines=7,
-                    max_lines=12,
+                    lines=5,
+                    max_lines=8,
                     elem_id="sys-log",
                     placeholder="System events, nav checks, scan results…"
                 )
@@ -852,6 +878,7 @@ def build_ui():
         )
 
         stop_btn.click(action_stop, outputs=eric_says_box)
+        disengage_btn.click(action_disengage, outputs=eric_says_box)
         engage_btn.click(action_engage, inputs=briefing_box, outputs=eric_says_box)
 
         char_btn.click(
