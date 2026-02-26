@@ -65,6 +65,7 @@ Disconnect handling (unchanged from previous version):
   - Log spam suppressed: one warning per disconnect, silence until back.
 """
 
+import datetime
 import logging
 import threading
 import time
@@ -394,7 +395,7 @@ def _reader_loop():
                 time.sleep(0.1)
                 continue
 
-            in_depth = _depth_queue.get(timeout=1000)  # 1s timeout — prevents infinite block on disconnect
+            in_depth = _depth_queue.get(timeout=datetime.timedelta(seconds=1))  # 1s timeout — prevents infinite block on disconnect
             if in_depth is None:
                 continue
 

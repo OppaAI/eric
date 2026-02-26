@@ -62,6 +62,14 @@ import requests
 from typing import Optional
 
 from config import MOTOR_SPEED_SLOW, MOTOR_SPEED_NORMAL, MOTOR_SPEED_FAST, MISSIONS_DIR, VLLM_URL, COSMOS_MODEL
+
+def _safe_to_fwd() -> bool:
+    """Guard before every motors.forward() — checks LiDAR obstacle state."""
+    try:
+        from lidar import safe_to_forward
+        return safe_to_forward()
+    except Exception:
+        return True  # lidar not loaded — allow forward
 from motors import motors
 from cosmos import (
     ask_cosmos, set_mission_briefing, get_mission_briefing,
@@ -486,7 +494,8 @@ def _advance_step():
         except ImportError as _exc:
             log.debug(f"avoidance module not loaded: {_exc}")
         _ms.mission_state = State.SEARCHING
-        motors.forward(MOTOR_SPEED_SLOW)
+        if _safe_to_fwd():
+            motors.forward(MOTOR_SPEED_SLOW)
 
 
 def _execute_step_action(obj_name: str):
@@ -1050,7 +1059,8 @@ def _move_forward(duration_sec: float = 2.0, distance_m: float = 1.5):
             log.warning(f"Nav2 move_forward failed ({e}) — falling back to direct")
 
     # Direct motor fallback
-    motors.forward(MOTOR_SPEED_SLOW)
+    if _safe_to_fwd():
+        motors.forward(MOTOR_SPEED_SLOW)
     time.sleep(duration_sec)
     motors.stop()
 
@@ -1242,7 +1252,8 @@ def resume_after_interaction():
             log.debug(f"avoidance module not loaded: {_exc}")
         _ms.mission_state = State.SEARCHING
         motors.pantilt(0, 5)   # ground-looking default
-        motors.forward(MOTOR_SPEED_SLOW)
+        if _safe_to_fwd():
+            motors.forward(MOTOR_SPEED_SLOW)
         motors.oled(0, "ERIC ACTIVE")
         motors.oled(1, "Searching...")
         _ui("status", "SEARCHING")
@@ -1594,7 +1605,8 @@ Set close_and_facing=false if the person is far away, looking away, or has their
                 eric_say(greeting)
             else:
                 _ui("log", f"Person spotted but not close/facing ({ec_result.get('reasoning','')}) — continuing")
-                motors.forward(MOTOR_SPEED_SLOW)
+                if _safe_to_fwd():
+                    motors.forward(MOTOR_SPEED_SLOW)
 
         return result
     except Exception as e:
@@ -1706,10 +1718,12 @@ def _nav_check_async() -> dict:
                             eric_say(greeting)
                         else:
                             _ui("log", f"Person not close/facing — continuing")
-                            motors.forward(MOTOR_SPEED_SLOW)
+                            if _safe_to_fwd():
+                                motors.forward(MOTOR_SPEED_SLOW)
                     except Exception as e:
                         log_exception("eye_contact_async", e)
-                        motors.forward(MOTOR_SPEED_SLOW)
+                        if _safe_to_fwd():
+                            motors.forward(MOTOR_SPEED_SLOW)
 
             _ms.last_nav_result = parsed
         except Exception as e:
@@ -3256,7 +3270,8 @@ def _approach_target():
                     log_mission_event("target_lost",
                                       "5 consecutive invisible Cosmos scans in approach")
                     _ms.mission_state = State.SEARCHING
-                    motors.forward(MOTOR_SPEED_SLOW)
+                    if _safe_to_fwd():
+                        motors.forward(MOTOR_SPEED_SLOW)
                     return
 
     # ── Approach timeout — treat as arrived rather than give up ──────────────
@@ -3353,14 +3368,16 @@ def _process_scan(scan, from_360=False):
         if force_360:
             _ms.scans_since_360 = SCANS_BEFORE_360
         else:
-            motors.forward(MOTOR_SPEED_SLOW)
+            if _safe_to_fwd():
+                motors.forward(MOTOR_SPEED_SLOW)
         _ms.mission_state = State.SEARCHING
         return
 
     if small_obs and not target_visible:
         from avoidance import avoid_obstacle
         avoid_obstacle(wall_ahead=False, small_obstacle=True)
-        motors.forward(MOTOR_SPEED_SLOW)
+        if _safe_to_fwd():
+            motors.forward(MOTOR_SPEED_SLOW)
 
     if not wall_ahead and not obstacle_close and not small_obs:
         _ms.avoid_attempts = 0
@@ -3472,7 +3489,8 @@ def _process_scan(scan, from_360=False):
                     if not should_greet:
                         _ui("log", f"Person near but not facing Eric — not greeting ({ec.get('reasoning','')})")
                         _ms.mission_state = State.SEARCHING
-                        motors.forward(MOTOR_SPEED_SLOW)
+                        if _safe_to_fwd():
+                            motors.forward(MOTOR_SPEED_SLOW)
                         return
                 except Exception as e:
                     log_exception("eye_contact_scan", e)
@@ -3511,7 +3529,8 @@ def _process_scan(scan, from_360=False):
         if force_360:
             _ms.scans_since_360 = SCANS_BEFORE_360
         else:
-            motors.forward(MOTOR_SPEED_SLOW)
+            if _safe_to_fwd():
+                motors.forward(MOTOR_SPEED_SLOW)
         return
 
     if terrain and terrain not in ("clear", "unknown", ""):
@@ -3523,20 +3542,25 @@ def _process_scan(scan, from_360=False):
 
     if action == "navigate_around":
         _turn_nav2_or_direct("left", 0.8)
-        motors.forward(terrain_speed)
+        if _safe_to_fwd():
+            motors.forward(terrain_speed)
     elif action == "stop":
         motors.stop()
     elif action == "turn_right":
         _turn_nav2_or_direct("right", 1.0)
-        motors.forward(terrain_speed)
+        if _safe_to_fwd():
+            motors.forward(terrain_speed)
     elif action == "turn_left":
         _turn_nav2_or_direct("left", 1.0)
-        motors.forward(terrain_speed)
+        if _safe_to_fwd():
+            motors.forward(terrain_speed)
     elif action == "turn_back":
         _turn_nav2_or_direct("back", 1.5)
-        motors.forward(terrain_speed)
+        if _safe_to_fwd():
+            motors.forward(terrain_speed)
     else:
-        motors.forward(terrain_speed)
+        if _safe_to_fwd():
+            motors.forward(terrain_speed)
 
     _ms.mission_state = State.SEARCHING
     motors.oled(0, "ERIC ACTIVE")
@@ -3636,7 +3660,8 @@ def _handle_yolo_detection() -> bool:
     ─────────────────────────────────
     • Proportional steering: turn duration scales with |bearing_deg|, not fixed 0.3s.
     • Layer 2 motor guard: checks oakd.yolo_motor_stop_issued() before any
-      motors.forward() to avoid overriding a Layer 2 stop with a move command.
+      if _safe_to_fwd():
+          motors.forward() to avoid overriding a Layer 2 stop with a move command.
     • Stale data guard: if stored detection is older than YOLO_POSITION_STALE_S,
       falls back to oakd.get_last_yolo_position() for fresh spatial data.
     • Mission-aware: approach_on_detect flag from YAML still controls behaviour.
@@ -3703,10 +3728,12 @@ def _handle_yolo_detection() -> bool:
         try:
             from oakd import yolo_motor_stop_issued
             if not yolo_motor_stop_issued():
-                motors.forward(MOTOR_SPEED_SLOW)
+                if _safe_to_fwd():
+                    motors.forward(MOTOR_SPEED_SLOW)
         except Exception as _exc:  # oakd/yolo
             log.debug(f"oakd/yolo error: {_exc}")
-            motors.forward(MOTOR_SPEED_SLOW)
+            if _safe_to_fwd():
+                motors.forward(MOTOR_SPEED_SLOW)
         return True
 
     # ── Close enough — stop and execute step action or greet ─────────────────
@@ -3866,7 +3893,8 @@ def _mission_loop():
                 motors.oled(1, "TARGET IN SIGHT!")
                 _process_scan(sweep_result, from_360=True)
                 if _ms.mission_active and _ms.mission_state == State.SEARCHING:
-                    motors.forward(MOTOR_SPEED_SLOW)
+                    if _safe_to_fwd():
+                        motors.forward(MOTOR_SPEED_SLOW)
                 _ms.nav_clips_since_scan = 0
             elif sweep_result.get("void_ahead") or sweep_result.get("wall_ahead"):
                 _ui("log", "⚠️  Obstacle/void in initial sweep — scanning 360°")
@@ -3893,7 +3921,8 @@ def _mission_loop():
         _process_scan(scan, from_360=True)
 
     if _ms.mission_active and _ms.mission_state == State.SEARCHING:
-        motors.forward(MOTOR_SPEED_SLOW)
+        if _safe_to_fwd():
+            motors.forward(MOTOR_SPEED_SLOW)
 
     _ms.nav_clips_since_scan = 0
 
@@ -3916,7 +3945,8 @@ def _mission_loop():
             # its own thread — the poll handles mission-level reactions only.
             if _ms.nav_clips_since_scan < NAV_CLIPS_BETWEEN_SCANS:
                 _ms.nav_clips_since_scan += 1
-                motors.forward(MOTOR_SPEED_SLOW)
+                if _safe_to_fwd():
+                    motors.forward(MOTOR_SPEED_SLOW)
 
                 move_deadline = time.monotonic() + NAV_MOVE_INTERVAL
                 yolo_broke    = False
@@ -3961,7 +3991,8 @@ def _mission_loop():
                             _ms.scans_since_360 = SCANS_BEFORE_360
                             _ms.nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS
                         else:
-                            motors.forward(MOTOR_SPEED_SLOW)
+                            if _safe_to_fwd():
+                                motors.forward(MOTOR_SPEED_SLOW)
                 except Exception as _exc:  # lidar
                     log.debug(f"lidar unavailable: {_exc}")
                 continue
@@ -3993,7 +4024,8 @@ def _mission_loop():
                 # Only resume forward if mission still active and not blocked
                 if _ms.mission_active and _ms.mission_state == State.SEARCHING:
                     if not _void_check()["void"]:
-                        motors.forward(MOTOR_SPEED_SLOW)
+                        if _safe_to_fwd():
+                            motors.forward(MOTOR_SPEED_SLOW)
             else:
                 _ui("log", "Quick scan (stopped)...")
                 motors.oled(1, "Scanning...")
