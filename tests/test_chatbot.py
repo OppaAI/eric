@@ -10,7 +10,7 @@ import urllib.request
 import sys
 
 SERVER = "http://localhost:8000"
-MODEL  = "embedl/Cosmos-Reason2-2B-W4A16"
+MODEL  = "embedl/Cosmos-Reason2-2B-W4A16-Edge2"
 
 SYSTEM = (
     "You are ERIC — Edge Robotics Innovation by Cosmos. "

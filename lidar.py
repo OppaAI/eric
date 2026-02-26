@@ -137,7 +137,7 @@ def safe_to_forward() -> bool:
     """
     with _lock:
         if not _lidar_ok or _lidar_stale or not _motor_link_ok:
-            return True   # LiDAR offline — let mission proceed (no data = no block)
+            return False   # LiDAR offline — let mission proceed (no data = no block)
         if not _safety_active:
             return True   # safety disabled for testing
         return not _obstacle_close and not _obstacle_near

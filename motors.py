@@ -24,8 +24,10 @@ class Motors:
     """
 
     def __init__(self):
-        self._ser  = None
-        self._lock = threading.Lock()
+        self._ser           = None
+        self._lock          = threading.Lock()
+        self._current_left  = 0.0   # track last commanded speeds
+        self._current_right = 0.0   # so slow() knows if robot is moving
         self._connect()
 
     def _connect(self):
@@ -62,6 +64,10 @@ class Motors:
         self._write(cmd)
 
     def _send(self, left: float, right: float):
+        # Track current speed so slow() can check if we're moving
+        self._current_left  = left
+        self._current_right = right
+
         cmd = json.dumps({"T": 1, "L": round(left, 3), "R": round(right, 3)}) + "\n"
         self._write(cmd)
 
@@ -113,12 +119,22 @@ class Motors:
 
     # NOTE: positive speed = forward on UGV Beast hardware (corrected)
     def backward(self, speed=MOTOR_SPEED_NORMAL):  self._send(speed, speed)
-    def forward(self, speed=MOTOR_SPEED_NORMAL): self._send(-speed, -speed)
-    def left(self, speed=MOTOR_SPEED_SLOW):       self._send(-speed, speed)   # left track back, right track forward
-    def right(self, speed=MOTOR_SPEED_SLOW):      self._send(speed, -speed)   # right track back, left track forward
+    def forward(self, speed=MOTOR_SPEED_NORMAL):   self._send(-speed, -speed)
+    def left(self, speed=MOTOR_SPEED_SLOW):        self._send(-speed, speed)   # left track back, right track forward
+    def right(self, speed=MOTOR_SPEED_SLOW):       self._send(speed, -speed)   # right track back, left track forward
     def stop(self):                                self._send(0.0, 0.0)
-    def slow(self):                                self.forward(MOTOR_SPEED_SLOW)
     def fast(self):                                self.forward(MOTOR_SPEED_FAST)
+
+    def slow(self):
+        """
+        Reduce speed if already driving forward — never command movement from rest.
+        Called by LiDAR safety monitor when an obstacle enters the SLOW_DIST zone.
+        If the robot is stationary, this is a no-op to prevent unwanted movement.
+        """
+        # Only apply if currently driving forward (both tracks negative = forward)
+        if self._current_left < 0 and self._current_right < 0:
+            self.forward(MOTOR_SPEED_SLOW)
+        # If stopped, turning, or reversing — do nothing
 
 
 motors = Motors()

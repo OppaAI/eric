@@ -13,7 +13,7 @@ import sys
 import os
 
 SERVER = "http://localhost:8000"
-MODEL  = "embedl/Cosmos-Reason2-2B-W4A16"
+MODEL  = "embedl/Cosmos-Reason2-2B-W4A16-Edge2"
 
 PROMPT = (
     "You are a nature and wildlife explorer robot. "

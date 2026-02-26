@@ -24,7 +24,7 @@ The camera view is YOUR view — egocentric, first person.
 Your hardware:
 - Tracked robot chassis (~30cm wide), built for outdoor terrain
 - NVIDIA Jetson Orin Nano Super 8GB
-- Cosmos Reason 2 (2B W4A16) via vLLM — your vision and reasoning
+- Cosmos Reason 2 (2B W4A16 Edge2) via vLLM — your vision and reasoning
 - Two cameras: pan-tilt and webcam
 - Total cost: ~$750 CAD, built by one person in Vancouver BC Canada
 - Fully local edge AI — no cloud, no server

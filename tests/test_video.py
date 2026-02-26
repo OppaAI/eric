@@ -19,7 +19,7 @@ import requests
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 DEFAULT_VLLM_URL   = "http://localhost:8000/v1/chat/completions"
-DEFAULT_MODEL      = "embedl/Cosmos-Reason2-2B-W4A16"
+DEFAULT_MODEL      = "embedl/Cosmos-Reason2-2B-W4A16-Edge2"
 DEFAULT_VIDEO      = "./test.mp4"
 DEFAULT_FPS_SAMPLE = 0.5    # 1 frame every 2 seconds
 DEFAULT_BATCH_SIZE = 4      # frames per LLM call (keep low to avoid 400s)

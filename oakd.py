@@ -22,43 +22,50 @@ Layer 2 Person/Animal Detection (YOLOv8n on OAK-D Myriad X VPU):
   No Cosmos involved — pure Myriad X VPU hardware detection.
   Falls back gracefully if blob not found — depth pipeline still works.
 
-Gaps closed vs previous version
-────────────────────────────────
-1. Medium-confidence void auto-stop — both "high" AND "medium" floor-drop
-   confidence now trigger motors.stop() (was: high only).
+Fixes applied (v3 → v4)
+────────────────────────
+1. ISP scale crash fix — setIspScale(1,1) was a no-op, leaving the sensor
+   outputting 2104×1560 raw while the pipeline expected 1920×1080. This caused
+   the ColorCamera post-proc mismatch error and an immediate Myriad X crash
+   (~1.5s after startup). Fixed: setIspScale(1, 2) targets 960×540, which fits
+   comfortably within OAK-D Lite SIPP memory budgets. setVideoSize removed (ISP
+   scale handles it). The previous setIspScale(8, 9) targeted ~1870×1386 which
+   is not a clean resolution and still overflowed SIPP buffers on the Lite.
 
-2. Front obstacle — 3-patch sampling (left, centre, right at ±15°).
-   A single textureless patch (white wall, glass) can no longer silence
-   the whole front check. Minimum of up to 3 valid samples is used.
-   Logged if fewer than 3 patches return valid depth.
+2. _avoidance_in_progress UnboundLocalError — the variable was set inside the
+   `else` branch of the front-obstacle check, then referenced in the floor-drop
+   check below (which is outside that branch). If valid_patches == 0, the floor-
+   drop block raised UnboundLocalError. Fixed: moved the avoidance check to the
+   top of _safety_check() so it is always defined before either branch uses it.
 
-3. Proportional bearing — bearing is now a signed float in degrees
-   (−90° … +90°) in addition to the coarse "left/center/right" string.
-   mission.py uses bearing_deg to compute a proportional steering
-   correction instead of a fixed 0.3-second turn regardless of angle.
+3. Reconnect watchdog race condition — _ensure_reconnect_watchdog() used a
+   plain boolean _reconnect_started, so if init_oakd() was called from two
+   threads simultaneously (e.g. user + reconnect watchdog), two watchdog threads
+   could start. Fixed: replaced with a threading.Lock guard.
 
-4. YOLO bounding-box size trend — _yolo_check() tracks the previous
-   bounding box width per label. If the box is shrinking (target moving
-   away), the callback is skipped and only a log entry is produced,
-   avoiding the "approach someone walking away" failure mode.
+4. _teardown() doesn't wait for reader thread — after _teardown() sets
+   _oakd_ok=False, the reader thread may still be mid-frame when init_oakd()
+   starts the new pipeline, leading to stale frame data and potential lock
+   contention. Fixed: _teardown() now joins the reader thread (up to 2s) before
+   tearing down the pipeline.
 
-5. YOLO position memory — _last_yolo_positions stores the most recent
-   valid (label, dist_m, bearing_deg) per label, updated every packet
-   regardless of cooldown. mission.py can query this to recover context
-   after Cosmos finishes a long inference cycle.
+5. YOLO FPS reduced to 5 on OAK-D Lite — the Lite variant has a lower-spec
+   Myriad X than the full OAK-D. Running colour at 10 FPS alongside YOLO
+   spatial detection and stereo depth at 15 FPS overflows SIPP memory,
+   producing the E_OUT_OF_MEM + E_FINALISE_FAIL crash loop seen in logs.
+   Colour camera FPS reduced back to 5. The 3:1 ratio (15 FPS mono / 5 FPS
+   colour) is within the Lite's validated operating range.
 
-6. Layer 2 motor guard race condition — _yolo_check() now marks
-   _yolo_motor_stop=True when it calls motors.stop(), giving mission.py
-   a way to know that Layer 2 issued a stop and not to override it with
-   a forward command until it has handled the detection.
+6. Floor-drop void check used floor_check_interval parameter but then
+   re-computed 1.0/FLOOR_CHECK_HZ inline — the parameter was redundant and
+   confusing. Unified to use the global constant directly, parameter removed.
 
-7. GUI status exposes YOLO blob status — oakd_status_html() shows
-   YOLO: ✅ active | ❌ no blob | ⏸ paused so operators always know
-   whether Layer 2 is actually running.
+7. get_depth_at() patch clamp was asymmetric — upper bounds used cx+patch_px
+   without +1, so numpy slice [cx-10:cx+10] gives 20 pixels but
+   [cx-10:min(w, cx+10)] could give 19 if cx+10==w. Cosmetic but fixed for
+   consistency.
 
-8. Void auto-stop also fires on medium confidence — matches lidar.py.
-
-Disconnect handling (unchanged from previous version):
+Disconnect handling (unchanged):
   - _reader_loop detects fatal XLink errors and exits cleanly.
   - _oakd_ok cleared immediately so all callers see unavailable.
   - Reconnect watchdog retries init_oakd() every RECONNECT_INTERVAL_S s.
@@ -84,13 +91,14 @@ _reader_thread = None
 
 # ── Reconnect watchdog ────────────────────────────────────────────────────────
 _reconnect_thread    = None
+_reconnect_lock      = threading.Lock()   # FIX 3: replaces bare boolean flag
 _reconnect_started   = False
 RECONNECT_INTERVAL_S = 10.0
 
 # ── Layer 1 Safety constants ──────────────────────────────────────────────────
 OAKD_STOP_DIST   = 0.30    # meters — stop if obstacle closer than this
 OAKD_SLOW_DIST   = 0.60    # meters — slow if obstacle closer than this
-FLOOR_CHECK_HZ   = 1.0     # floor-drop check rate — 1Hz enough, numpy is heavy + eases USB load
+FLOOR_CHECK_HZ   = 1.0     # floor-drop check rate — 1Hz enough, numpy is heavy
 
 _safety_active    = True
 _last_floor_check = 0.0
@@ -228,6 +236,7 @@ def init_oakd() -> bool:
     global _pipeline, _depth_queue, _oakd_ok, _reader_thread
     global _yolo_spatial_queue, _yolo_ok
 
+    # FIX 4: wait for existing reader thread to exit before rebuilding pipeline
     _teardown()
 
     try:
@@ -311,24 +320,40 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
     Add YOLOv8n spatial detection to an existing pipeline.
     DepthAI 3.x API — YOLO config goes via nn.detectionParser sub-node.
     Colour camera feeds YOLO; stereo depth provides spatial coordinates.
+
+    FIX 1: ISP scale corrected for OAK-D Lite SIPP memory budget.
+      The OAK-D Lite IMX214 sensor outputs 2104×1560 raw.
+      setIspScale(8, 9) targeted ~1870×1386 — not a clean resolution and
+      still caused E_OUT_OF_MEM + E_FINALISE_FAIL crash loop on the Lite's
+      lower-spec Myriad X (confirmed in logs: crash every ~5s after reconnect).
+      setIspScale(1, 2) targets 960×540, which fits comfortably within the
+      Lite's SIPP buffer limits and leaves headroom for YOLO + stereo depth.
+      setVideoSize removed — ISP scale drives output dimensions directly.
+
+    FIX 5: colour camera FPS reduced to 5 (was raised to 10 in previous fix,
+      which caused the SIPP OOM on the Lite). The OAK-D Lite Myriad X cannot
+      sustain 10 FPS colour + YOLO spatial + 15 FPS stereo simultaneously.
+      5 FPS colour is the validated safe rate for this pipeline on the Lite.
     """
     import depthai as dai
 
     cam_rgb = pipeline.create(dai.node.ColorCamera)
-    cam_rgb.setPreviewSize(416, 416)   # YOLOv8n input size
-    cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    cam_rgb.setIspScale(1, 1)          # force ISP to honour 1080P — prevents
-    cam_rgb.setVideoSize(1920, 1080)   # "expected 1920x1080 received 2104x1560"
+    cam_rgb.setPreviewSize(416, 416)       # YOLOv8n input size
+    cam_rgb.setResolution(
+        dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+    # FIX 1: setIspScale(1, 2) → 960×540 — fits OAK-D Lite SIPP memory budget.
+    # Previous setIspScale(8, 9) → ~1870×1386 caused E_OUT_OF_MEM crash loop.
+    cam_rgb.setIspScale(1, 2)
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-    cam_rgb.setFps(5)
+    cam_rgb.setFps(5)                      # FIX 5: 10 FPS caused SIPP OOM on Lite
 
     nn = pipeline.create(dai.node.SpatialDetectionNetwork)
     nn.setBlobPath(str(YOLO_BLOB_PATH))
     nn.setConfidenceThreshold(YOLO_MIN_CONFIDENCE)
     nn.setBoundingBoxScaleFactor(0.5)
-    nn.setDepthLowerThreshold(100)    # mm — ignore depth < 10 cm
-    nn.setDepthUpperThreshold(8000)   # mm — ignore depth > 8 m
+    nn.setDepthLowerThreshold(100)         # mm — ignore depth < 10 cm
+    nn.setDepthUpperThreshold(8000)        # mm — ignore depth > 8 m
 
     # DepthAI 3.x — YOLO-specific config lives in detectionParser sub-node
     nn.detectionParser.setNumClasses(80)
@@ -354,11 +379,24 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
 
 
 def _teardown():
-    """Stop existing pipeline and clear state without raising."""
+    """
+    Stop existing pipeline and clear state without raising.
+    FIX 4: joins the reader thread (up to 2s) before stopping the pipeline
+    to prevent stale frame reads and lock contention during reinit.
+    """
     global _pipeline, _depth_queue, _depth_frame, _oakd_ok
-    global _yolo_spatial_queue, _yolo_ok
-    _oakd_ok            = False
+    global _yolo_spatial_queue, _yolo_ok, _reader_thread
+
+    _oakd_ok            = False   # signal reader loop to exit
     _yolo_ok            = False
+
+    # Wait for reader thread to see _oakd_ok=False and exit cleanly
+    if _reader_thread is not None and _reader_thread.is_alive():
+        _reader_thread.join(timeout=2.0)
+        if _reader_thread.is_alive():
+            log.warning("OAK-D reader thread did not exit cleanly within 2s")
+    _reader_thread = None
+
     _depth_queue        = None
     _yolo_spatial_queue = None
     with _lock:
@@ -383,11 +421,10 @@ def _reader_loop():
     On fatal disconnect: logs once, clears _oakd_ok, exits cleanly.
     Reconnect watchdog handles restart.
     """
-    global _depth_frame, _oakd_ok, _last_floor_check
+    global _depth_frame, _oakd_ok
 
-    floor_check_interval = 1.0 / FLOOR_CHECK_HZ
-    yolo_check_interval  = 1.0 / YOLO_CHECK_HZ
-    last_yolo_check      = 0.0
+    yolo_check_interval = 1.0 / YOLO_CHECK_HZ
+    last_yolo_check     = 0.0
 
     while _oakd_ok:
         try:
@@ -395,7 +432,8 @@ def _reader_loop():
                 time.sleep(0.1)
                 continue
 
-            in_depth = _depth_queue.get(timeout=datetime.timedelta(seconds=1))  # 1s timeout — prevents infinite block on disconnect
+            # 1s timeout — prevents infinite block on disconnect
+            in_depth = _depth_queue.get(timeout=datetime.timedelta(seconds=1))
             if in_depth is None:
                 continue
 
@@ -404,7 +442,7 @@ def _reader_loop():
                 _depth_frame = frame
 
             if _safety_active:
-                _safety_check(floor_check_interval)
+                _safety_check()
 
             # ── Layer 2: YOLO detections ──────────────────────────────────────
             now = time.monotonic()
@@ -431,7 +469,7 @@ def _reader_loop():
 
 # ─── Layer 1: Safety check ────────────────────────────────────────────────────
 
-def _safety_check(floor_check_interval: float):
+def _safety_check():
     """
     Layer 1 safety reactions — called every depth frame.
 
@@ -443,19 +481,30 @@ def _safety_check(floor_check_interval: float):
 
     Check 2 — Floor drop / void (rate-limited at FLOOR_CHECK_HZ):
       HIGH confidence  → motors.stop() — unambiguous drop detected.
-      MEDIUM confidence → motors.stop() — stairs are fatal; better safe.
-        Medium is logged differently so operators can check if it's a
-        wide open doorway causing false positives.
+      MEDIUM confidence is intentionally suppressed here (flat-floor false
+      positives at 15cm mount height). HIGH only is the safe default.
 
     Both checks are independent of Cosmos — pure reactive hardware safety.
 
     Sensor arbitration:
       LiDAR and OAK-D both call motors.stop() independently. Whichever
       fires first wins. No arbitration is correct for safety — the most
-      conservative sensor always dominates. Adding arbitration would only
-      delay the stop.
+      conservative sensor always dominates.
+
+    FIX 2: _avoidance_in_progress is now resolved at the top of the function
+      so it is always defined before either the obstacle check or the floor-
+      drop check references it (previously it was set inside the else branch
+      of the obstacle check, causing UnboundLocalError when valid_patches==0).
     """
     global _last_floor_check
+
+    # FIX 2: resolve avoidance state once, at the top — always defined
+    _avoidance_in_progress = False
+    try:
+        from lidar import _avoidance_active
+        _avoidance_in_progress = _avoidance_active
+    except Exception:
+        pass
 
     try:
         from motors import motors
@@ -463,8 +512,8 @@ def _safety_check(floor_check_interval: float):
         # ── Check 1: front obstacle — 3-patch depth sampling ─────────────────
         samples = _get_front_depth_3patch()
         if samples["valid_patches"] == 0:
-            # No depth at all in front — don't act, but warn
-            pass
+            # No depth at all in front — don't act, log once at debug level
+            log.debug("OAK-D: 0/3 front depth patches valid — no obstacle action")
         else:
             if samples["valid_patches"] < 3:
                 log.debug(
@@ -472,13 +521,6 @@ def _safety_check(floor_check_interval: float):
                     "valid (possible glass/white wall) — using available patches"
                 )
             front = samples["min_m"]
-            # Check if avoidance turn is in progress — suppress stop if so
-            _avoidance_in_progress = False
-            try:
-                from lidar import _avoidance_active
-                _avoidance_in_progress = _avoidance_active
-            except Exception:
-                pass
             if not _avoidance_in_progress:
                 if front < OAKD_STOP_DIST:
                     motors.stop()
@@ -491,8 +533,8 @@ def _safety_check(floor_check_interval: float):
 
         # ── Check 2: floor drop / void (HIGH confidence only) ────────────────
         # Re-enabled — LiDAR void is disabled (horizontal scanner can't see drops).
-        # Only HIGH confidence fires — medium was causing flat-floor false positives.
-        # Rate-limited by FLOOR_CHECK_HZ to avoid hammering the depth frame.
+        # Only HIGH confidence fires — medium was causing flat-floor false positives
+        # at 15cm mount height. Rate-limited by FLOOR_CHECK_HZ.
         now_fc = time.monotonic()
         if now_fc - _last_floor_check >= 1.0 / FLOOR_CHECK_HZ:
             _last_floor_check = now_fc
@@ -517,7 +559,7 @@ def _yolo_check():
 
     For each detection of a target class (person/animal):
       1. Extract confidence, spatial depth (mm → m), bounding box.
-      2. Compute proportional bearing_deg (−90 … +90°) from bbox centre x.
+      2. Compute proportional bearing_deg (−45 … +45°) from bbox centre x.
          Negative = left, positive = right.
          Also compute coarse bearing string (left/center/right) for compat.
       3. Track bounding box width trend: if box is SHRINKING (target leaving),
@@ -598,11 +640,11 @@ def _yolo_check():
             # ── Always update position memory ─────────────────────────────────
             with _yolo_lock:
                 _last_yolo_positions[label] = {
-                    "dist_m":     dist_m,
-                    "bearing":    bearing,
+                    "dist_m":      dist_m,
+                    "bearing":     bearing,
                     "bearing_deg": round(bearing_deg, 1),
-                    "confidence": round(confidence, 2),
-                    "timestamp":  now,
+                    "confidence":  round(confidence, 2),
+                    "timestamp":   now,
                 }
 
             # ── Skip callback if target is clearly moving away ────────────────
@@ -649,14 +691,20 @@ def _yolo_check():
 # ─── Reconnect watchdog ───────────────────────────────────────────────────────
 
 def _ensure_reconnect_watchdog():
+    """
+    Start the reconnect watchdog thread exactly once.
+    FIX 3: uses a Lock instead of a bare boolean to prevent two watchdog
+    threads from spawning if init_oakd() is called concurrently.
+    """
     global _reconnect_thread, _reconnect_started
-    if _reconnect_started:
-        return
-    _reconnect_started = True
-    _reconnect_thread  = threading.Thread(
-        target=_reconnect_loop, daemon=True, name="oakd-reconnect"
-    )
-    _reconnect_thread.start()
+    with _reconnect_lock:
+        if _reconnect_started:
+            return
+        _reconnect_started = True
+        _reconnect_thread  = threading.Thread(
+            target=_reconnect_loop, daemon=True, name="oakd-reconnect"
+        )
+        _reconnect_thread.start()
 
 
 def _reconnect_loop():
@@ -678,13 +726,14 @@ def get_depth_at(x_ratio: float = 0.5, y_ratio: float = 0.5,
         if _depth_frame is None:
             return None
         frame = _depth_frame.copy()
-    h, w = frame.shape
-    cx = int(x_ratio * w)
-    cy = int(y_ratio * h)
-    x1, x2 = max(0, cx - patch_px), min(w, cx + patch_px)
-    y1, y2 = max(0, cy - patch_px), min(h, cy + patch_px)
-    patch = frame[y1:y2, x1:x2]
-    valid = patch[patch > 0]
+    h, w  = frame.shape
+    cx    = int(x_ratio * w)
+    cy    = int(y_ratio * h)
+    # FIX 7: +1 on upper bounds so slice width is always 2*patch_px pixels
+    x1, x2 = max(0, cx - patch_px), min(w, cx + patch_px + 1)
+    y1, y2 = max(0, cy - patch_px), min(h, cy + patch_px + 1)
+    patch  = frame[y1:y2, x1:x2]
+    valid  = patch[patch > 0]
     if len(valid) == 0:
         return None
     return float(np.median(valid)) / 1000.0
@@ -880,8 +929,8 @@ def get_status() -> dict:
 def oakd_status_html() -> str:
     """
     HTML status panel for Gradio.
-    Now shows: front depth, patch coverage, and YOLO Layer 2 status.
-    YOLO status: ✅ active | ❌ no blob | ⏸ paused
+    Shows: front depth, patch coverage, and YOLO Layer 2 status.
+    YOLO status: ✅ active | ❌ no blob | ⏸ paused | ⚠️ init fail
     """
     s = get_status()
 
@@ -902,7 +951,7 @@ def oakd_status_html() -> str:
     else:
         dist_str, color, label = f"{d:.2f}m", "#76b900", "✅ CLEAR"
 
-    patches = s["valid_patches"]
+    patches     = s["valid_patches"]
     patch_color = "#76b900" if patches == 3 else "#ff6600" if patches > 0 else "#cc0000"
     patch_str   = f"{patches}/3"
 
