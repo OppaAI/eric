@@ -1,8 +1,3 @@
-"""
-ERIC — Tactical Command Dashboard (Spencer Edition)
-Industrial Cyberpunk style with high-contrast telemetry and neon status indicators.
-"""
-
 import logging
 import gradio as gr
 
@@ -10,140 +5,125 @@ from config import GRADIO_HOST, GRADIO_PORT
 from motors import motors
 from tts import init_tts
 from mission import (
-    start_mission, stop_mission, resume_after_interaction,
-    handle_character_response, register_ui_callbacks,
-    list_missions, get_briefing_from_file,
-    get_mission_active, get_mission_state, _ms
+    start_mission, stop_mission, list_missions,
+    get_briefing_from_file, get_mission_active, get_mission_state, _ms
 )
 
 log = logging.getLogger("eric.gui")
 
-# --- Tactical CSS Overhaul ---
+# --- SPENCER'S ONE-SCREEN TACTICAL CSS ---
 SPENCER_CSS = """
 .gradio-container { 
     background-color: #0d1117 !important; 
     color: #c9d1d9 !important; 
-    font-family: 'Courier New', Courier, monospace !important; 
+    font-family: 'Courier New', monospace !important; 
+    max-height: 100vh !important;
+    overflow: hidden !important;
 }
-.box, .form, .gr-panel { 
-    border: 1px solid #30363d !important; 
-    background: #161b22 !important; 
-    border-radius: 4px !important;
-}
-.label { 
-    color: #58a6ff !important; 
-    text-transform: uppercase !important; 
-    font-weight: bold !important;
-    letter-spacing: 1px;
-}
-#eric_says_box { 
-    border-left: 6px solid #fee100 !important; 
-    background: #1c2128 !important;
+
+/* THE STOP BUTTON: Circle Force */
+#stop_btn_container {
+    display: flex !important;
+    justify-content: center !important;
+    align-items: center !important;
 }
 #stop_btn { 
     background: linear-gradient(180deg, #ff4444 0%, #cc0000 100%) !important; 
-    color: white !important; 
-    border: 1px solid #30363d !important;
+    color: white !important;
     font-weight: bold !important;
-    font-size: 1.2em !important;
+    border: 3px solid #30363d !important;
+    width: 90px !important;
+    height: 90px !important;
+    min-width: 90px !important;
+    max-width: 90px !important;
+    border-radius: 50% !important;
+    box-shadow: 0 0 15px rgba(255, 0, 0, 0.4) !important;
+    cursor: pointer !important;
 }
-footer {display: none !important;}
+
+/* Chat & Briefing Panels */
+#eric_says_box textarea { font-size: 1.1em !important; color: #fee100 !important; background: #1c2128 !important; }
+#briefing_box textarea { background: #161b22 !important; color: #8b949e !important; }
+
+/* Constrain images to fit on one screen */
+.preview-image { max-height: 200px !important; object-fit: contain !important; }
+footer { display: none !important; }
 """
 
-# --- Telemetry & Status Logic ---
-
 def get_module_status_html():
-    """Returns tactical LED-style status indicators with neon glow."""
     active = get_mission_active()
     state = get_mission_state()
-    
-    # Glow logic: Green for search, Yellow for Pikachu, Red/Gray for Idle
+    # High-glow LEDs based on state
     if not active:
-        glow_color = "#444"
-        shadow = "none"
-        label = "SYSTEM IDLE"
+        glow, shadow, label = "#444", "none", "OFFLINE"
     elif "APPROACH" in state.name:
-        glow_color = "#fee100" # Pikachu Yellow
-        shadow = "0 0 15px #fee100, 0 0 5px #fff"
-        label = f"TARGET LOCKED: {state.name}"
+        glow, shadow, label = "#fee100", "0 0 15px #fee100", f"LOCKED: {state.name}"
     else:
-        glow_color = "#76b900" # Nvidia Green
-        shadow = "0 0 15px #76b900, 0 0 5px #fff"
-        label = f"MISSION: {state.name}"
+        glow, shadow, label = "#76b900", "0 0 15px #76b900", state.name
 
     return f"""
-    <div style="padding: 15px; background: #0d1117; border: 1px solid #30363d; border-radius: 4px;">
-        <div style="display: flex; align-items: center;">
-            <div style="width: 14px; height: 14px; border-radius: 50%; background: {glow_color}; box-shadow: {shadow}; margin-right: 12px;"></div>
-            <div>
-                <span style="color: #8b949e; font-size: 0.7rem; text-transform: uppercase; display: block;">Core Status</span>
-                <span style="color: #c9d1d9; font-weight: bold; font-size: 0.9rem;">{label}</span>
-            </div>
+    <div style="padding:10px; border:1px solid #333; background:#161b22; display:flex; align-items:center; border-radius:4px;">
+        <div style="width:14px; height:14px; border-radius:50%; background:{glow}; box-shadow:{shadow}; margin-right:12px;"></div>
+        <div style="line-height:1;">
+            <span style="font-size:0.6rem; color:#8b949e; text-transform:uppercase; display:block;">Mission Status</span>
+            <span style="font-size:0.85rem; font-weight:bold; color:#c9d1d9;">{label}</span>
         </div>
     </div>
     """
 
 def get_lidar_html():
-    """Renders a tactical proximity bar."""
     try:
         dist = getattr(_ms, 'last_lidar_dist', 0.0)
-        # Convert distance to a percentage for a bar (max 2m)
         pct = min(100, int((dist / 2.0) * 100))
         color = "#ff4444" if dist < 0.5 else "#76b900"
         return f"""
-        <div style="color: #8b949e; font-size: 0.7rem; margin-bottom: 4px;">LIDAR PROXIMITY: {dist:.2f}m</div>
-        <div style="width: 100%; background: #30363d; height: 10px; border-radius: 5px;">
-            <div style="width: {pct}%; background: {color}; height: 100%; border-radius: 5px; transition: width 0.3s;"></div>
+        <div style="font-size:0.7rem; color:#8b949e; margin-bottom:4px;">PROXIMITY: {dist:.2f}m</div>
+        <div style="width:100%; background:#333; height:8px; border-radius:4px;">
+            <div style="width:{pct}%; background:{color}; height:100%; border-radius:4px; transition:width 0.3s;"></div>
         </div>
         """
-    except: return "LIDAR OFFLINE"
-
-# --- UI Builders ---
+    except: return ""
 
 def build_ui():
-    with gr.Blocks(title="ERIC COMMAND CENTER", css=SPENCER_CSS) as demo:
-        gr.HTML("<h2 style='color: #76b900; margin-bottom: 0;'>🤖 ERIC TACTICAL INTERFACE</h2>")
-        gr.Markdown("Local Edge Inference • Industrial S&R Protocol")
-
+    with gr.Blocks(title="ERIC HUD v2", css=SPENCER_CSS) as demo:
+        # HEADER ROW
         with gr.Row():
-            # LEFT: Dual Feeds
+            with gr.Column(scale=4):
+                gr.HTML("<h1 style='color:#76b900; margin:0; letter-spacing:1px;'>🤖 ERIC COMMAND HUD</h1>")
             with gr.Column(scale=2):
-                cam_p = gr.Image(label="PAN-TILT (PRIMARY)", source="webcam", streaming=True)
-                cam_w = gr.Image(label="WEBCAM (FLOOR)")
-            
-            # CENTRE: Mission Control
+                status_led = gr.HTML()
+            with gr.Column(scale=1, elem_id="stop_btn_container"):
+                btn_stop = gr.Button("STOP", elem_id="stop_btn")
+
+        # MAIN HUD GRID
+        with gr.Row():
+            # LEFT: Sensor Feeds
+            with gr.Column(scale=2):
+                # We use placeholder functions for images since we're using your existing capture logic
+                cam_p = gr.Image(label="PAN-TILT", height=200)
+                cam_w = gr.Image(label="WEBCAM", height=200)
+                lidar_ui = gr.HTML()
+
+            # CENTER: AI Reasoning
             with gr.Column(scale=3):
-                eric_says = gr.Textbox(label="ERIC SPEECH (COSMOS REASONING)", elem_id="eric_says_box", lines=4)
-                with gr.Row():
-                    mission_select = gr.Dropdown(choices=list_missions(), label="SELECT MISSION")
-                    btn_start = gr.Button("⚡ INITIATE", variant="primary")
-                
-                mission_brief = gr.Textbox(label="MISSION PARAMETERS", lines=8)
-                log_output = gr.Textbox(label="SYSTEM LOG", lines=6)
+                eric_says = gr.Textbox(label="COSMOS REASONING", elem_id="eric_says_box", lines=15)
+                log_output = gr.Textbox(label="L1 SYSTEM LOG", lines=3)
 
-            # RIGHT: Analytics & Safety
-            with gr.Column(scale=2):
-                status_led = gr.HTML(label="MISSION STATUS")
-                lidar_ui = gr.HTML(label="SENSORS")
-                btn_stop = gr.Button("🛑 EMERGENCY STOP", elem_id="stop_btn")
-                
-                with gr.Accordion("Manual Overrides", open=False):
-                    speed = gr.Slider(0, 1.0, value=0.2, label="Drive Power")
-                    with gr.Row():
-                        gr.Button("↺").click(lambda s: motors.spin_left(s), inputs=speed)
-                        gr.Button("↑").click(lambda s: motors.forward(s), inputs=speed)
-                        gr.Button("↻").click(lambda s: motors.spin_right(s), inputs=speed)
+            # RIGHT: Mission Briefing
+            with gr.Column(scale=3):
+                mission_select = gr.Dropdown(choices=list_missions(), label="SELECT PROTOCOL")
+                mission_brief = gr.Textbox(label="INTRODUCTION / PARAMETERS", elem_id="briefing_box", lines=15)
+                btn_start = gr.Button("⚡ INITIATE MISSION", variant="primary")
 
-        # Wire up events
+        # Callbacks
         mission_select.change(get_briefing_from_file, inputs=mission_select, outputs=mission_brief)
         btn_start.click(start_mission, inputs=mission_brief)
         btn_stop.click(stop_mission)
 
-        # Timers for the "Live" feel
+        # Telemetry Polling
         gr.Timer(1.0).tick(get_module_status_html, outputs=status_led)
         gr.Timer(0.5).tick(get_lidar_html, outputs=lidar_ui)
-        # Logic to pull speech from _ms
-        gr.Timer(1.0).tick(lambda: getattr(_ms, 'last_speech', ""), outputs=eric_says)
+        gr.Timer(1.0).tick(lambda: getattr(_ms, 'last_speech', "Ready..."), outputs=eric_says)
 
     return demo
 
