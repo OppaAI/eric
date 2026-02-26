@@ -79,6 +79,13 @@ _min_distance   = 999.0    # minimum distance in front arc (meters)
 _safety_active  = True     # can be disabled for testing
 _avoidance_active = False  # True while avoidance.py is executing a turn
 
+# ── Log rate limiting — prevent stop/slow spam at 10Hz ────────────────────────
+_LOG_RATE_S          = 2.0   # seconds between repeated stop/slow log lines
+_last_stop_log_time  = 0.0   # monotonic timestamp of last STOP log
+_last_slow_log_time  = 0.0   # monotonic timestamp of last SLOW log
+_last_stop_dist      = 999.0 # last logged stop distance (log if changed ±3cm)
+_last_slow_dist      = 999.0 # last logged slow distance
+
 _node           = None
 _sub            = None
 _ros_thread     = None
@@ -496,19 +503,40 @@ def _scan_callback(msg):
 # ─── Motor helpers (keep imports lazy — motors may not exist in test env) ─────
 
 def _motors_stop(tag: str, reason: str):
+    global _last_stop_log_time, _last_stop_dist
     try:
         from motors import motors
         motors.stop()
-        log.warning(f"🚧 {tag} — {reason}")
+        now  = time.monotonic()
+        # Extract distance from reason string for change detection
+        try:
+            dist = float(reason.split("at ")[-1].rstrip("m"))
+        except Exception:
+            dist = 0.0
+        dist_changed = abs(dist - _last_stop_dist) > 0.03  # >3cm change
+        if now - _last_stop_log_time >= _LOG_RATE_S or dist_changed:
+            log.warning(f"🚧 {tag} — {reason}")
+            _last_stop_log_time = now
+            _last_stop_dist     = dist
     except Exception:
         pass
 
 
 def _motors_slow(tag: str, reason: str):
+    global _last_slow_log_time, _last_slow_dist
     try:
         from motors import motors
         motors.slow()
-        log.info(f"⚠️  {tag} — {reason}")
+        now  = time.monotonic()
+        try:
+            dist = float(reason.split("at ")[-1].rstrip("m"))
+        except Exception:
+            dist = 0.0
+        dist_changed = abs(dist - _last_slow_dist) > 0.03
+        if now - _last_slow_log_time >= _LOG_RATE_S or dist_changed:
+            log.info(f"⚠️  {tag} — {reason}")
+            _last_slow_log_time = now
+            _last_slow_dist     = dist
     except Exception:
         pass
 
