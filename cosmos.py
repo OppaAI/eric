@@ -427,6 +427,37 @@ def capture_frame_raw(device: int = CAMERA_WEBCAM):
 
 # ─── Cosmos API ───────────────────────────────────────────────────────────────
 
+def _clean_response(text: str) -> str:
+    """
+    Strip markdown fences and chain-of-thought prefix from Cosmos Reason 2 output.
+
+    Handles:
+      ```json\n{...}\n```  → {…}
+      ```\n{...}\n```      → {…}
+      "Okay let me think...{…}" → {…}  (strips reasoning prefix if JSON follows)
+      Plain text              → returned as-is, stripped
+    """
+    import re
+    text = text.strip()
+
+    # Strip ```json ... ``` or ``` ... ``` fences
+    fenced = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    fenced = re.sub(r'\s*```$', '', fenced).strip()
+    if fenced != text:
+        return fenced
+
+    # Strip chain-of-thought reasoning prefix before first {
+    # Cosmos Reason 2 sometimes outputs "Okay, let me think...\n{...}"
+    brace = text.find('{')
+    if brace > 0:
+        before = text[:brace].strip()
+        # Only strip prefix if it looks like prose, not part of JSON
+        if before and not before.endswith((',', ':', '[')):
+            return text[brace:].strip()
+
+    return text
+
+
 def ask_cosmos(prompt: str, image_b64: str = None,
                frames: list[str] = None,
                max_tokens: int = 300, stream: bool = False):
@@ -471,7 +502,7 @@ def ask_cosmos(prompt: str, image_b64: str = None,
             return _stream_cosmos(payload)
         r = requests.post(VLLM_URL, json=payload, timeout=90)
         r.raise_for_status()
-        text = r.json()["choices"][0]["message"]["content"].strip()
+        text = _clean_response(r.json()["choices"][0]["message"]["content"])
         log.info(f"🧠 Cosmos: {text[:120]}")
         # ── Log to eric_logger ───────────────────────────────────────────────
         try:

@@ -316,6 +316,8 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
     cam_rgb = pipeline.create(dai.node.ColorCamera)
     cam_rgb.setPreviewSize(416, 416)   # YOLOv8n input size
     cam_rgb.setResolution(dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+    cam_rgb.setIspScale(1, 1)          # force ISP to honour 1080P — prevents
+    cam_rgb.setVideoSize(1920, 1080)   # "expected 1920x1080 received 2104x1560"
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
     cam_rgb.setFps(5)
@@ -392,7 +394,7 @@ def _reader_loop():
                 time.sleep(0.1)
                 continue
 
-            in_depth = _depth_queue.get()
+            in_depth = _depth_queue.get(timeout=1000)  # 1s timeout — prevents infinite block on disconnect
             if in_depth is None:
                 continue
 
