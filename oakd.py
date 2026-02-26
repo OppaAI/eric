@@ -27,10 +27,11 @@ Fixes applied (v3 → v4)
 1. ISP scale crash fix — setIspScale(1,1) was a no-op, leaving the sensor
    outputting 2104×1560 raw while the pipeline expected 1920×1080. This caused
    the ColorCamera post-proc mismatch error and an immediate Myriad X crash
-   (~1.5s after startup). Fixed: setIspScale(1, 2) targets 960×540, which fits
-   comfortably within OAK-D Lite SIPP memory budgets. setVideoSize removed (ISP
-   scale handles it). The previous setIspScale(8, 9) targeted ~1870×1386 which
-   is not a clean resolution and still overflowed SIPP buffers on the Lite.
+   (~1.5s after startup). THE_1080_P on the IMX214 (OAK-D Lite) does NOT crop
+   to 1920×1080 — it outputs the full native sensor size 2104×1560. So
+   setIspScale(1,2) produced 1052×780, not 960×540. Fixed: use THE_800_P which
+   outputs 1920×1080 on the IMX214, then setIspScale(1,2) → 960×540 exactly.
+   960×540 fits comfortably within OAK-D Lite SIPP memory budgets.
 
 2. _avoidance_in_progress UnboundLocalError — the variable was set inside the
    `else` branch of the front-obstacle check, then referenced in the floor-drop
@@ -342,11 +343,14 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
 
     cam_rgb = pipeline.create(dai.node.ColorCamera)
     cam_rgb.setPreviewSize(416, 416)       # YOLOv8n input size
+    # IMX214 native sensor: 2104×1560. THE_1080_P does NOT output 1920×1080 on
+    # the OAK-D Lite — it outputs full sensor size 2104×1560. setIspScale(1,2)
+    # then halves that to 1052×780, NOT 960×540, causing the post-proc mismatch.
+    # Fix: use THE_800_P (outputs 1920×1080 on IMX214) + setIspScale(1,2)
+    # → 960×540 exactly. Confirmed clean resolution within Lite SIPP budget.
     cam_rgb.setResolution(
-        dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    # FIX 1: setIspScale(1, 2) → 960×540 — fits OAK-D Lite SIPP memory budget.
-    # Previous setIspScale(8, 9) → ~1870×1386 caused E_OUT_OF_MEM crash loop.
-    cam_rgb.setIspScale(1, 2)
+        dai.ColorCameraProperties.SensorResolution.THE_800_P)
+    cam_rgb.setIspScale(1, 2)              # 1920×1080 / 2 → 960×540 exactly
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
     cam_rgb.setFps(5)                      # FIX 5: 10 FPS caused SIPP OOM on Lite
