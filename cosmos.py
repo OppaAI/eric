@@ -458,6 +458,58 @@ def _clean_response(text: str) -> str:
     return text
 
 
+_JSON_BLOCK_MARKER = "WHEN A JSON SCHEMA IS GIVEN"
+
+def ask_cosmos_plain(prompt: str, image_b64: str = None,
+                     max_tokens: int = 300) -> str:
+    """
+    Query Cosmos for a plain spoken response — no JSON schema instructions.
+    Use this for introductions, mission acknowledgements, and greetings.
+    """
+    # Strip the JSON instruction block so the model doesn't default to JSON
+    idx = _system_prompt.find(_JSON_BLOCK_MARKER)
+    plain_sys = _system_prompt[:idx].strip() if idx >= 0 else _system_prompt
+
+    content = []
+    if image_b64:
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{image_b64}"}
+        })
+    content.append({"type": "text", "text": prompt})
+
+    payload = {
+        "model":              COSMOS_MODEL,
+        "messages": [
+            {"role": "system", "content": plain_sys},
+            {"role": "user",   "content": content}
+        ],
+        "max_tokens":         max_tokens,
+        "temperature":        0.7,
+        "repetition_penalty": 1.15,
+        "stream":             False
+    }
+
+    try:
+        r = requests.post(VLLM_URL, json=payload, timeout=90)
+        r.raise_for_status()
+        text = r.json()["choices"][0]["message"]["content"].strip()
+        log.info(f"🧠 Cosmos (plain): {text[:120]}")
+        try:
+            from logger import log_ai as _log_ai
+            _log_ai(prompt[-400:], text, label="COSMOS_PLAIN")
+        except Exception:
+            pass
+        return text
+    except requests.exceptions.ConnectionError:
+        msg = "Cannot connect to Cosmos. Is vLLM running? (bash launch/cosmos.sh)"
+        log.error(msg)
+        return msg
+    except Exception as e:
+        log.error(f"Cosmos plain error: {e}")
+        return f"Cosmos error: {e}"
+
+
 def ask_cosmos(prompt: str, image_b64: str = None,
                frames: list[str] = None,
                max_tokens: int = 300, stream: bool = False):
