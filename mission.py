@@ -2778,14 +2778,26 @@ def _get_mission_scan_overlay() -> str:
     targets = _ms.mission_target_objects
 
     if alarm == AlarmType.SIREN:
-        target_list = ", ".join(targets) if targets else "injured or unconscious people"
-        base = (
-            f"SEARCH AND RESCUE MODE: You are searching for {target_list}.\n"
-            "If you see ANY person who appears injured, unconscious, on the floor, "
-            "or in distress — set target_visible=true, set object='person', "
-            "set severity='CRITICAL', and set speak to an urgent rescue announcement.\n"
-            "Also watch for: smoke, fire, structural collapse, flooding.\n\n"
-        )
+        if targets:
+            # Specific targets defined — hunt exactly those, not generic "injured person"
+            target_list = ", ".join(targets)
+            base = (
+                f"SEARCH AND RESCUE MODE: You are searching for {target_list}.\n"
+                f"If you see {target_list} — set target_visible=true immediately "
+                f"and set speak to an urgent rescue announcement.\n"
+                "Do NOT wait for a person — your target may be an object, animal, or figure.\n"
+                "Also watch for: smoke, fire, structural collapse, flooding.\n\n"
+            )
+        else:
+            # No specific targets — default SAR person-hunting behaviour
+            target_list = "injured or unconscious people"
+            base = (
+                "SEARCH AND RESCUE MODE: You are searching for injured or unconscious people.\n"
+                "If you see ANY person who appears injured, unconscious, on the floor, "
+                "or in distress — set target_visible=true, set object='person', "
+                "set severity='CRITICAL', and set speak to an urgent rescue announcement.\n"
+                "Also watch for: smoke, fire, structural collapse, flooding.\n\n"
+            )
 
     elif alarm == AlarmType.SUSPICIOUS:
         target_list = ", ".join(targets) if targets else "unattended bags or suspicious objects"
