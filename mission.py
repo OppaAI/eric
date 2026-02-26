@@ -72,7 +72,7 @@ def _safe_to_fwd() -> bool:
         return True  # lidar not loaded — allow forward
 from motors import motors
 from cosmos import (
-    ask_cosmos, set_mission_briefing, get_mission_briefing,
+    ask_cosmos, ask_cosmos_plain, set_mission_briefing, get_mission_briefing,
     capture_frame, capture_frames_video,
     start_frame_buffer, get_buffered_frames,
     CAMERA_WEBCAM, CAMERA_PANTILT
@@ -526,7 +526,7 @@ def _execute_step_action(obj_name: str):
         _advance_step()
 
     elif step.action == "speak_to":
-        greeting = ask_cosmos(
+        greeting = ask_cosmos_plain(
             f"You have found {step.target}. "
             + (f"Your mission: {step.message}. " if step.message else "")
             + "Greet them warmly and start the conversation. 2 sentences.",
@@ -1197,7 +1197,7 @@ def start_mission(briefing: str, mission_name: str = ""):
     time.sleep(0.5)
 
     step_info = f"I have {len(_ms.mission_steps)} step{'s' if len(_ms.mission_steps) > 1 else ''}: {', '.join(step_summaries)}." if len(_ms.mission_steps) > 1 else ""
-    ack = ask_cosmos(
+    ack = ask_cosmos_plain(
         f"Mission briefing:\n\"{briefing}\"\n\n"
         + (f"Parsed steps: {step_info}\n\n" if step_info else "")
         + "Acknowledge in 2-3 sentences. State your first action. Be concise.",
@@ -1597,7 +1597,7 @@ Set close_and_facing=false if the person is far away, looking away, or has their
                 _ui("log", f"👁️  Eye contact confirmed — greeting! ({ec_result.get('reasoning','')})")
                 _ui("status", "PERSON SPOTTED")
                 log_mission_event("person_greeted", ec_result.get("reasoning", ""))
-                greeting = ask_cosmos(
+                greeting = ask_cosmos_plain(
                     "Someone is looking at you from close range. "
                     "Greet them warmly and ask if they can help with your mission. 1-2 sentences.",
                     max_tokens=60
@@ -1711,7 +1711,7 @@ def _nav_check_async() -> dict:
                         if ec_result.get("close_and_facing"):
                             _ui("log", f"👁️  Eye contact confirmed — greeting!")
                             log_mission_event("person_greeted", ec_result.get("reasoning", ""))
-                            greeting = ask_cosmos(
+                            greeting = ask_cosmos_plain(
                                 "Someone is close and looking at you. Greet them and ask if they can help with your mission. 1-2 sentences.",
                                 max_tokens=60
                             )
