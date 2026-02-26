@@ -1,0 +1,143 @@
+# ═══════════════════════════════════════════════════════════════
+# ERIC Mission: Rescue Pikachu
+# ═══════════════════════════════════════════════════════════════
+
+name: "Rescue Pikachu"
+description: "Pikachu has been captured by Team Rocket and hidden in the room. Find them."
+author: "OppaAI"
+
+
+briefing: |
+  Pikachu has been captured by Team Rocket and is being held somewhere in this room.
+  They are wrapped in a clear plastic bag. You must find Pikachu and sound
+  the rescue siren immediately.
+
+  WHAT YOU ARE LOOKING FOR:
+  Pikachu is a small bright yellow Pokémon — round body, pointy black-tipped ears,
+  red circular cheeks, small black eyes, and a lightning bolt shaped tail.
+  They may be partially hidden behind an object.
+  The clear plastic bag may cause reflections — look for the yellow shape inside it.
+
+  HOW TO SEARCH:
+  Do a full 360° scan first — look carefully at floor level and near any objects.
+  Scan slowly — Pikachu may only be visible from certain angles.
+  Check behind and around any obstacles in the room.
+  Do not sound the alarm unless you are certain it is Pikachu.
+
+  WHEN YOU FIND PIKACHU:
+  1. Stop and confirm — round, yellow, ears, red cheeks
+  2. Sound the rescue siren
+  3. Announce their location clearly
+  4. Photograph them
+  5. Stay with Pikachu until help arrives
+
+  Pikachu is counting on you.
+
+
+alarm_type: siren
+
+target_objects:
+  - Pikachu
+  - yellow pokemon
+  - pokemon
+
+photo_on_find:     true
+announce_location: true
+stay_with_target:  true
+generate_report:   false
+
+scan_strategy:      target_hunt
+loop_mission:       false
+approach_on_detect: false
+detect_distance:    1.5   # metres — confirm visually before triggering
+
+
+characters:
+  - name: "Pikachu"
+    hint: "Relieved and emotional when found. Says 'Pika pika!' and 'PIKACHUUU!' with increasing excitement. Very grateful to Eric."
+
+
+mission_stages:
+  - stage: 1
+    goal: "Full 360° scan — look at floor level near all objects"
+  - stage: 2
+    goal: "Investigate any yellow shapes — confirm identity carefully before alarming"
+  - stage: 3
+    goal: "Locate Pikachu in the plastic bag — look through reflections for the yellow figure"
+  - stage: 4
+    goal: "Confirm: round, yellow, ears, red cheeks — sound the siren"
+  - stage: 5
+    goal: "Photograph, announce location, stay with Pikachu"
+
+
+terrain:
+  - "Smooth empty floor (normal speed)"
+  - "Around the box obstacle (slow down, navigate around)"
+
+
+notes: |
+  ═══════════════════════════════════════════════════════════════
+  PHYSICAL SETUP
+  ═══════════════════════════════════════════════════════════════
+
+  ROOM:
+  - Small empty room — emptier is better, no clutter to confuse Cosmos
+  - Hard floor preferred (tile, wood)
+
+  PROPS:
+  - One cardboard box — medium sized, placed roughly centre of room
+  - Pikachu figure wrapped loosely in a clear plastic bag — placed BEHIND the box
+    Position so Pikachu is visible from one of Eric's pan angles:
+    -90°, -60°, -30°, 0°, 30°, 60°, 90° from starting position
+    Best: visible from 30° or 60° so it's not the first thing Eric sees
+  - Wall-E figure — placed on the OPPOSITE side of the room, fully in the open
+    Eric gets NO briefing about Wall-E — Cosmos must identify and reject it on its own
+
+  STARTING POSITION:
+  - Eric at room entrance, facing in
+  - Box roughly 1–1.5m ahead
+  - Pikachu hidden behind box
+  - Wall-E clearly visible across the room
+
+  ═══════════════════════════════════════════════════════════════
+  WHY WALL-E IS NOT IN THE BRIEFING
+  ═══════════════════════════════════════════════════════════════
+
+  Eric knows nothing about Wall-E. When Cosmos sees Wall-E it must:
+  - Recognise it as a figure (not Pikachu)
+  - Reason about shape and features — boxy vs round, no ears, different face
+  - Decide "this is not what I am looking for" without being told
+
+  This is genuine visual discrimination, not briefing pattern-matching.
+  The physical_reasoning log will show exactly what Cosmos thought —
+  that is your best demo moment for the judges.
+
+  ═══════════════════════════════════════════════════════════════
+  WHAT COSMOS HAS TO SOLVE
+  ═══════════════════════════════════════════════════════════════
+
+  1. Occlusion — Pikachu is behind a box, partially visible
+  2. Decoy rejection — Wall-E is warm-toned but wrong shape, no briefing hint
+  3. Bag distortion — plastic reflections distort the yellow colour
+  4. Team Rocket framing — Eric may comment on Team Rocket unprompted,
+     which adds personality and shows the briefing shaping its reasoning
+
+  ═══════════════════════════════════════════════════════════════
+  HOW TO PLAY PIKACHU
+  ═══════════════════════════════════════════════════════════════
+
+  Only play Pikachu AFTER Eric sounds the siren and confirms the find:
+    "Pika... pika... PIKACHUUU!
+     Pika pika! [relieved, excited]
+     Pikaaa... [if Eric speaks to them] PIKACHUUU!"
+
+  ═══════════════════════════════════════════════════════════════
+  VIDEO SHOT LIST
+  ═══════════════════════════════════════════════════════════════
+
+  1. Wide room shot — Eric at entrance, Wall-E visible, box in centre, Pikachu hidden
+  2. Eric's camera feed — what it sees during the 360° scan
+  3. Split screen — camera view LEFT, Cosmos physical_reasoning text RIGHT
+     This is your money shot — judges see Cosmos think through Wall-E vs Pikachu
+  4. Close-up on Pikachu behind box — the reveal
+  5. Siren fires — OLED lights, alarm sounds, Eric announces location

@@ -109,11 +109,16 @@ class _CameraReader:
 
     RECONNECT_DELAY = 2.0   # seconds to wait before reconnecting after failure
     READ_TIMEOUT    = 3.0   # seconds get_frame() waits for a fresh frame
+    # For cameras running at < 2 fps the default 3s timeout is too tight.
+    # We extend it to (2 × frame_interval) so one missed frame doesn't cause a warning.
 
-    def __init__(self, device: int, width: int = 640, height: int = 480):
-        self.device   = device
-        self.width    = width
-        self.height   = height
+    def __init__(self, device: int, width: int = 640, height: int = 480,
+                 fps: float = 10.0):
+        self.device       = device
+        self.width        = width
+        self.height       = height
+        self._frame_sleep = 1.0 / max(fps, 0.5)   # min 0.5 fps to keep V4L2 alive
+        self._read_timeout = max(self.READ_TIMEOUT, self._frame_sleep * 2.5)
         self._latest  = None               # most recent frame (numpy array)
         self._lock    = _threading.Lock()  # protects _latest
         self._event   = _threading.Event() # set whenever a new frame is stored
@@ -125,9 +130,10 @@ class _CameraReader:
         """Open camera with low-latency settings. Try GStreamer first, then V4L2."""
         # ── GStreamer path ────────────────────────────────────────────────────
         try:
+            gst_fps = max(1, round(1.0 / self._frame_sleep))
             pipeline = (
                 f"v4l2src device=/dev/video{self.device} io-mode=2 ! "
-                "video/x-raw, width=640, height=480, framerate=10/1 ! "
+                f"video/x-raw, width=640, height=480, framerate={gst_fps}/1 ! "
                 "videoconvert n-threads=2 ! "
                 "video/x-raw, format=BGR ! "
                 "appsink drop=1 max-buffers=1 sync=false"
@@ -155,7 +161,7 @@ class _CameraReader:
             cap.set(_cv2.CAP_PROP_FOURCC,      _cv2.VideoWriter_fourcc(*fourcc_str))
             cap.set(_cv2.CAP_PROP_FRAME_WIDTH,  self.width)
             cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-            cap.set(_cv2.CAP_PROP_FPS,          10)   # 10 fps — enough for Cosmos, saves CPU
+            cap.set(_cv2.CAP_PROP_FPS,          max(1, round(1.0 / self._frame_sleep)))
             cap.set(_cv2.CAP_PROP_BUFFERSIZE,   2)   # warm-up buffer
 
             # Drain a few frames to let the kernel settle before going low-latency
@@ -224,9 +230,9 @@ class _CameraReader:
                 self._latest = frame
             self._event.set()   # wake get_frame() if it's waiting
 
-            # Rate-limit to 10 fps — kernel buffer is drained, no need to spin at 30fps.
-            # Saves ~15% CPU on Jetson vs uncapped loop.
-            _time.sleep(0.1)
+            # Rate-limit to configured fps — kernel buffer is drained, no need to spin.
+            # pan-tilt: 5 fps (0.2s), webcam: 1 fps (1.0s). Saves CPU on Jetson.
+            _time.sleep(self._frame_sleep)
 
         if cap:
             cap.release()
@@ -236,9 +242,9 @@ class _CameraReader:
         Return the most recent frame, waiting up to READ_TIMEOUT seconds for one.
         Clears the event so the next call waits for a genuinely new frame.
         """
-        got = self._event.wait(timeout=self.READ_TIMEOUT)
+        got = self._event.wait(timeout=self._read_timeout)
         if not got:
-            log.warning(f"Camera {self.device}: no frame available after {self.READ_TIMEOUT}s")
+            log.warning(f"Camera {self.device}: no frame available after {self._read_timeout:.1f}s")
             return None
         self._event.clear()
         with self._lock:
@@ -316,9 +322,22 @@ def get_buffered_frames(device: int, n: int = 6) -> list[str]:
     frame = capture_frame(device, 160, 120)
     return [frame] if frame else []
 
+# ── Per-camera background read rates ─────────────────────────────────────────
+# pan-tilt: 5 fps — active search camera, needs fresh frames for Cosmos clips.
+#           V4L2 buffer holds ~0.2s of data at this rate — well within safe margin.
+# webcam:   1 fps — confirmation-only camera, only called a few times per minute.
+#           1 fps is enough to keep the V4L2 kernel buffer drained without
+#           wasting any CPU on frames that will never be used.
+_CAMERA_FPS = {
+    CAMERA_PANTILT: 5.0,
+    CAMERA_WEBCAM:  1.0,
+}
+
+
 def _get_reader(device: int) -> _CameraReader:
     if device not in _readers:
-        reader = _CameraReader(device)
+        fps    = _CAMERA_FPS.get(device, 5.0)
+        reader = _CameraReader(device, fps=fps)
         _readers[device] = reader
         # Wait until the background thread delivers its first real frame
         # (up to 10s — covers the warm-up reads inside _open()).
