@@ -873,6 +873,24 @@ def get_floor_drop(
     floor_edge_m = float(np.median(edge_depths)) if edge_depths else None
 
     # ── Void decision ─────────────────────────────────────────────────────────
+    #
+    # At 15cm mount height, flat floors return very few valid stereo pixels —
+    # sparse return_ratio is NORMAL on flat ground, not a void.
+    #
+    # To avoid false positives we require CORROBORATING evidence:
+    #
+    # HIGH (sparse): edge sparse AND mid-frame also has no depth.
+    #   Flat floor always produces some mid-frame depth even at 15cm.
+    #   If mid is None too, camera is looking into open air both near and far.
+    #
+    # HIGH (depth): edge depth >> normal_max_m with valid mid reference.
+    #   Large absolute depth jump is unambiguous regardless of return count.
+    #
+    # MEDIUM: confirmed depth jump between mid and edge — genuine step/slope.
+    #
+    # REMOVED: "no edge returns + mid valid" medium check — fires constantly
+    #   on flat floors with poor stereo returns at 15cm mount height.
+    #
     void_detected = False
     confidence    = "low"
     reason        = "no anomaly"
@@ -880,31 +898,31 @@ def get_floor_drop(
     total_edge_pixels = edge_strip.size
     return_ratio      = valid_count / max(total_edge_pixels, 1)
 
-    if return_ratio < 0.005 and total_edge_pixels > 100:   # < 0.5% — truly open air only
+    if (return_ratio < 0.005
+            and total_edge_pixels > 100
+            and floor_mid_m is None):
+        # Sparse edge AND no mid-frame depth — open air both near and far.
+        # Flat floor always has some mid-frame returns even at shallow angles.
         void_detected = True
         confidence    = "high"
-        reason        = (f"floor edge returns sparse ({return_ratio:.1%}) "
-                         "— drop or hole below")
+        reason        = (f"floor edge sparse ({return_ratio:.1%}) AND "
+                         "no mid-frame depth — open air ahead (drop or hole)")
 
     elif floor_mid_m is not None and floor_edge_m is not None:
         drop_delta = floor_edge_m - floor_mid_m
         if floor_edge_m > normal_max_m:
+            # Edge depth far beyond any normal room — unambiguous stair/cliff
             void_detected = True
             confidence    = "high"
             reason        = (f"floor edge depth {floor_edge_m:.1f}m >> "
                              f"normal ({floor_mid_m:.1f}m) — stairs or cliff")
         elif drop_delta > drop_threshold_m:
+            # Confirmed depth jump between mid and edge — genuine step/slope
             void_detected = True
             confidence    = "medium"
             reason        = (f"floor drops {drop_delta:.1f}m at edge "
                              f"({floor_mid_m:.1f}m→{floor_edge_m:.1f}m) "
                              "— step or slope")
-
-    elif floor_edge_m is None and floor_mid_m is not None and floor_mid_m < 2.0:
-        void_detected = True
-        confidence    = "medium"
-        reason        = (f"no floor returns at edge, mid={floor_mid_m:.1f}m "
-                         "— possible drop")
 
     return {
         "void_detected": void_detected,
