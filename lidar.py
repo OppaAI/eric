@@ -137,7 +137,7 @@ def safe_to_forward() -> bool:
     """
     with _lock:
         if not _lidar_ok or _lidar_stale or not _motor_link_ok:
-            return False   # LiDAR offline — let mission proceed (no data = no block)
+            return False   # LiDAR offline — cannot confirm path is clear, stay stopped
         if not _safety_active:
             return True   # safety disabled for testing
         return not _obstacle_close and not _obstacle_near
@@ -483,9 +483,12 @@ def _scan_callback(msg):
                     front_distances.append(r)
 
         if not front_distances:
-            # No valid front returns — could be void OR sensor issue.
-            # Void check below will handle this; obstacle check skipped.
-            pass
+            # No valid front returns — clear stale obstacle flags so the robot
+            # isn't permanently blocked after an obstacle moves away.
+            with _lock:
+                _obstacle_close = False
+                _obstacle_near  = False
+                _min_distance   = 999.0
         else:
             min_dist = min(front_distances)
             is_close = min_dist < STOP_DIST
@@ -495,16 +498,17 @@ def _scan_callback(msg):
                 _min_distance   = min_dist
                 _obstacle_close = is_close
                 _obstacle_near  = is_near
-                sa = _safety_active  # read under lock
+                sa  = _safety_active    # read under lock
+                av  = _avoidance_active # read under lock
 
-            if sa and not _avoidance_active:
+            if sa and not av:
                 if is_close:
                     _motors_stop("LIDAR STOP",
                                  f"obstacle at {min_dist:.2f}m")
                 elif is_near:
                     _motors_slow("LiDAR slow",
                                  f"obstacle at {min_dist:.2f}m")
-            elif sa and _avoidance_active and is_close:
+            elif sa and av and is_close:
                 log.debug(f"LiDAR: obstacle at {min_dist:.2f}m — suppressed during avoidance turn")
 
         # ── 3. Void / floor-drop check ────────────────────────────────────────

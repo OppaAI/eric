@@ -102,6 +102,8 @@ FLOOR_CHECK_HZ   = 1.0     # floor-drop check rate — 1Hz enough, numpy is heav
 
 _safety_active    = True
 _last_floor_check = 0.0
+_warmup_frames    = 0          # frames received since last (re)connect
+WARMUP_FRAMES     = 15         # skip void check for first N frames after connect
 
 # ── Layer 2 YOLO constants ────────────────────────────────────────────────────
 YOLO_BLOB_PATH      = Path("models/yolov8n_openvino_2022.1_4shave.blob")
@@ -296,7 +298,8 @@ def init_oakd() -> bool:
             )
 
         _pipeline.start()
-        _oakd_ok = True
+        _oakd_ok      = True
+        _warmup_frames = 0   # reset warmup — discard first frames after (re)connect
         log.info("✅ OAK-D Lite: stereo depth started (DepthAI 3.x)")
 
         _reader_thread = threading.Thread(
@@ -421,7 +424,7 @@ def _reader_loop():
     On fatal disconnect: logs once, clears _oakd_ok, exits cleanly.
     Reconnect watchdog handles restart.
     """
-    global _depth_frame, _oakd_ok
+    global _depth_frame, _oakd_ok, _warmup_frames
 
     yolo_check_interval = 1.0 / YOLO_CHECK_HZ
     last_yolo_check     = 0.0
@@ -440,9 +443,10 @@ def _reader_loop():
             frame = in_depth.getFrame()
             with _lock:
                 _depth_frame = frame
+            _warmup_frames += 1
 
             if _safety_active:
-                _safety_check()
+                _safety_check(_warmup_frames)
 
             # ── Layer 2: YOLO detections ──────────────────────────────────────
             now = time.monotonic()
@@ -469,7 +473,7 @@ def _reader_loop():
 
 # ─── Layer 1: Safety check ────────────────────────────────────────────────────
 
-def _safety_check():
+def _safety_check(warmup_frames: int = 999):
     """
     Layer 1 safety reactions — called every depth frame.
 
@@ -535,8 +539,13 @@ def _safety_check():
         # Re-enabled — LiDAR void is disabled (horizontal scanner can't see drops).
         # Only HIGH confidence fires — medium was causing flat-floor false positives
         # at 15cm mount height. Rate-limited by FLOOR_CHECK_HZ.
+        # Warmup guard: skip for first WARMUP_FRAMES frames after (re)connect —
+        # the pipeline produces garbage depth on startup that reads as 0% returns.
         now_fc = time.monotonic()
-        if now_fc - _last_floor_check >= 1.0 / FLOOR_CHECK_HZ:
+        if warmup_frames < WARMUP_FRAMES:
+            log.debug(f"OAK-D: void check suppressed during warmup "
+                      f"(frame {warmup_frames}/{WARMUP_FRAMES})")
+        elif now_fc - _last_floor_check >= 1.0 / FLOOR_CHECK_HZ:
             _last_floor_check = now_fc
             drop = get_floor_drop()
             if drop["void_detected"] and drop["confidence"] == "high":
