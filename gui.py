@@ -370,16 +370,57 @@ def action_engage(briefing: str):
 
 
 def action_stop():
-    """Single STOP button — kills mission AND cuts motors."""
-    stop_mission()
-    motors.stop()
-    return "ALL STOP — SYSTEMS HALTED"
+    """
+    Layer 0 emergency halt — bypasses all software layers.
+    Opens the ESP32 serial port directly (same method as test_layer0.py)
+    and sends a raw zero-velocity command byte-by-byte.
+    Also kills the mission and the motors object as belt-and-suspenders.
+    """
+    # ── Belt and suspenders: kill mission + motors object ──────────────
+    try:
+        stop_mission()
+    except Exception:
+        pass
+    try:
+        motors.stop()
+    except Exception:
+        pass
 
+    # ── Layer 0: raw serial direct to ESP32 ────────────────────────────
+    # Mirrors test_layer0.py exactly: byte-by-byte, 1ms inter-byte delay,
+    # no flow control — the only method proven reliable on JetPack 6.2.
+    layer0_result = "⚠ Layer 0 serial not reached"
+    try:
+        import serial as _serial
+        import glob as _glob
+        import json as _json
 
-def action_disengage():
-    """Abort mission only — motors keep running."""
-    stop_mission()
-    return "MISSION ABORTED — MOTORS STILL ACTIVE"
+        BAUD = 115200
+        # Port priority: ttyTHS2 (Jetson HW UART) → ttyUSB* → ttyACM*
+        ths2  = ["/dev/ttyTHS2"] if _glob.glob("/dev/ttyTHS2") else []
+        ports = ths2 + sorted(_glob.glob("/dev/ttyUSB*")) + sorted(_glob.glob("/dev/ttyACM*"))
+        port  = ports[0] if ports else None
+
+        if port:
+            ser = _serial.Serial(port, BAUD, timeout=1, rtscts=False, xonxoff=False)
+            ser.reset_input_buffer()
+            ser.reset_output_buffer()
+            cmd = _json.dumps({"T": 1, "L": 0.0, "R": 0.0}) + "\n"
+            for byte in cmd.encode("utf-8"):
+                ser.write(bytes([byte]))
+                import time as _time; _time.sleep(0.001)
+            ser.close()
+            layer0_result = f"✅ Layer 0 stop sent → {port}"
+            log.warning(f"🛑 LAYER 0 E-HALT fired via {port}")
+        else:
+            layer0_result = "❌ Layer 0: no serial port found"
+            log.error("🛑 LAYER 0 E-HALT: no port found")
+
+    except Exception as e:
+        layer0_result = f"❌ Layer 0 error: {e}"
+        log.error(f"🛑 LAYER 0 E-HALT error: {e}")
+
+    return f"🛑 E-HALT — ALL STOP\n{layer0_result}"
 
 
 def action_introduce():
@@ -485,58 +526,55 @@ body::after {
     z-index: 9999;
 }
 
-/* ── Header — compact single line ───────────────────────────────────── */
+/* ── Header ─────────────────────────────────────────────────────────── */
 .eric-header {
     display: flex;
-    align-items: center;
-    gap: 12px;
-    padding: 4px 0 3px 0;
+    align-items: baseline;
+    gap: 18px;
+    padding: 10px 0 4px 0;
     border-bottom: 1px solid #2d5a2d;
-    margin-bottom: 6px;
+    margin-bottom: 10px;
 }
 .eric-title {
-    font-size: 1.15em;
+    font-size: 1.6em;
     font-weight: bold;
     letter-spacing: 0.2em;
     color: #88d400;
     font-family: 'Share Tech Mono', 'Courier New', monospace;
-    text-shadow: 0 0 8px #88d40055;
-    white-space: nowrap;
+    text-shadow: 0 0 10px #88d40055;
 }
 .eric-sub {
-    font-size: 0.68em;
-    color: #5a8a5a;
-    letter-spacing: 0.04em;
+    font-size: 0.82em;
+    color: #7aaa7a;
+    letter-spacing: 0.05em;
     font-family: 'Share Tech Mono', 'Courier New', monospace;
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
 }
 
-/* ── STOP button — smaller round red emergency halt ──────────────────── */
+/* ── STOP button — round red, sits beside joystick ──────────────────── */
 #stop-btn {
-    width: 52px !important;
-    height: 52px !important;
-    min-width: 52px !important;
+    width: 72px !important;
+    height: 72px !important;
+    min-width: 72px !important;
     border-radius: 50% !important;
     background: radial-gradient(circle at 38% 35%, #ff3333, #880000) !important;
-    border: 2px solid #cc0000 !important;
+    border: 3px solid #cc0000 !important;
     color: #fff !important;
-    font-size: 0.62em !important;
+    font-size: 0.78em !important;
     font-weight: bold !important;
-    letter-spacing: 0.1em !important;
+    letter-spacing: 0.15em !important;
     font-family: 'Share Tech Mono', 'Courier New', monospace !important;
-    box-shadow: 0 0 14px #cc000066, inset 0 2px 4px #ff666644 !important;
+    box-shadow: 0 0 18px #cc000066, inset 0 2px 4px #ff666644 !important;
     transition: box-shadow 0.15s, transform 0.1s !important;
     line-height: 1.2 !important;
     padding: 0 !important;
 }
 #stop-btn:hover {
-    box-shadow: 0 0 26px #ff0000aa, inset 0 2px 4px #ff666644 !important;
-    transform: scale(1.06) !important;
+    box-shadow: 0 0 32px #ff0000aa, inset 0 2px 4px #ff666644 !important;
+    transform: scale(1.04) !important;
 }
 #stop-btn:active {
-    transform: scale(0.95) !important;
+    transform: scale(0.97) !important;
+    box-shadow: 0 0 12px #cc000088 !important;
 }
 
 /* ── ENGAGE button ───────────────────────────────────────────────────── */
@@ -546,22 +584,12 @@ body::after {
     color: #000 !important;
     letter-spacing: 0.12em !important;
     font-family: 'Share Tech Mono', 'Courier New', monospace !important;
-    font-size: 0.88em !important;
+    font-size: 0.95em !important;
     font-weight: bold !important;
 }
-#engage-btn:hover { box-shadow: 0 0 14px #76b90066 !important; }
-
-/* ── DISENGAGE button — red rectangle, aborts mission only ──────────── */
-#disengage-btn {
-    background: linear-gradient(135deg, #660000, #cc2200) !important;
-    border: 1px solid #cc2200 !important;
-    color: #fff !important;
-    letter-spacing: 0.1em !important;
-    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
-    font-size: 0.88em !important;
-    font-weight: bold !important;
+#engage-btn:hover {
+    box-shadow: 0 0 14px #76b90066 !important;
 }
-#disengage-btn:hover { box-shadow: 0 0 14px #cc220066 !important; }
 
 /* ── Textboxes ───────────────────────────────────────────────────────── */
 textarea, input[type=text] {
@@ -608,12 +636,12 @@ label span, .gr-label {
     border: 1px solid #2d5a2d !important;
     color: #88d400 !important;
     font-family: 'Share Tech Mono', 'Courier New', monospace !important;
-    font-size: 1.0em !important;
+    font-size: 1.1em !important;
     font-weight: bold !important;
     border-radius: 4px !important;
-    width: 36px !important;
-    height: 36px !important;
-    min-width: 36px !important;
+    width: 44px !important;
+    height: 44px !important;
+    min-width: 44px !important;
     padding: 0 !important;
 }
 .ctrl-btn button:hover {
@@ -629,10 +657,10 @@ label span, .gr-label {
     border-color: #ff6600 !important;
 }
 .ctrl-wide button {
-    width: 80px !important;
-    height: 36px !important;
-    min-width: 80px !important;
-    font-size: 0.75em !important;
+    width: 96px !important;
+    height: 44px !important;
+    min-width: 96px !important;
+    font-size: 0.82em !important;
 }
 
 /* ── Accordion ───────────────────────────────────────────────────────── */
@@ -663,9 +691,9 @@ label span, .gr-label {
     text-transform: uppercase;
     font-family: 'Share Tech Mono', 'Courier New', monospace;
     border-bottom: 1px solid #2d5a2d;
-    padding-bottom: 2px;
-    margin-bottom: 4px;
-    margin-top: 4px;
+    padding-bottom: 4px;
+    margin-bottom: 6px;
+    margin-top: 8px;
 }
 """
 
@@ -702,13 +730,13 @@ def build_ui():
 
                 gr.HTML('<div class="cam-label">📡 PAN-TILT</div>')
                 pantilt_img = gr.Image(
-                    streaming=True, height=150, label="",
+                    streaming=True, height=180, label="",
                     show_label=False
                 )
 
                 gr.HTML('<div class="cam-label" style="margin-top:4px">🔬 WEBCAM</div>')
                 webcam_img = gr.Image(
-                    streaming=True, height=120, label="",
+                    streaming=True, height=140, label="",
                     show_label=False
                 )
 
@@ -741,23 +769,16 @@ def build_ui():
                     value=default_text,
                     label="",
                     show_label=False,
-                    lines=6,
-                    max_lines=10,
+                    lines=8,
+                    max_lines=14,
                     placeholder="Mission briefing…"
                 )
 
-                with gr.Row():
-                    engage_btn = gr.Button(
-                        "▶  ENGAGE",
-                        elem_id="engage-btn",
-                        variant="primary",
-                        scale=3
-                    )
-                    disengage_btn = gr.Button(
-                        "✕  DISENGAGE",
-                        elem_id="disengage-btn",
-                        scale=2
-                    )
+                engage_btn = gr.Button(
+                    "▶  ENGAGE MISSION",
+                    elem_id="engage-btn",
+                    variant="primary"
+                )
 
                 gr.HTML('<div class="panel-head">ERIC — TRANSMISSION</div>')
                 eric_says_box = gr.Textbox(
@@ -765,8 +786,8 @@ def build_ui():
                     label="",
                     show_label=False,
                     interactive=False,
-                    lines=3,
-                    max_lines=4,
+                    lines=4,
+                    max_lines=6,
                     elem_id="eric-says",
                     placeholder="Awaiting transmission…"
                 )
@@ -795,8 +816,8 @@ def build_ui():
                     label="",
                     show_label=False,
                     interactive=False,
-                    lines=5,
-                    max_lines=8,
+                    lines=7,
+                    max_lines=12,
                     elem_id="sys-log",
                     placeholder="System events, nav checks, scan results…"
                 )
@@ -878,7 +899,6 @@ def build_ui():
         )
 
         stop_btn.click(action_stop, outputs=eric_says_box)
-        disengage_btn.click(action_disengage, outputs=eric_says_box)
         engage_btn.click(action_engage, inputs=briefing_box, outputs=eric_says_box)
 
         char_btn.click(
