@@ -2667,6 +2667,182 @@ def _face_direction(direction: str):
 # ─── Obstacle Avoidance ───────────────────────────────────────────────────────
 # ─── Mission Complete ─────────────────────────────────────────────────────────
 
+def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[str]:
+    """
+    Capture sharp, centred final photos of the confirmed target from both cameras.
+
+    Pipeline:
+      1. Stop motors + centre pan-tilt → settle 0.6 s (chassis + servo damp).
+      2. Adaptive LED — light up if frame is dark.
+      3. Pan-tilt camera (primary): up to PHOTO_MAX_BLUR_RETRIES attempts.
+         Each attempt: capture → Laplacian blur check → Cosmos centre check.
+         Cosmos is asked whether the target is in the centre third of the frame.
+         If off-centre, nudge pan by PHOTO_PAN_NUDGE_DEG degrees and retry.
+         Fall back to the sharpest frame seen if loop never converges.
+      4. Webcam (secondary): same blur-retry loop, no centre check (fixed mount).
+         Pan stays at the accepted angle from step 3 so both cameras see the same area.
+      5. Save both files:
+           <alarm>_<n>_<obj>_<ts>_pantilt.jpg
+           <alarm>_<n>_<obj>_<ts>_webcam.jpg
+      6. Returns list of saved filenames for logging.
+
+    Never raises — all errors are caught and logged.
+    """
+    import base64 as _b64
+
+    PHOTO_MAX_BLUR_RETRIES = 4     # attempts per camera before giving up on sharpness
+    PHOTO_SETTLE_SEC       = 0.6   # chassis + servo damping before first capture
+    PHOTO_RETRY_SETTLE_SEC = 0.5   # wait between retries
+    PHOTO_PAN_NUDGE_DEG    = 12    # degrees to nudge pan if target is off-centre
+
+    out_dir  = pathlib.Path("missions/photos")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe_obj = obj_name.replace(" ", "_")[:20]
+    saved    = []
+
+    # ── 1. Stop + centre pan-tilt ─────────────────────────────────────────────
+    motors.stop()
+    motors.pantilt(0, 15)          # 15° tilt → ground-level target sits in mid-frame
+    time.sleep(PHOTO_SETTLE_SEC)
+
+    # ── 2. Adaptive LED ───────────────────────────────────────────────────────
+    test_frame = capture_frame(CAMERA_PANTILT, 320, 240)
+    led_on = test_frame and _is_pitch_black(test_frame)
+    if led_on:
+        motors.lights(base=180, head=255)
+        time.sleep(0.3)
+
+    # ── 3. Pan-tilt camera — sharp + centred ─────────────────────────────────
+    _ui("log", "📸 Capturing final photo (pan-tilt)...")
+    pt_frame  = None
+    pt_best   = None    # sharpest frame seen regardless of centering (fallback)
+    pan_angle = 0       # current pan offset from centre, adjusted by nudges
+
+    for attempt in range(PHOTO_MAX_BLUR_RETRIES):
+        motors.pantilt(pan_angle, 15)
+        time.sleep(PHOTO_RETRY_SETTLE_SEC if attempt > 0 else 0.0)
+
+        f = capture_frame(CAMERA_PANTILT, 640, 480)
+        if not f:
+            break
+
+        # Blur check — reject if Laplacian variance is below threshold
+        if _is_blurry(f):
+            _ui("log", f"📸 Pan-tilt attempt {attempt + 1}: blurry — retrying")
+            if pt_best is None:
+                pt_best = f        # keep first frame as absolute last resort
+            time.sleep(PHOTO_RETRY_SETTLE_SEC)
+            continue
+
+        pt_best = f    # not blurry — update best
+
+        # Cosmos centre check: is the target in the middle third of the frame?
+        centre_prompt = (
+            f"This is a photo of the confirmed target: {obj_name}. "
+            "Is the main target approximately centred — within the middle horizontal "
+            "third of the frame (not clipped at the far left or far right edge)? "
+            'Reply ONLY with this JSON: {"centred": true_or_false, "offset": "left|right|centre"}'
+        )
+        try:
+            cr = requests.post(VLLM_URL, json={
+                "model": COSMOS_MODEL,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
+                    {"type": "text", "text": centre_prompt},
+                ]}],
+                "max_tokens": 40,
+                "temperature": 0.1,
+            }, timeout=20)
+            cr.raise_for_status()
+            craw    = cr.json()["choices"][0]["message"]["content"].strip()
+            cresult = _parse_json(craw, {"centred": True, "offset": "centre"}, "PHOTO_CENTRE")
+            log_ai("photo_centre_check", craw, label="PHOTO_CENTRE")
+
+            if cresult.get("centred", True):
+                pt_frame = f
+                _ui("log", f"📸 Pan-tilt: sharp + centred (attempt {attempt + 1})")
+                break
+            else:
+                offset = str(cresult.get("offset", "centre")).lower()
+                _ui("log", f"📸 Pan-tilt attempt {attempt + 1}: target {offset} — nudging pan")
+                if offset == "left":
+                    pan_angle = max(-60, pan_angle - PHOTO_PAN_NUDGE_DEG)
+                elif offset == "right":
+                    pan_angle = min(60,  pan_angle + PHOTO_PAN_NUDGE_DEG)
+
+        except Exception as e:
+            log_exception("photo_centre_cosmos", e)
+            pt_frame = f    # Cosmos failed — accept the sharp frame as-is
+            break
+
+    # Centre loop never converged — use sharpest frame seen
+    if pt_frame is None:
+        pt_frame = pt_best
+        if pt_frame:
+            _ui("log", "📸 Pan-tilt: using sharpest frame (centre check did not converge)")
+
+    if pt_frame:
+        try:
+            fname = out_dir / (
+                f"{alarm_type}_{_ms.mission_find_count:02d}_"
+                f"{safe_obj}_{ts_str}_pantilt.jpg"
+            )
+            fname.write_bytes(_b64.b64decode(pt_frame))
+            _ui("log", f"📸 Saved pan-tilt: {fname.name}")
+            log_mission_event("photo_saved_pantilt", fname.name)
+            saved.append(fname.name)
+        except Exception as e:
+            log_exception("photo_save_pantilt", e)
+
+    # ── 4. Webcam — sharp frame ───────────────────────────────────────────────
+    # Stay at the accepted pan angle so the webcam sees the same scene.
+    _ui("log", "📸 Capturing final photo (webcam)...")
+    motors.pantilt(pan_angle, 15)
+    time.sleep(0.3)
+
+    wc_frame = None
+    wc_best  = None
+
+    for attempt in range(PHOTO_MAX_BLUR_RETRIES):
+        f = capture_frame(CAMERA_WEBCAM, 640, 480)
+        if not f:
+            break
+        if _is_blurry(f):
+            _ui("log", f"📸 Webcam attempt {attempt + 1}: blurry — retrying")
+            if wc_best is None:
+                wc_best = f
+            time.sleep(PHOTO_RETRY_SETTLE_SEC)
+            continue
+        wc_frame = f
+        _ui("log", f"📸 Webcam: sharp frame (attempt {attempt + 1})")
+        break
+
+    if wc_frame is None:
+        wc_frame = wc_best
+        if wc_frame:
+            _ui("log", "📸 Webcam: using least-blurry frame available")
+
+    if wc_frame:
+        try:
+            fname = out_dir / (
+                f"{alarm_type}_{_ms.mission_find_count:02d}_"
+                f"{safe_obj}_{ts_str}_webcam.jpg"
+            )
+            fname.write_bytes(_b64.b64decode(wc_frame))
+            _ui("log", f"📸 Saved webcam:   {fname.name}")
+            log_mission_event("photo_saved_webcam", fname.name)
+            saved.append(fname.name)
+        except Exception as e:
+            log_exception("photo_save_webcam", e)
+
+    # ── 5. LEDs off + re-centre pan ───────────────────────────────────────────
+    if led_on:
+        motors.lights(0, 0)
+    motors.pantilt(0, 15)    # re-centre pan in case nudging moved it
+
+    return saved
+
+
 def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
                            severity: str = "WARNING", frame_b64: str = None):
     """
@@ -2722,19 +2898,17 @@ def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
     log_mission_event("target_alarm", f"[{severity}] {obj_name} @ {location_hint}")
     _ui("log", f"🚨 [{alarm_type.upper()}] #{_ms.mission_find_count}: {obj_name} — {severity}")
 
-    # ── Save photo if configured ──────────────────────────────────────────────
-    if _ms.mission_flags.get("photo_on_find") and frame_b64:
-        import base64 as _b64
-        safe_obj = obj_name.replace(" ", "_")[:20]
-        fname = (pathlib.Path("missions/photos") /
-                 f"{alarm_type}_{_ms.mission_find_count:02d}_{safe_obj}_{ts.replace(':','')}.jpg")
-        fname.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            fname.write_bytes(_b64.b64decode(frame_b64))
-            _ui("log", f"📸 Saved: {fname.name}")
-            log_mission_event("photo_saved", fname.name)
-        except Exception as e:
-            log_exception("alarm_photo_save", e)
+    # ── Save photos if configured ─────────────────────────────────────────────
+    # Captures fresh frames from BOTH cameras with blur-check + Cosmos centre-check
+    # rather than saving the scan frame that triggered the alarm.
+    if _ms.mission_flags.get("photo_on_find"):
+        saved_photos = _capture_final_photo(
+            obj_name  = obj_name,
+            ts_str    = ts.replace(":", ""),
+            alarm_type = alarm_type,
+        )
+        if not saved_photos:
+            _ui("log", "⚠️  photo_on_find: no photos saved (capture failed)")
 
     # ── OLED display ──────────────────────────────────────────────────────────
     oled_label = "FOUND!" if alarm_type == AlarmType.NONE else f"{alarm_type.upper()}!"
@@ -3442,12 +3616,10 @@ def _process_scan(scan, from_360=False):
             _alarm_severity = scan.get("severity", "WARNING")
 
         if _should_alarm:
-            alarm_frame = capture_frame(CAMERA_PANTILT, 640, 480)
             _trigger_mission_alarm(
                 obj_name or obj,
                 location_hint = reason,
                 severity      = _alarm_severity,
-                frame_b64     = alarm_frame,
             )
 
         if direction in ("down", "below"):
