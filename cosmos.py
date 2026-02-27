@@ -250,6 +250,15 @@ class _CameraReader:
         with self._lock:
             return self._latest
 
+    def get_frame_latest(self) -> "_cv2.Mat | None":
+        """
+        Return the most recent frame instantly without blocking.
+        Does NOT clear the event — safe to call from GUI timers without
+        interfering with Cosmos inference or frame buffer threads.
+        """
+        with self._lock:
+            return self._latest
+
     def stop(self):
         self._stop.set()
 
@@ -410,9 +419,13 @@ def capture_frames_video(device: int = CAMERA_WEBCAM,
 
 
 def capture_frame_raw(device: int = CAMERA_WEBCAM):
-    """Capture raw RGB frame for Gradio display — from persistent background reader."""
+    """
+    Capture raw RGB frame for Gradio display — from persistent background reader.
+    Uses get_frame_latest() (non-blocking, no event clear) so GUI timer calls
+    never contend with Cosmos inference or the frame buffer collector thread.
+    """
     try:
-        frame = _get_reader(device).get_frame()
+        frame = _get_reader(device).get_frame_latest()
         if frame is None:
             return None
         if device == CAMERA_WEBCAM:
