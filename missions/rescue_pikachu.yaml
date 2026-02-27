@@ -47,6 +47,12 @@ announce_location: true
 stay_with_target:  true
 generate_report:   false
 
+# ── Circumnavigation — peek around the box to find hidden Pikachu ─────────────
+circumnavigate_on_empty: true   # enable box peek-around behaviour
+circum_step_sec:         1.8    # seconds to side-step (tune for your room width)
+circum_dist_m:           0.4    # Nav2 lateral distance hint (metres)
+circum_forward_sec:      0.0    # forward nudge before stepping (0 = disabled)
+
 scan_strategy:      target_hunt
 loop_mission:       false
 approach_on_detect: true
