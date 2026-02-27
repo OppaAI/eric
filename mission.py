@@ -1337,7 +1337,7 @@ OUTPUT: A single JSON object. Use ONLY these exact field names — no others:
   "mission_complete": false
 }
 
-"object" must be ONE word: person | robot | slipper | shoe | obstacle | wall | clear | unknown
+"object" must be ONE word: person | robot | slipper | shoe | obstacle | wall | clear | unknown | pokemon | figure | animal
 "speak" = speech output. NOT "speaker". NOT "speech". NOT "tts".
 "physical_reasoning" = reasoning. NOT "reasoning". NOT "explanation".
 "target_visible" = detection flag. NOT "target_visibility". NOT "target_found".
@@ -2182,6 +2182,16 @@ def _scan_360_pantilt() -> dict:
     TILT_GROUND  = 15   # fixed ground-level tilt throughout sweep — no tilt changes
     PAN_SETTLE   = 0.40 # seconds after pantilt() before capture — raised from 0.25 for servo + frame settle
 
+    # Webcam is zip-tied to the pan-tilt head, offset slightly to the LEFT.
+    # When pan-tilt is at angle X, webcam center is at X + WEBCAM_PAN_OFFSET.
+    # Compensate by panning WEBCAM_PAN_OFFSET degrees RIGHT during confirmation
+    # so the webcam centers on the candidate rather than seeing it at the edge.
+    # ── MEASURE THIS PHYSICALLY ──────────────────────────────────────────────
+    # Place an object at 1m directly ahead (0°). Pan until webcam centers it.
+    # That angle is your offset. Positive = webcam is left of pan-tilt center.
+    # Example: if webcam centers at pan=+8°, set WEBCAM_PAN_OFFSET = 8
+    WEBCAM_PAN_OFFSET = 8   # degrees — adjust after physical measurement
+
     def _pan_to_chassis_turn_sec(pan: int) -> float:
         return abs(pan) / 90.0 * TURN_90_SEC
 
@@ -2195,8 +2205,11 @@ def _scan_360_pantilt() -> dict:
         _ui("log", f"🔍 Candidate at pan {pan:+d}° — aiming & webcam confirmation...")
         log_mission_event("candidate_found", f"pan={pan}")
 
-        # Pan-tilt to detected angle for webcam alignment
-        motors.pantilt(pan, TILT_GROUND, speed=80)
+        # Pan-tilt to detected angle, compensated for webcam physical offset.
+        # Webcam is zip-tied to pan-tilt head but offset left — pan right by
+        # WEBCAM_PAN_OFFSET degrees so webcam centers on the candidate.
+        webcam_pan = max(-90, min(90, pan + WEBCAM_PAN_OFFSET))
+        motors.pantilt(webcam_pan, TILT_GROUND, speed=80)
         time.sleep(PAN_SETTLE + 0.1)
 
         wc_frame = capture_frame(CAMERA_WEBCAM, 640, 480)
@@ -2212,10 +2225,16 @@ def _scan_360_pantilt() -> dict:
 
         confirm_prompt = (
             mission_ov +
-            "CONFIRMATION: Wide-angle scan flagged a possible target at this bearing. "
-            "The second image is a webcam zoom shot aimed at that exact angle. "
-            "Confirm or deny: is the mission target actually present? "
-            "Set target_visible=true ONLY if 60%+ confident. Be conservative.\n\n"
+            "CONFIRMATION: Wide-angle pan-tilt camera flagged a possible target at this bearing. "
+            "The first image is the wide-angle frame that flagged the candidate. "
+            "The second image is from a narrow focal length webcam mounted slightly LEFT "
+            "of the pan-tilt on the same servo head — it sees a narrower, more detailed "
+            "view of the same scene. The target may appear toward the right side of the "
+            "webcam frame due to the physical offset. "
+            "Use BOTH images together to confirm or deny — the target may be clearer "
+            "in one than the other. "
+            "Set target_visible=true ONLY if 60%+ confident across both images. "
+            "Be conservative — a false positive wastes mission time.\n\n"
         ) + (sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT)
 
         try:
