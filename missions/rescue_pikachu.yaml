@@ -22,6 +22,7 @@ briefing: |
   Do a full 360° scan first — look carefully at floor level and near any objects.
   Scan slowly — Pikachu may only be visible from certain angles.
   Check behind and around any obstacles in the room.
+  When detect even a small yellow shape partially visible counts — flag it and confirm.
   Do not sound the alarm unless you are certain it is Pikachu.
 
   WHEN YOU FIND PIKACHU:
@@ -48,7 +49,7 @@ generate_report:   false
 
 scan_strategy:      target_hunt
 loop_mission:       false
-approach_on_detect: false
+approach_on_detect: true
 detect_distance:    1.5   # metres — confirm visually before triggering
 
 
