@@ -2679,8 +2679,10 @@ def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[st
          Cosmos is asked whether the target is in the centre third of the frame.
          If off-centre, nudge pan by PHOTO_PAN_NUDGE_DEG degrees and retry.
          Fall back to the sharpest frame seen if loop never converges.
-      4. Webcam (secondary): same blur-retry loop, no centre check (fixed mount).
-         Pan stays at the accepted angle from step 3 so both cameras see the same area.
+      4. Webcam (secondary): same blur-retry loop AND same Cosmos centre check.
+         Pan stays at the accepted angle from step 3 so both cameras see the same scene.
+         If the webcam sees the target off-centre, pan nudges independently for the
+         webcam pass — the webcam has a slightly different physical offset on the head.
       5. Save both files:
            <alarm>_<n>_<obj>_<ts>_pantilt.jpg
            <alarm>_<n>_<obj>_<ts>_webcam.jpg
@@ -2794,33 +2796,79 @@ def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[st
         except Exception as e:
             log_exception("photo_save_pantilt", e)
 
-    # ── 4. Webcam — sharp frame ───────────────────────────────────────────────
-    # Stay at the accepted pan angle so the webcam sees the same scene.
+    # ── 4. Webcam — sharp + centred ──────────────────────────────────────────
+    # Start at the accepted pan angle from the pan-tilt pass, then nudge
+    # independently — the webcam sits slightly offset on the same servo head
+    # so it may need a small additional correction of its own.
     _ui("log", "📸 Capturing final photo (webcam)...")
-    motors.pantilt(pan_angle, 15)
+    wc_pan_angle = pan_angle   # inherit accepted pan, may shift further below
+    motors.pantilt(wc_pan_angle, 15)
     time.sleep(0.3)
 
     wc_frame = None
     wc_best  = None
 
     for attempt in range(PHOTO_MAX_BLUR_RETRIES):
+        motors.pantilt(wc_pan_angle, 15)
+        time.sleep(PHOTO_RETRY_SETTLE_SEC if attempt > 0 else 0.0)
+
         f = capture_frame(CAMERA_WEBCAM, 640, 480)
         if not f:
             break
+
+        # Blur check
         if _is_blurry(f):
             _ui("log", f"📸 Webcam attempt {attempt + 1}: blurry — retrying")
             if wc_best is None:
                 wc_best = f
             time.sleep(PHOTO_RETRY_SETTLE_SEC)
             continue
-        wc_frame = f
-        _ui("log", f"📸 Webcam: sharp frame (attempt {attempt + 1})")
-        break
+
+        wc_best = f   # not blurry — update best
+
+        # Cosmos centre check (same prompt as pan-tilt pass)
+        centre_prompt = (
+            f"This is a photo of the confirmed target: {obj_name}. "
+            "Is the main target approximately centred — within the middle horizontal "
+            "third of the frame (not clipped at the far left or far right edge)? "
+            'Reply ONLY with this JSON: {"centred": true_or_false, "offset": "left|right|centre"}'
+        )
+        try:
+            cr = requests.post(VLLM_URL, json={
+                "model": COSMOS_MODEL,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
+                    {"type": "text", "text": centre_prompt},
+                ]}],
+                "max_tokens": 40,
+                "temperature": 0.1,
+            }, timeout=20)
+            cr.raise_for_status()
+            craw    = cr.json()["choices"][0]["message"]["content"].strip()
+            cresult = _parse_json(craw, {"centred": True, "offset": "centre"}, "PHOTO_CENTRE_WC")
+            log_ai("photo_centre_check_webcam", craw, label="PHOTO_CENTRE_WC")
+
+            if cresult.get("centred", True):
+                wc_frame = f
+                _ui("log", f"📸 Webcam: sharp + centred (attempt {attempt + 1})")
+                break
+            else:
+                offset = str(cresult.get("offset", "centre")).lower()
+                _ui("log", f"📸 Webcam attempt {attempt + 1}: target {offset} — nudging pan")
+                if offset == "left":
+                    wc_pan_angle = max(-60, wc_pan_angle - PHOTO_PAN_NUDGE_DEG)
+                elif offset == "right":
+                    wc_pan_angle = min(60,  wc_pan_angle + PHOTO_PAN_NUDGE_DEG)
+
+        except Exception as e:
+            log_exception("photo_centre_cosmos_webcam", e)
+            wc_frame = f   # Cosmos failed — accept the sharp frame as-is
+            break
 
     if wc_frame is None:
         wc_frame = wc_best
         if wc_frame:
-            _ui("log", "📸 Webcam: using least-blurry frame available")
+            _ui("log", "📸 Webcam: using sharpest frame (centre check did not converge)")
 
     if wc_frame:
         try:
@@ -2838,7 +2886,7 @@ def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[st
     # ── 5. LEDs off + re-centre pan ───────────────────────────────────────────
     if led_on:
         motors.lights(0, 0)
-    motors.pantilt(0, 15)    # re-centre pan in case nudging moved it
+    motors.pantilt(0, 15)    # re-centre pan — both cameras may have nudged it
 
     return saved
 
