@@ -1,0 +1,109 @@
+# ═══════════════════════════════════════════════════════════════
+# ERIC Mission: Operation Lost Card
+# ═══════════════════════════════════════════════════════════════
+
+name: "Operation Lost Card"
+description: "Find a missing SD card somewhere in the office — Eric searches alone"
+author: "OppaAI"
+
+
+briefing: |
+  A small black SD card containing critical project data has gone missing somewhere
+  in this office area. You must find it on your own — no one is available to help.
+
+  WHAT YOU ARE LOOKING FOR:
+  An SD card is a very small flat rectangular object, roughly 2cm x 2.4cm.
+  It is black or dark grey, with gold electrical contacts along one short edge.
+  It may be sitting on a desk, shelf, table surface, or on the floor.
+  It could be partially hidden under papers, next to a keyboard, near a monitor,
+  or beside office equipment. Look carefully at all flat surfaces.
+
+  HOW TO SEARCH:
+  Systematically sweep the full area — do not skip any desk or surface.
+  Approach each desk or table slowly and scan at close range.
+  A small dark object on a dark surface may be hard to spot — look for the
+  gold contacts which will catch the light.
+  Check floor level too — it may have been knocked off a desk.
+
+  WHEN YOU FIND IT:
+  1. Stop and confirm — small, flat, rectangular, black, gold contacts
+  2. Announce the exact location clearly
+  3. Photograph it
+  4. Stay nearby until someone can retrieve it
+
+  Do not attempt to pick it up — you have no arms.
+  This data is irreplaceable. Find it.
+
+
+alarm_type: none
+
+target_objects:
+  - SD card
+  - memory card
+  - small black card
+  - small rectangular object
+  - flash card
+
+photo_on_find:     true
+announce_location: true
+stay_with_target:  false
+generate_report:   false
+
+scan_strategy:      target_hunt
+loop_mission:       false
+approach_on_detect: false
+detect_distance:    1.5
+
+
+terrain:
+  - "Smooth office floor — tile or wood (normal speed)"
+  - "Carpet (slow down)"
+  - "Under desk area (slow down, navigate carefully)"
+  - "Cluttered desk surface (slow down, scan carefully)"
+
+
+mission_stages:
+  - stage: 1
+    goal: "Full 360 scan at entry — identify all desks and surfaces to check"
+  - stage: 2
+    goal: "Sweep each desk surface systematically — look for small flat dark object"
+  - stage: 3
+    goal: "Check floor level near desks — it may have been knocked off"
+  - stage: 4
+    goal: "Confirm identity — small, flat, rectangular, black with gold contacts"
+  - stage: 5
+    goal: "Announce exact location and photograph"
+
+
+notes: |
+  ═══════════════════════════════════════════════════════════════
+  PHYSICAL SETUP
+  ═══════════════════════════════════════════════════════════════
+
+  PROPS:
+  - Place a real SD card (or a printed photo of one) on a desk surface
+  - Good locations: next to a keyboard, near a monitor base, on a shelf edge
+  - Optional decoy: place a small dark SIM card or black USB cap nearby —
+    Eric must reason about shape and size to distinguish them
+
+  STARTING POSITION:
+  - Eric at room entrance facing in
+  - SD card placed on a surface not immediately obvious from the entrance
+  - Best: partially tucked under a piece of paper or near other desk clutter
+
+  ═══════════════════════════════════════════════════════════════
+  WHAT COSMOS HAS TO SOLVE
+  ═══════════════════════════════════════════════════════════════
+
+  1. Scale — the SD card is tiny relative to the environment
+  2. Surface clutter — distinguishing it from other small dark objects
+  3. Systematic search — covering all surfaces without a human to ask
+  4. Close approach — needs to get within 0.5-1m to reliably identify it
+
+  ═══════════════════════════════════════════════════════════════
+  NO CHARACTERS — SOLO MISSION
+  ═══════════════════════════════════════════════════════════════
+
+  Eric searches entirely on its own. There are no characters to interact with.
+  This showcases pure autonomous visual search behaviour — no social scaffolding.
+  The physical_reasoning log is your best demo output.
