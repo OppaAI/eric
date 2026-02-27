@@ -3412,7 +3412,9 @@ def _process_scan(scan, from_360=False):
         _should_alarm = False
         _alarm_severity = "WARNING"
         if _ms.mission_alarm_type in (AlarmType.SIREN, AlarmType.SUSPICIOUS):
-            _should_alarm = True
+            t_lower = str(obj_name or obj).lower()
+            _should_alarm = any(kw.lower() in t_lower
+                                for kw in (_ms.mission_target_objects or [obj]))
             _alarm_severity = "CRITICAL"
         elif _ms.mission_alarm_type in (AlarmType.HAZARD, AlarmType.NATURE):
             t_lower = str(obj_name or obj).lower()
