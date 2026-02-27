@@ -175,7 +175,10 @@ class _CameraReader:
 
             if ok:
                 cap.set(_cv2.CAP_PROP_BUFFERSIZE, 1)  # low-latency once warm
-                log.info(f"📷 Camera {self.device}: V4L2 reader started ({fourcc_str})")
+                actual_fps = cap.get(_cv2.CAP_PROP_FPS)
+                log.info(f"📷 Camera {self.device}: V4L2 reader started ({fourcc_str}) "
+                         f"— requested {max(1, round(1.0 / self._frame_sleep))}fps, "
+                         f"kernel negotiated {actual_fps:.1f}fps")
                 return cap
 
             log.warning(f"Camera {self.device}: {fourcc_str} gave no frames — trying next format")
@@ -263,8 +266,76 @@ class _CameraReader:
         self._stop.set()
 
 
+# ─── Lazy Webcam Reader ───────────────────────────────────────────────────────
+# The webcam is confirmation-only — called a few times per minute during mission.
+# Keeping it open continuously burns isochronous USB slots on Bus 1 even at 1 fps,
+# competing with pan-tilt, LiDAR, and OAK-D.
+#
+# Fix: open the device only when a frame is actually needed, capture it, close
+# immediately. No background thread, no persistent V4L2 reservation.
+# GUI feed will show blank/stale — acceptable since pan-tilt is the primary view.
+
+class _LazyWebcamReader:
+    """
+    On-demand webcam capture — opens V4L2 device, grabs one frame, closes.
+    Releases isochronous USB bandwidth between captures.
+    Thread-safe via lock — concurrent callers queue up rather than double-open.
+    """
+
+    WARM_UP_FRAMES = 3   # frames to discard before keeping one (V4L2 buffer drain)
+
+    def __init__(self, device: int, width: int = 640, height: int = 480):
+        self.device = device
+        self.width  = width
+        self.height = height
+        self._lock  = _threading.Lock()
+        self._latest: "_cv2.Mat | None" = None  # last successfully captured frame
+
+    def get_frame(self) -> "_cv2.Mat | None":
+        """Open device, drain buffer, grab one frame, close. Returns frame or None."""
+        with self._lock:
+            cap = None
+            try:
+                cap = _cv2.VideoCapture(self.device, _cv2.CAP_V4L2)
+                if not cap.isOpened():
+                    log.warning(f"📷 Webcam {self.device}: lazy open failed")
+                    return self._latest  # return stale frame rather than None
+
+                cap.set(_cv2.CAP_PROP_FOURCC,      _cv2.VideoWriter_fourcc(*"MJPG"))
+                cap.set(_cv2.CAP_PROP_FRAME_WIDTH,  self.width)
+                cap.set(_cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+                cap.set(_cv2.CAP_PROP_FPS,          5)   # low but valid — kernel must honour
+                cap.set(_cv2.CAP_PROP_BUFFERSIZE,   1)
+
+                # Drain warm-up frames so we get a current frame, not a buffered stale one
+                frame = None
+                for i in range(self.WARM_UP_FRAMES + 1):
+                    ret, f = cap.read()
+                    if ret:
+                        frame = f
+
+                if frame is not None:
+                    self._latest = frame
+                    log.debug(f"📷 Webcam {self.device}: lazy capture ok")
+                else:
+                    log.warning(f"📷 Webcam {self.device}: lazy capture got no frames")
+
+                return self._latest
+
+            except Exception as e:
+                log.error(f"📷 Webcam {self.device}: lazy capture error: {e}")
+                return self._latest
+            finally:
+                if cap:
+                    cap.release()   # always release — frees isochronous reservation
+
+    def get_frame_latest(self) -> "_cv2.Mat | None":
+        """Return last captured frame instantly — no device open. For GUI display."""
+        return self._latest
+
+
 # One reader per camera device, created on first use
-_readers: dict[int, _CameraReader] = {}
+_readers: dict[int, "_CameraReader | _LazyWebcamReader"] = {}
 
 
 # ─── Rolling Frame Buffer ─────────────────────────────────────────────────────
@@ -332,28 +403,32 @@ def get_buffered_frames(device: int, n: int = 6) -> list[str]:
     return [frame] if frame else []
 
 # ── Per-camera background read rates ─────────────────────────────────────────
-# pan-tilt: 5 fps — active search camera, needs fresh frames for Cosmos clips.
-#           V4L2 buffer holds ~0.2s of data at this rate — well within safe margin.
-# webcam:   1 fps — confirmation-only camera, only called a few times per minute.
-#           1 fps is enough to keep the V4L2 kernel buffer drained without
-#           wasting any CPU on frames that will never be used.
+# pan-tilt: 10 fps — active search camera, needs fresh frames for Cosmos captures.
+#           Raised from 5fps — fresh frame every 100ms reduces motion blur on capture.
+# webcam:   lazy open/close — confirmation-only, called a few times per minute.
+#           No persistent V4L2 device open = no isochronous USB reservation on Bus 1.
 _CAMERA_FPS = {
     CAMERA_PANTILT: 10.0,  # raised from 5.0 — fresh frame every 100ms, reduces blur on capture
-    CAMERA_WEBCAM:   1.0,
+    CAMERA_WEBCAM:   1.0,  # unused — webcam now uses _LazyWebcamReader (open-on-demand)
 }
 
 
-def _get_reader(device: int) -> _CameraReader:
+def _get_reader(device: int) -> "_CameraReader | _LazyWebcamReader":
     if device not in _readers:
-        fps    = _CAMERA_FPS.get(device, 5.0)
-        reader = _CameraReader(device, fps=fps)
-        _readers[device] = reader
-        # Wait until the background thread delivers its first real frame
-        # (up to 10s — covers the warm-up reads inside _open()).
-        # This prevents the "no frame available" warning on the very first call.
-        ready = reader._event.wait(timeout=10.0)
-        if not ready:
-            log.warning(f"Camera {device}: no frame within 10s of startup — proceeding anyway")
+        if device == CAMERA_WEBCAM:
+            # Lazy open/close — no persistent V4L2 reservation on Bus 1
+            _readers[device] = _LazyWebcamReader(device)
+            log.info(f"📷 Webcam {device}: lazy reader created (open-on-demand)")
+        else:
+            fps    = _CAMERA_FPS.get(device, 10.0)
+            reader = _CameraReader(device, fps=fps)
+            _readers[device] = reader
+            # Wait until the background thread delivers its first real frame
+            # (up to 10s — covers the warm-up reads inside _open()).
+            # This prevents the "no frame available" warning on the very first call.
+            ready = reader._event.wait(timeout=10.0)
+            if not ready:
+                log.warning(f"Camera {device}: no frame within 10s of startup — proceeding anyway")
     return _readers[device]
 
 
