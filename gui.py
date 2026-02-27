@@ -1,18 +1,6 @@
 """
 ERIC — Cockpit Dashboard GUI
-Mission control interface styled as a tracked robot operations centre.
-Three-column layout:
-  LEFT   — narrow dual camera feeds
-  CENTRE — mission briefing + character comms
-  RIGHT  — module status lights, gauges, manual controls
-
-Key changes from previous GUI:
-  - Module status indicator lights (green = active, red = inactive)
-  - Round red STOP button replacing rectangular emergency stop + disengage
-  - AI speech (Eric Says) and system log are separate panels
-  - Mission defaults to template on startup with template text pre-loaded
-  - scan360 / nav / system events go to LOG only — AI speech panel stays clean
-  - Camera column is narrow (scale=2) vs centre+right (scale=3 each)
+Cyberpunk mission control for 1680x1050 single-screen operation.
 """
 
 import threading
@@ -35,35 +23,18 @@ from mission import (
 log = logging.getLogger("eric.gui")
 
 # ─── Shared state ─────────────────────────────────────────────────────────────
-_eric_says  = ""          # AI speech only — never overwritten by system events
+_eric_says  = ""
 _status     = "IDLE"
-_log_text   = ""          # System events, scan results, nav checks
+_log_text   = ""
 
-# Motor state for telemetry
 _motor_state = {"direction": "stopped", "left": 0.0, "right": 0.0}
 
-# Template default mission text shown at startup
 _TEMPLATE_MISSION = """\
 You are ERIC — Edge Robotics Innovation by Cosmos.
-You are on a search and rescue mission.
-
-OBJECTIVE:
-Search the area systematically. Identify any persons, robots, or
-objects of interest. Approach and interact with anything relevant.
-Report your findings.
-
-RULES:
-- You have NO arms — never engage in combat
-- Avoid all obstacles — use your LiDAR and depth camera
-- Talk to anyone you find and gather information
-- If someone cannot help, thank them and move on
-- Reason carefully from your egocentric camera view
-"""
-
-# ─── UI callbacks — called from mission.py background threads ─────────────────
+Search and rescue mission. Identify persons, robots, objects of interest.
+Approach and interact. NO combat. Avoid obstacles. Talk and gather intel."""
 
 def _set_eric_says(t):
-    """AI speech only — set from Cosmos responses and Eric's spoken lines."""
     global _eric_says
     _eric_says = t
 
@@ -72,11 +43,9 @@ def _set_status(t):
     _status = str(t).upper()
 
 def _append_log(t):
-    """System events: scan results, nav checks, avoidance, state changes."""
     global _log_text
     lines = (_log_text + "\n" + str(t)).strip().split("\n")
-    _log_text = "\n".join(lines[-120:])   # keep last 120 lines
-
+    _log_text = "\n".join(lines[-60:])
 
 register_ui_callbacks(
     eric_says=_set_eric_says,
@@ -84,40 +53,28 @@ register_ui_callbacks(
     log=_append_log
 )
 
-
-# ─── Camera feeds ─────────────────────────────────────────────────────────────
 def get_webcam():   return capture_frame_raw(CAMERA_WEBCAM)
 def get_pantilt():  return capture_frame_raw(CAMERA_PANTILT)
 def get_eric():     return _eric_says
 def get_status():   return _status
 def get_log():      return _log_text
 
-
-# ─── Module status lights ──────────────────────────────────────────────────────
+# ─── Module status ────────────────────────────────────────────────────────────
 
 def _dot(active: bool, label: str, detail: str = "") -> str:
-    """Single status indicator row: coloured circle + label + optional detail."""
-    color  = "#76b900" if active else "#cc2200"
-    glow   = f"0 0 8px {color}88" if active else "none"
+    color  = "#00ffff" if active else "#ff0066"
+    glow   = f"0 0 12px {color}" if active else "none"
     state  = "ONLINE" if active else "OFFLINE"
-    detail_html = f'<span style="color:#555;font-size:0.72em;margin-left:6px">{detail}</span>' if detail else ""
+    detail_html = f'<span style="color:#555;font-size:0.65em;margin-left:4px">{detail}</span>' if detail else ""
     return f"""
-    <div style="display:flex;align-items:center;gap:10px;padding:4px 0;font-family:'Courier New',monospace">
-        <div style="
-            width:11px;height:11px;border-radius:50%;
-            background:{color};box-shadow:{glow};
-            flex-shrink:0;
-        "></div>
-        <span style="color:#ccc;font-size:0.82em;letter-spacing:0.04em;min-width:110px">{label}</span>
-        <span style="color:{color};font-size:0.72em;letter-spacing:0.08em">{state}</span>
+    <div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-family:'Courier New',monospace">
+        <div style="width:8px;height:8px;border-radius:50%;background:{color};box-shadow:{glow};flex-shrink:0;"></div>
+        <span style="color:#aaa;font-size:0.7em;letter-spacing:0.04em;min-width:90px">{label}</span>
+        <span style="color:{color};font-size:0.65em;letter-spacing:0.06em">{state}</span>
         {detail_html}
     </div>"""
 
-
 def get_module_status_html() -> str:
-    """Build the full module status panel with live indicator lights."""
-
-    # ── Cosmos / vLLM ──────────────────────────────────────────────────────
     try:
         import requests
         from config import VLLM_URL
@@ -126,14 +83,12 @@ def get_module_status_html() -> str:
     except Exception:
         cosmos_ok = False
 
-    # ── Mission active ──────────────────────────────────────────────────────
     try:
         from mission import _ms as _ms_ref
         mission_ok = bool(_ms_ref.mission_active)
     except Exception:
         mission_ok = False
 
-    # ── LiDAR ──────────────────────────────────────────────────────────────
     try:
         from lidar import lidar_available, get_status as ls
         lidar_ok = lidar_available()
@@ -145,71 +100,57 @@ def get_module_status_html() -> str:
     except Exception:
         lidar_ok, lidar_detail = False, ""
 
-    # ── OAK-D ──────────────────────────────────────────────────────────────
     try:
         from oakd import oakd_available, get_front_depth
         oakd_ok = oakd_available()
         oakd_detail = ""
         if oakd_ok:
             d = get_front_depth()
-            oakd_detail = f"{d:.2f}m" if d is not None else "no reading"
+            oakd_detail = f"{d:.2f}m" if d is not None else "—"
     except Exception:
         oakd_ok, oakd_detail = False, ""
 
-    # ── Nav2 ───────────────────────────────────────────────────────────────
     try:
         from nav2 import nav2_available, is_navigating
         nav2_ok = nav2_available()
-        nav2_detail = "navigating" if (nav2_ok and is_navigating()) else ""
+        nav2_detail = "NAV" if (nav2_ok and is_navigating()) else ""
     except Exception:
         nav2_ok, nav2_detail = False, ""
 
-    # ── TTS ────────────────────────────────────────────────────────────────
     try:
         tts_ok = piper_available()
-        tts_detail = "Piper" if tts_ok else "gTTS"
+        tts_detail = "PIPER" if tts_ok else "GTTS"
     except Exception:
         tts_ok, tts_detail = False, ""
 
-    # ── Motors serial ──────────────────────────────────────────────────────
     try:
         motors_ok = motors._ser is not None and motors._ser.is_open
     except Exception:
         motors_ok = False
 
     rows = (
-        _dot(cosmos_ok,  "COSMOS REASON 2", "vLLM") +
-        _dot(mission_ok, "MISSION",         _status) +
-        _dot(lidar_ok,   "LIDAR D500",      lidar_detail) +
-        _dot(oakd_ok,    "OAK-D LITE",      oakd_detail) +
-        _dot(nav2_ok,    "NAV2 / SLAM",     nav2_detail) +
-        _dot(tts_ok,     "TTS PIPER",       tts_detail) +
-        _dot(motors_ok,  "MOTORS ESP32",    "UART")
+        _dot(cosmos_ok,  "COSMOS", "vLLM") +
+        _dot(mission_ok, "MISSION", _status[:8]) +
+        _dot(lidar_ok,   "LIDAR", lidar_detail) +
+        _dot(oakd_ok,    "OAK-D", oakd_detail) +
+        _dot(nav2_ok,    "NAV2", nav2_detail) +
+        _dot(tts_ok,     "TTS", tts_detail) +
+        _dot(motors_ok,  "MOTORS", "UART")
     )
 
     return f"""
-    <div style="
-        background:#0d0d0d;
-        border:1px solid #1e3a1e;
-        border-radius:6px;
-        padding:12px 14px;
-        font-family:'Courier New',monospace;
-    ">
-        <div style="
-            color:#76b900;font-size:0.7em;letter-spacing:0.15em;
-            margin-bottom:10px;border-bottom:1px solid #1e3a1e;padding-bottom:6px
-        ">SYSTEM STATUS</div>
+    <div style="background:#0a0a0f;border:1px solid #ff00ff44;border-radius:4px;padding:8px 10px;">
+        <div style="color:#ff00ff;font-size:0.6em;letter-spacing:0.2em;margin-bottom:6px;border-bottom:1px solid #ff00ff33;padding-bottom:4px">SYSTEM STATUS</div>
         {rows}
     </div>"""
-
 
 # ─── Motor telemetry ──────────────────────────────────────────────────────────
 
 def _motor_telemetry_html(direction: str, left: float, right: float) -> str:
     color = {
-        "forward":  "#76b900", "backward": "#ff6600",
-        "left":     "#00aaff", "right":    "#00aaff",
-        "stopped":  "#444444", "spinning": "#aa00ff",
+        "forward":  "#00ffff", "backward": "#ff00ff",
+        "left":     "#ffff00", "right":    "#ffff00",
+        "stopped":  "#444444", "spinning": "#ff0066",
     }.get(direction, "#444444")
 
     arrow = {
@@ -222,32 +163,23 @@ def _motor_telemetry_html(direction: str, left: float, right: float) -> str:
     pct   = int(speed / 0.50 * 100)
 
     return f"""
-    <div style="
-        background:#0d0d0d;border:1px solid {color}88;
-        border-radius:6px;padding:10px 12px;font-family:'Courier New',monospace;
-    ">
-        <div style="color:#88d400;font-size:0.82em;font-weight:bold;letter-spacing:0.12em;
-                    margin-bottom:8px;border-bottom:1px solid #2d5a2d;padding-bottom:5px">
-            DRIVE SYSTEM
-        </div>
-        <div style="display:flex;align-items:center;gap:14px">
-            <div style="font-size:2.2em;color:{color};width:40px;text-align:center">{arrow}</div>
+    <div style="background:#0a0a0f;border:1px solid {color}66;border-radius:4px;padding:8px 10px;font-family:'Courier New',monospace;">
+        <div style="color:{color};font-size:0.7em;font-weight:bold;letter-spacing:0.15em;margin-bottom:6px;border-bottom:1px solid {color}33;padding-bottom:4px">DRIVE SYSTEM</div>
+        <div style="display:flex;align-items:center;gap:10px">
+            <div style="font-size:1.8em;color:{color};width:32px;text-align:center;text-shadow:0 0 10px {color}66">{arrow}</div>
             <div style="flex:1">
-                <div style="color:{color};font-size:1.05em;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase">{direction}</div>
-                <div style="color:#aaa;font-size:0.85em;margin:4px 0">
-                    L <span style="color:#fff;font-weight:bold">{left:+.2f}</span>
-                    &nbsp;·&nbsp;
-                    R <span style="color:#fff;font-weight:bold">{right:+.2f}</span>
-                    &nbsp;·&nbsp;
-                    <span style="color:#fff;font-weight:bold">{speed:.2f} m/s</span>
+                <div style="color:{color};font-size:0.9em;font-weight:bold;letter-spacing:0.1em;text-transform:uppercase">{direction}</div>
+                <div style="color:#888;font-size:0.75em;margin:2px 0">
+                    L<span style="color:#fff;margin:0 4px">{left:+.2f}</span>
+                    R<span style="color:#fff;margin:0 4px">{right:+.2f}</span>
+                    <span style="color:#fff">{speed:.2f}m/s</span>
                 </div>
-                <div style="height:6px;background:#1a1a1a;border-radius:3px;overflow:hidden;margin-top:4px">
-                    <div style="height:100%;width:{pct}%;background:{color};border-radius:3px;transition:width 0.3s"></div>
+                <div style="height:4px;background:#1a1a1f;border-radius:2px;overflow:hidden;margin-top:3px">
+                    <div style="height:100%;width:{pct}%;background:{color};box-shadow:0 0 8px {color};border-radius:2px;transition:width 0.3s"></div>
                 </div>
             </div>
         </div>
     </div>"""
-
 
 def get_motor_telemetry():
     return _motor_telemetry_html(
@@ -256,20 +188,14 @@ def get_motor_telemetry():
         _motor_state["right"]
     )
 
-
 # ─── Sensor panels ────────────────────────────────────────────────────────────
 
-def _sensor_panel(label: str, body_html: str, border_color: str = "#2d5a2d") -> str:
+def _sensor_panel(label: str, body_html: str, border_color: str = "#00ffff") -> str:
     return f"""
-    <div style="background:#0d0d0d;border:1px solid {border_color};border-radius:6px;
-                padding:10px 12px;font-family:'Courier New',monospace;margin-bottom:6px">
-        <div style="color:#88d400;font-size:0.82em;font-weight:bold;letter-spacing:0.12em;
-                    margin-bottom:7px;border-bottom:1px solid {border_color};padding-bottom:5px">
-            {label}
-        </div>
+    <div style="background:#0a0a0f;border:1px solid {border_color}44;border-radius:4px;padding:8px 10px;font-family:'Courier New',monospace;margin-bottom:4px">
+        <div style="color:{border_color};font-size:0.7em;font-weight:bold;letter-spacing:0.12em;margin-bottom:5px;border-bottom:1px solid {border_color}33;padding-bottom:3px">{label}</div>
         {body_html}
     </div>"""
-
 
 def get_lidar_html() -> str:
     try:
@@ -279,24 +205,20 @@ def get_lidar_html() -> str:
             d    = s.get("min_distance", 999)
             dist = f"{d:.2f}m" if d < 999 else "—"
             if s.get("obstacle_close"):
-                color, state = "#cc2200", "🚧 STOP ZONE"
+                color, state = "#ff0066", "STOP"
             elif s.get("obstacle_near"):
-                color, state = "#ff6600", "⚠ CAUTION"
+                color, state = "#ffff00", "CAUTION"
             else:
-                color, state = "#76b900", "✓ CLEAR"
+                color, state = "#00ffff", "CLEAR"
             body = f"""
             <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:{color};font-size:0.85em;letter-spacing:0.08em">{state}</span>
-                <span style="color:#fff;font-size:1.1em">{dist}</span>
-            </div>
-            <div style="color:#444;font-size:0.68em;margin-top:4px">
-                STOP &lt;{s.get('obstacle_close') and '0.30' or '0.30'}m · SLOW &lt;0.60m
+                <span style="color:{color};font-size:0.8em;letter-spacing:0.08em;text-shadow:0 0 8px {color}66">{state}</span>
+                <span style="color:#fff;font-size:1em;font-weight:bold">{dist}</span>
             </div>"""
-            return _sensor_panel("LIDAR D500 — FRONT ARC", body, color + "44")
+            return _sensor_panel("LIDAR D500", body, color)
     except Exception:
         pass
-    return _sensor_panel("LIDAR D500", '<span style="color:#333;font-size:0.8em">NOT CONNECTED</span>')
-
+    return _sensor_panel("LIDAR D500", '<span style="color:#333;font-size:0.75em">OFFLINE</span>', "#444")
 
 def get_oakd_html() -> str:
     try:
@@ -304,22 +226,21 @@ def get_oakd_html() -> str:
         if oakd_available():
             d = get_front_depth()
             if d is None:
-                body = '<span style="color:#555;font-size:0.8em">NO READING</span>'
-                color = "#333"
+                body = '<span style="color:#555;font-size:0.75em">NO READING</span>'
+                color = "#444"
             elif d < 0.30:
-                color = "#cc2200"
-                body  = f'<span style="color:{color};font-size:0.85em">🚧 VERY CLOSE</span> <span style="color:#fff">{d:.2f}m</span>'
+                color = "#ff0066"
+                body  = f'<span style="color:{color};font-size:0.8em;text-shadow:0 0 8px {color}66">CRITICAL</span> <span style="color:#fff;font-weight:bold">{d:.2f}m</span>'
             elif d < 0.60:
-                color = "#ff6600"
-                body  = f'<span style="color:{color};font-size:0.85em">⚠ CLOSE</span> <span style="color:#fff">{d:.2f}m</span>'
+                color = "#ffff00"
+                body  = f'<span style="color:{color};font-size:0.8em;text-shadow:0 0 8px {color}66">WARNING</span> <span style="color:#fff;font-weight:bold">{d:.2f}m</span>'
             else:
-                color = "#76b900"
-                body  = f'<span style="color:{color};font-size:0.85em">✓ CLEAR</span> <span style="color:#fff">{d:.2f}m</span>'
-            return _sensor_panel("OAK-D DEPTH — CENTRE FWD", body, color + "44")
+                color = "#00ffff"
+                body  = f'<span style="color:{color};font-size:0.8em;text-shadow:0 0 8px {color}66">OPTIMAL</span> <span style="color:#fff;font-weight:bold">{d:.2f}m</span>'
+            return _sensor_panel("OAK-D DEPTH", body, color)
     except Exception:
         pass
-    return _sensor_panel("OAK-D LITE", '<span style="color:#333;font-size:0.8em">NOT CONNECTED</span>')
-
+    return _sensor_panel("OAK-D LITE", '<span style="color:#333;font-size:0.75em">OFFLINE</span>', "#444")
 
 # ─── Mission helpers ──────────────────────────────────────────────────────────
 
@@ -327,9 +248,7 @@ def load_mission_choices():
     missions = list_missions()
     return missions if missions else ["(no missions found)"]
 
-
-_selected_mission_name = ""   # tracks which YAML was selected (for start_mission)
-
+_selected_mission_name = ""
 
 def on_mission_select(name: str):
     global _selected_mission_name
@@ -340,9 +259,7 @@ def on_mission_select(name: str):
     briefing = get_briefing_from_file(name)
     return briefing or ""
 
-
 def _default_mission_text():
-    """Try to load template.yaml at startup, fall back to built-in default."""
     try:
         briefing = get_briefing_from_file("template")
         if briefing and briefing.strip():
@@ -351,32 +268,29 @@ def _default_mission_text():
         pass
     return _TEMPLATE_MISSION.strip()
 
-
 def _default_mission_choice():
-    """Return 'template' if it exists in missions list, else first choice."""
     choices = load_mission_choices()
     if "template" in choices:
         return "template"
     return choices[0] if choices else None
 
-
 # ─── Actions ──────────────────────────────────────────────────────────────────
 
 def action_engage(briefing: str):
     if not briefing.strip():
-        return "⚠ Enter a mission briefing first."
+        return "⚠ Enter mission briefing."
     resp = start_mission(briefing.strip(), mission_name=_selected_mission_name)
     return resp
 
+def action_disengage():
+    """Stop mission but keep systems online."""
+    try:
+        stop_mission()
+        return "◼ MISSION DISENGAGED — Systems standby"
+    except Exception as e:
+        return f"❌ Disengage error: {e}"
 
 def action_stop():
-    """
-    Layer 0 emergency halt — bypasses all software layers.
-    Opens the ESP32 serial port directly (same method as test_layer0.py)
-    and sends a raw zero-velocity command byte-by-byte.
-    Also kills the mission and the motors object as belt-and-suspenders.
-    """
-    # ── Belt and suspenders: kill mission + motors object ──────────────
     try:
         stop_mission()
     except Exception:
@@ -386,9 +300,6 @@ def action_stop():
     except Exception:
         pass
 
-    # ── Layer 0: raw serial direct to ESP32 ────────────────────────────
-    # Mirrors test_layer0.py exactly: byte-by-byte, 1ms inter-byte delay,
-    # no flow control — the only method proven reliable on JetPack 6.2.
     layer0_result = "⚠ Layer 0 serial not reached"
     try:
         import serial as _serial
@@ -396,7 +307,6 @@ def action_stop():
         import json as _json
 
         BAUD = 115200
-        # Port priority: ttyTHS2 (Jetson HW UART) → ttyUSB* → ttyACM*
         ths2  = ["/dev/ttyTHS2"] if _glob.glob("/dev/ttyTHS2") else []
         ports = ths2 + sorted(_glob.glob("/dev/ttyUSB*")) + sorted(_glob.glob("/dev/ttyACM*"))
         port  = ports[0] if ports else None
@@ -410,290 +320,307 @@ def action_stop():
                 ser.write(bytes([byte]))
                 import time as _time; _time.sleep(0.001)
             ser.close()
-            layer0_result = f"✅ Layer 0 stop sent → {port}"
+            layer0_result = f"✓ Layer 0 stop → {port}"
             log.warning(f"🛑 LAYER 0 E-HALT fired via {port}")
         else:
-            layer0_result = "❌ Layer 0: no serial port found"
+            layer0_result = "❌ No serial port found"
             log.error("🛑 LAYER 0 E-HALT: no port found")
 
     except Exception as e:
         layer0_result = f"❌ Layer 0 error: {e}"
         log.error(f"🛑 LAYER 0 E-HALT error: {e}")
 
-    return f"🛑 E-HALT — ALL STOP\n{layer0_result}"
-
-
-def action_introduce():
-    resp = ask_cosmos(
-        "Introduce yourself to the world. NVIDIA judges are watching. "
-        "Cover: full name and acronym, hardware, cost, builder, location, "
-        "mission, why edge AI matters. Be proud, warm, bold. 15-20 sentences.",
-        max_tokens=500
-    )
-    threading.Thread(target=lambda: speak(resp), daemon=True).start()
-    return resp
-
-
-def action_look():
-    from cosmos import capture_frame
-    image = capture_frame(CAMERA_WEBCAM)
-    if not image:
-        return "❌ Camera unavailable."
-    resp = ask_cosmos(
-        "Describe in detail what you see. Terrain, objects, hazards. What would you do next?",
-        image_b64=image,
-        max_tokens=200
-    )
-    threading.Thread(target=lambda: speak(resp), daemon=True).start()
-    return resp
-
+    return f"🛑 E-HALT EXECUTED\n{layer0_result}"
 
 def action_char_reply(char_name: str, char_says: str):
     if not char_name.strip() or not char_says.strip():
-        return "⚠ Enter character name and what they say.", ""
+        return "⚠ Enter character data.", ""
     resp = handle_character_response(char_name.strip(), char_says.strip())
     resume_after_interaction()
     return resp, ""
 
-
-def action_status():
-    history = "\n".join(
-        f"  • {e['character']}: {e['said'][:60]}"
-        for e in get_conversation_history()[-5:]
-    ) or "  (none yet)"
-    sensor_lines = []
-    try:
-        from lidar import lidar_available, get_status as ls
-        if lidar_available():
-            s = ls()
-            d = s.get("min_distance", 999)
-            sensor_lines.append(f"  LiDAR front: {d:.2f}m" if d < 999 else "  LiDAR front: clear")
-    except Exception:
-        pass
-    try:
-        from oakd import oakd_available, get_front_depth
-        if oakd_available():
-            d = get_front_depth()
-            sensor_lines.append(f"  OAK-D front: {d:.2f}m" if d is not None else "  OAK-D front: no reading")
-    except Exception:
-        pass
-    try:
-        from nav2 import nav2_available, is_navigating, get_pose
-        if nav2_available():
-            p = get_pose()
-            sensor_lines.append(f"  Nav2: navigating={is_navigating()} pose=({p['x']:.2f},{p['y']:.2f})")
-    except Exception:
-        pass
-    sensors = "\n".join(sensor_lines) or "  (sensors not enabled)"
-    return (
-        f"State:  {get_mission_state()}\n"
-        f"Active: {get_mission_active()}\n"
-        f"TTS:    {'Piper streaming' if piper_available() else 'gTTS fallback'}\n"
-        f"\nSensors:\n{sensors}"
-        f"\nRecent conversations:\n{history}"
-    )
-
-
-# ─── CSS & layout constants ───────────────────────────────────────────────────
+# ─── CSS & layout ─────────────────────────────────────────────────────────────
 
 _CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&display=swap');
 
-/* ── Global reset ──────────────────────────────────────────────────── */
+/* ── Global cyberpunk reset with dark cyan grid ─────────────────────── */
 body, .gradio-container {
-    background: #080b08 !important;
+    background: #050508 !important;
     font-family: 'Share Tech Mono', 'Courier New', monospace !important;
     background-image:
-        linear-gradient(rgba(45,90,45,0.12) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(45,90,45,0.12) 1px, transparent 1px);
-    background-size: 40px 40px;
+        /* Dark cyan grid lines */
+        linear-gradient(rgba(0,255,255,0.08) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,255,255,0.08) 1px, transparent 1px),
+        /* Subtle radial glows */
+        radial-gradient(ellipse at 50% 0%, rgba(0,255,255,0.08) 0%, transparent 50%),
+        radial-gradient(ellipse at 50% 100%, rgba(0,255,255,0.05) 0%, transparent 50%);
+    background-size: 40px 40px, 40px 40px, 100% 100%, 100% 100%;
 }
 footer { display:none !important; }
 
-/* Subtle scanline */
+/* CRT scanline effect */
 body::after {
     content: '';
     position: fixed;
     top: 0; left: 0; right: 0; bottom: 0;
     background: repeating-linear-gradient(
         0deg,
-        rgba(0,255,0,0.015) 0px,
-        rgba(0,255,0,0.015) 1px,
+        rgba(0,255,255,0.015) 0px,
+        rgba(0,255,255,0.015) 1px,
         transparent 1px,
-        transparent 4px
+        transparent 3px
     );
     pointer-events: none;
     z-index: 9999;
 }
 
-/* ── Header ─────────────────────────────────────────────────────────── */
+/* ── Header with BIGGER title ───────────────────────────────────────── */
 .eric-header {
     display: flex;
     align-items: baseline;
-    gap: 18px;
-    padding: 10px 0 4px 0;
-    border-bottom: 1px solid #2d5a2d;
-    margin-bottom: 10px;
+    gap: 16px;
+    padding: 4px 0 4px 0;
+    border-bottom: 1px solid #ff00ff44;
+    margin-bottom: 6px;
 }
 .eric-title {
-    font-size: 1.6em;
+    font-size: 2.2em;  /* BIGGER */
     font-weight: bold;
-    letter-spacing: 0.2em;
-    color: #88d400;
-    font-family: 'Share Tech Mono', 'Courier New', monospace;
-    text-shadow: 0 0 10px #88d40055;
+    letter-spacing: 0.3em;
+    color: #00ffff;
+    font-family: 'Share Tech Mono', monospace;
+    text-shadow: 
+        0 0 10px #00ffff,
+        0 0 20px #00ffffaa,
+        0 0 40px #00ffff66,
+        0 0 80px #00ffff33;
 }
 .eric-sub {
-    font-size: 0.82em;
-    color: #7aaa7a;
-    letter-spacing: 0.05em;
-    font-family: 'Share Tech Mono', 'Courier New', monospace;
+    font-size: 0.7em;
+    color: #ff00ff;
+    letter-spacing: 0.1em;
+    font-family: 'Share Tech Mono', monospace;
+    text-shadow: 0 0 10px #ff00ff66;
 }
 
-/* ── STOP button — round red, sits beside joystick ──────────────────── */
+/* ── STOP button — PERFECT CIRCLE ───────────────────────────────────── */
 #stop-btn {
     width: 72px !important;
     height: 72px !important;
     min-width: 72px !important;
+    min-height: 72px !important;
+    max-width: 72px !important;
+    max-height: 72px !important;
     border-radius: 50% !important;
-    background: radial-gradient(circle at 38% 35%, #ff3333, #880000) !important;
-    border: 3px solid #cc0000 !important;
+    background: radial-gradient(circle at 35% 35%, #ff0066, #660022) !important;
+    border: 3px solid #ff0066 !important;
     color: #fff !important;
-    font-size: 0.78em !important;
+    font-size: 0.75em !important;
     font-weight: bold !important;
-    letter-spacing: 0.15em !important;
-    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
-    box-shadow: 0 0 18px #cc000066, inset 0 2px 4px #ff666644 !important;
-    transition: box-shadow 0.15s, transform 0.1s !important;
-    line-height: 1.2 !important;
+    letter-spacing: 0.08em !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    box-shadow: 
+        0 0 25px #ff0066aa,
+        0 0 50px #ff006644,
+        inset 0 2px 4px #ff669944 !important;
+    transition: all 0.15s !important;
+    line-height: 1 !important;
     padding: 0 !important;
+    aspect-ratio: 1 / 1 !important;
 }
 #stop-btn:hover {
-    box-shadow: 0 0 32px #ff0000aa, inset 0 2px 4px #ff666644 !important;
-    transform: scale(1.04) !important;
+    box-shadow: 
+        0 0 35px #ff0066ff,
+        0 0 70px #ff006666,
+        inset 0 2px 4px #ff669944 !important;
+    transform: scale(1.08) !important;
+    border-color: #ff3399 !important;
 }
 #stop-btn:active {
-    transform: scale(0.97) !important;
-    box-shadow: 0 0 12px #cc000088 !important;
+    transform: scale(0.95) !important;
+    box-shadow: 0 0 20px #ff006688 !important;
 }
 
-/* ── ENGAGE button ───────────────────────────────────────────────────── */
+/* ── ENGAGE button ──────────────────────────────────────────────────── */
 #engage-btn {
-    background: linear-gradient(135deg, #3a6600, #76b900) !important;
-    border: 1px solid #76b900 !important;
+    background: linear-gradient(135deg, #006666, #00ffff) !important;
+    border: 1px solid #00ffff !important;
     color: #000 !important;
     letter-spacing: 0.12em !important;
-    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
-    font-size: 0.95em !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 0.85em !important;
     font-weight: bold !important;
+    box-shadow: 0 0 15px #00ffff44 !important;
 }
 #engage-btn:hover {
-    box-shadow: 0 0 14px #76b90066 !important;
+    box-shadow: 0 0 25px #00ffffaa !important;
+    transform: translateY(-1px) !important;
 }
 
-/* ── Textboxes ───────────────────────────────────────────────────────── */
+/* ── DISENGAGE button ───────────────────────────────────────────────── */
+#disengage-btn {
+    background: linear-gradient(135deg, #660066, #ff00ff) !important;
+    border: 1px solid #ff00ff !important;
+    color: #fff !important;
+    letter-spacing: 0.12em !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 0.85em !important;
+    font-weight: bold !important;
+    box-shadow: 0 0 15px #ff00ff44 !important;
+}
+#disengage-btn:hover {
+    box-shadow: 0 0 25px #ff00ffaa !important;
+    transform: translateY(-1px) !important;
+}
+
+/* ── Textboxes ──────────────────────────────────────────────────────── */
 textarea, input[type=text] {
-    background: #0d130d !important;
-    border: 1px solid #2d5a2d !important;
-    color: #d8f0d8 !important;
-    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
-    font-size: 0.95em !important;
-    border-radius: 4px !important;
+    background: #0a0a0f !important;
+    border: 1px solid #00ffff44 !important;
+    color: #ccffff !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 0.85em !important;
+    border-radius: 3px !important;
 }
 textarea:focus, input[type=text]:focus {
-    border-color: #76b900 !important;
-    box-shadow: 0 0 8px #76b90033 !important;
+    border-color: #00ffff !important;
+    box-shadow: 0 0 12px #00ffff55 !important;
+    outline: none !important;
 }
 
 /* ── Labels ──────────────────────────────────────────────────────────── */
 label span, .gr-label {
-    color: #7aaa7a !important;
-    font-size: 0.85em !important;
-    letter-spacing: 0.08em !important;
+    color: #ff00ff !important;
+    font-size: 0.75em !important;
+    letter-spacing: 0.1em !important;
     text-transform: uppercase !important;
-    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    text-shadow: 0 0 8px #ff00ff44 !important;
 }
 
-/* ── Eric Says speech panel ──────────────────────────────────────────── */
+/* ── Eric Says panel ─────────────────────────────────────────────────── */
 #eric-says textarea {
-    border-left: 3px solid #76b900 !important;
-    color: #eefff0 !important;
-    font-size: 1.05em !important;
+    border-left: 2px solid #00ffff !important;
+    color: #e0ffff !important;
+    font-size: 0.95em !important;
     font-weight: bold !important;
-    min-height: 90px !important;
+    min-height: 60px !important;
+    background: #0a0a0f !important;
+    text-shadow: 0 0 10px #00ffff44 !important;
 }
 
 /* ── Log panel ───────────────────────────────────────────────────────── */
 #sys-log textarea {
-    color: #90c890 !important;
-    font-size: 0.88em !important;
-    min-height: 110px !important;
+    color: #88cccc !important;
+    font-size: 0.75em !important;
+    min-height: 100px !important;
+    background: #0a0a0f !important;
 }
 
-/* ── Manual control buttons — compact squares ────────────────────────── */
+/* ── SQUARE joystick buttons ────────────────────────────────────────── */
 .ctrl-btn button {
-    background: #0d1a0d !important;
-    border: 1px solid #2d5a2d !important;
-    color: #88d400 !important;
-    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
+    background: #0a0a0f !important;
+    border: 1px solid #00ffff66 !important;
+    color: #00ffff !important;
+    font-family: 'Share Tech Mono', monospace !important;
     font-size: 1.1em !important;
     font-weight: bold !important;
-    border-radius: 4px !important;
+    border-radius: 2px !important;
+    /* SQUARE: equal width and height */
     width: 44px !important;
     height: 44px !important;
     min-width: 44px !important;
+    min-height: 44px !important;
+    max-width: 44px !important;
+    max-height: 44px !important;
     padding: 0 !important;
+    text-shadow: 0 0 8px #00ffff88 !important;
+    transition: all 0.15s !important;
 }
 .ctrl-btn button:hover {
-    border-color: #76b900 !important;
-    background: #1a3300 !important;
+    border-color: #00ffff !important;
+    background: #001a1a !important;
+    box-shadow: 0 0 15px #00ffff55 !important;
+    transform: scale(1.05) !important;
 }
 .ctrl-stop button {
-    border-color: #883300 !important;
-    color: #ff8844 !important;
+    border-color: #ff0066 !important;
+    color: #ff0066 !important;
+    text-shadow: 0 0 8px #ff006688 !important;
 }
 .ctrl-stop button:hover {
-    background: #1a0a00 !important;
-    border-color: #ff6600 !important;
+    background: #1a0008 !important;
+    border-color: #ff3399 !important;
+    box-shadow: 0 0 15px #ff006655 !important;
 }
+/* Wide buttons for spin - also square but wider */
 .ctrl-wide button {
-    width: 96px !important;
+    width: 44px !important;
     height: 44px !important;
-    min-width: 96px !important;
-    font-size: 0.82em !important;
-}
-
-/* ── Accordion ───────────────────────────────────────────────────────── */
-.gr-accordion {
-    background: #0a0f0a !important;
-    border: 1px solid #2d5a2d !important;
-    border-radius: 4px !important;
+    min-width: 44px !important;
+    min-height: 44px !important;
+    font-size: 0.85em !important;
 }
 
 /* ── Camera images ───────────────────────────────────────────────────── */
 .cam-label {
-    color: #7aaa7a;
-    font-size: 0.78em;
+    color: #ff00ff;
+    font-size: 0.65em;
     font-weight: bold;
-    letter-spacing: 0.1em;
+    letter-spacing: 0.15em;
     text-transform: uppercase;
-    font-family: 'Share Tech Mono', 'Courier New', monospace;
-    margin-bottom: 1px;
-    padding-left: 2px;
+    font-family: 'Share Tech Mono', monospace;
+    margin-bottom: 2px;
+    text-shadow: 0 0 10px #ff00ff66;
 }
 
 /* ── Section headers ─────────────────────────────────────────────────── */
 .panel-head {
-    color: #88d400;
-    font-size: 0.78em;
+    color: #00ffff;
+    font-size: 0.7em;
     font-weight: bold;
-    letter-spacing: 0.15em;
+    letter-spacing: 0.2em;
     text-transform: uppercase;
-    font-family: 'Share Tech Mono', 'Courier New', monospace;
-    border-bottom: 1px solid #2d5a2d;
-    padding-bottom: 4px;
-    margin-bottom: 6px;
-    margin-top: 8px;
+    font-family: 'Share Tech Mono', monospace;
+    border-bottom: 1px solid #00ffff44;
+    padding-bottom: 3px;
+    margin-bottom: 5px;
+    margin-top: 6px;
+    text-shadow: 0 0 10px #00ffff44;
+}
+
+/* ── Dropdown ────────────────────────────────────────────────────────── */
+.gr-dropdown {
+    background: #0a0a0f !important;
+    border: 1px solid #ff00ff44 !important;
+    color: #ffccff !important;
+}
+.gr-dropdown:focus {
+    border-color: #ff00ff !important;
+    box-shadow: 0 0 10px #ff00ff55 !important;
+}
+
+/* ── Slider ──────────────────────────────────────────────────────────── */
+input[type=range] {
+    accent-color: #00ffff !important;
+}
+.gr-slider {
+    background: #0a0a0f !important;
+}
+
+/* ── Reduce padding globally ─────────────────────────────────────────── */
+.gr-box, .gr-column, .gr-row {
+    gap: 4px !important;
+}
+.gr-form {
+    gap: 3px !important;
+}
+
+/* ── Compact right column spacing ───────────────────────────────────── */
+.compact-col {
+    margin-top: 0 !important;
+    padding-top: 0 !important;
 }
 """
 
@@ -701,15 +628,10 @@ _HEADER_HTML = """
 <div class="eric-header">
     <span class="eric-title">E.R.I.C.</span>
     <span class="eric-sub">
-        EDGE ROBOTICS INNOVATION BY COSMOS &nbsp;&#x2502;&nbsp;
-        NVIDIA COSMOS COOKOFF 2026 &nbsp;&#x2502;&nbsp;
-        JETSON ORIN NANO SUPER 8GB &nbsp;&#x2502;&nbsp;
-        WAVESHARE UGV BEAST &nbsp;&#x2502;&nbsp;
-        VANCOUVER BC &nbsp;&#x2502;&nbsp; ~$750 CAD
+        EDGE ROBOTICS INNOVATION // COSMOS COOKOFF 2026 // JETSON ORIN NANO // WAVESHARE UGV // VANCOUVER BC // ~$750 CAD
     </span>
 </div>
 """
-
 
 # ─── Build UI ─────────────────────────────────────────────────────────────────
 
@@ -717,154 +639,119 @@ def build_ui():
     default_text    = _default_mission_text()
     default_mission = _default_mission_choice()
 
-    with gr.Blocks(title="ERIC — Mission Control") as demo:
+    with gr.Blocks(title="ERIC — Mission Control", css=_CSS) as demo:
 
         gr.HTML(_HEADER_HTML)
 
         with gr.Row(equal_height=False):
 
             # ═══════════════════════════════════════════════════════════════
-            # LEFT COLUMN — cameras + module status + sensors
+            # LEFT COLUMN — cameras + status + sensors
             # ═══════════════════════════════════════════════════════════════
-            with gr.Column(scale=2, min_width=200):
+            with gr.Column(scale=2, min_width=180):
 
-                gr.HTML('<div class="cam-label">📡 PAN-TILT</div>')
-                pantilt_img = gr.Image(
-                    streaming=True, height=180, label="",
-                    show_label=False
-                )
+                gr.HTML('<div class="cam-label">◉ PAN-TILT FEED</div>')
+                pantilt_img = gr.Image(streaming=True, height=140, label="", show_label=False)
 
-                gr.HTML('<div class="cam-label" style="margin-top:4px">🔬 WEBCAM</div>')
-                webcam_img = gr.Image(
-                    streaming=True, height=140, label="",
-                    show_label=False
-                )
+                gr.HTML('<div class="cam-label">◉ WEBCAM FEED</div>')
+                webcam_img = gr.Image(streaming=True, height=110, label="", show_label=False)
 
-                # Module status — moved here from right column
-                gr.HTML('<div class="panel-head" style="margin-top:6px">MODULE STATUS</div>')
+                gr.HTML('<div class="panel-head" style="margin-top:4px">◈ MODULE STATUS</div>')
                 module_status = gr.HTML(value=get_module_status_html())
 
-                # Sensors below module status
-                gr.HTML('<div class="panel-head">SENSORS</div>')
+                gr.HTML('<div class="panel-head">◈ SENSORS</div>')
                 lidar_display = gr.HTML(value=get_lidar_html())
                 oakd_display  = gr.HTML(value=get_oakd_html())
 
             # ═══════════════════════════════════════════════════════════════
-            # CENTRE COLUMN — mission briefing + comms + log
+            # CENTRE COLUMN — mission + comms (log moved to right)
             # ═══════════════════════════════════════════════════════════════
-            with gr.Column(scale=3, min_width=320):
+            with gr.Column(scale=3, min_width=300):
 
-                gr.HTML('<div class="panel-head">MISSION BRIEFING</div>')
+                gr.HTML('<div class="panel-head">◈ MISSION BRIEFING</div>')
                 with gr.Row():
                     mission_dd = gr.Dropdown(
                         choices=load_mission_choices(),
                         value=default_mission,
                         label="",
                         show_label=False,
-                        scale=3
+                        scale=4
                     )
-                    refresh_btn = gr.Button("↺", scale=0, min_width=40)
+                    refresh_btn = gr.Button("↻", scale=0, min_width=36, elem_classes=["ctrl-btn"])
 
                 briefing_box = gr.Textbox(
                     value=default_text,
                     label="",
                     show_label=False,
-                    lines=8,
-                    max_lines=14,
-                    placeholder="Mission briefing…"
+                    lines=5,
+                    max_lines=7,
+                    placeholder="Mission briefing..."
                 )
 
-                engage_btn = gr.Button(
-                    "▶  ENGAGE MISSION",
-                    elem_id="engage-btn",
-                    variant="primary"
-                )
+                # ENGAGE and DISENGAGE side by side
+                with gr.Row():
+                    engage_btn = gr.Button("▶ ENGAGE", elem_id="engage-btn", variant="primary", scale=1)
+                    disengage_btn = gr.Button("◼ DISENGAGE", elem_id="disengage-btn", variant="secondary", scale=1)
 
-                gr.HTML('<div class="panel-head">ERIC — TRANSMISSION</div>')
+                gr.HTML('<div class="panel-head">◈ ERIC TRANSMISSION</div>')
                 eric_says_box = gr.Textbox(
                     value="",
                     label="",
                     show_label=False,
                     interactive=False,
                     lines=4,
-                    max_lines=6,
+                    max_lines=5,
                     elem_id="eric-says",
-                    placeholder="Awaiting transmission…"
+                    placeholder="Awaiting transmission..."
                 )
 
-                gr.HTML('<div class="panel-head">CHARACTER COMMS</div>')
-                gr.HTML('<span style="color:#2a4a2a;font-size:0.72em;font-family:\'Courier New\',monospace">WHEN ERIC STOPS — TYPE AS THE CHARACTER</span>')
+                gr.HTML('<div class="panel-head">◈ CHARACTER COMMS</div>')
+                gr.HTML('<span style="color:#ff00ff88;font-size:0.65em;font-family:\'Courier New\',monospace;letter-spacing:0.05em">WHEN ERIC STOPS — TYPE AS CHARACTER</span>')
                 with gr.Row():
-                    char_name = gr.Textbox(
-                        placeholder="Character name…",
-                        label="", show_label=False, scale=1
-                    )
-                    char_says = gr.Textbox(
-                        placeholder="What they say…",
-                        label="", show_label=False, scale=3
-                    )
-                char_btn   = gr.Button("⟶  TRANSMIT", variant="secondary")
-                char_reply = gr.Textbox(
-                    label="", show_label=False,
-                    interactive=False, lines=3,
-                    placeholder="Eric responds…"
-                )
-
-                gr.HTML('<div class="panel-head">SYSTEM LOG</div>')
-                log_box = gr.Textbox(
-                    value="",
-                    label="",
-                    show_label=False,
-                    interactive=False,
-                    lines=7,
-                    max_lines=12,
-                    elem_id="sys-log",
-                    placeholder="System events, nav checks, scan results…"
-                )
+                    char_name = gr.Textbox(placeholder="Name...", label="", show_label=False, scale=1)
+                    char_says = gr.Textbox(placeholder="Message...", label="", show_label=False, scale=3)
+                with gr.Row():
+                    char_btn = gr.Button("⟶ TRANSMIT", variant="secondary", scale=1, elem_classes=["ctrl-btn", "ctrl-wide"])
+                    char_reply = gr.Textbox(label="", show_label=False, interactive=False, lines=2, scale=3, placeholder="Response...")
 
             # ═══════════════════════════════════════════════════════════════
-            # RIGHT COLUMN — joystick + STOP (top), drive gauge, utilities
+            # RIGHT COLUMN — joystick + STOP + drive + LOG (moved here)
             # ═══════════════════════════════════════════════════════════════
-            with gr.Column(scale=3, min_width=280):
+            with gr.Column(scale=2, min_width=200):
 
-                gr.HTML('<div class="panel-head">MANUAL OVERRIDE</div>')
+                gr.HTML('<div class="panel-head" style="margin-top:0">◈ MANUAL OVERRIDE</div>')
 
-                # ── Joystick + STOP side by side at top ───────────────────
+                # Speed slider at top
+                speed_slider = gr.Slider(minimum=0.05, maximum=0.50, value=0.20, step=0.05, label="SPEED m/s")
+
+                # Joystick layout with STOP on right
                 with gr.Row(equal_height=True):
-
-                    # Joystick d-pad (left side)
+                    # Left side: D-pad + spin buttons integrated
                     with gr.Column(scale=3, min_width=0):
-                        speed_slider = gr.Slider(
-                            minimum=0.05, maximum=0.50, value=0.20, step=0.05,
-                            label="Speed (m/s)"
-                        )
+                        # Row 1: Forward
                         with gr.Row():
                             gr.HTML('<div style="flex:1"></div>')
-                            btn_fwd = gr.Button("▲", min_width=44, elem_classes=["ctrl-btn"])
+                            btn_fwd = gr.Button("▲", elem_classes=["ctrl-btn"])
                             gr.HTML('<div style="flex:1"></div>')
+                        
+                        # Row 2: Left, Halt, Right
                         with gr.Row():
-                            btn_left  = gr.Button("◀", min_width=44, elem_classes=["ctrl-btn"])
-                            btn_halt  = gr.Button("■", min_width=44, elem_classes=["ctrl-btn", "ctrl-stop"])
-                            btn_right = gr.Button("▶", min_width=44, elem_classes=["ctrl-btn"])
+                            btn_left = gr.Button("◀", elem_classes=["ctrl-btn"])
+                            btn_halt = gr.Button("■", elem_classes=["ctrl-btn", "ctrl-stop"])
+                            btn_right = gr.Button("▶", elem_classes=["ctrl-btn"])
+                        
+                        # Row 3: Spin Left, Down, Spin Right
                         with gr.Row():
-                            gr.HTML('<div style="flex:1"></div>')
-                            btn_back = gr.Button("▼", min_width=44, elem_classes=["ctrl-btn"])
-                            gr.HTML('<div style="flex:1"></div>')
-                        with gr.Row():
-                            btn_spin_l = gr.Button("↺ L", min_width=44, elem_classes=["ctrl-btn", "ctrl-wide"])
-                            btn_spin_r = gr.Button("↻ R", min_width=44, elem_classes=["ctrl-btn", "ctrl-wide"])
+                            btn_spin_l = gr.Button("↺", elem_classes=["ctrl-btn"])
+                            btn_back = gr.Button("▼", elem_classes=["ctrl-btn"])
+                            btn_spin_r = gr.Button("↻", elem_classes=["ctrl-btn"])
 
-                    # STOP button (right side, vertically centred)
+                    # Right side: STOP button (perfect circle)
                     with gr.Column(scale=1, min_width=0):
-                        gr.HTML('<div style="height:20px"></div>')
+                        gr.HTML('<div style="height:45px"></div>')
                         stop_btn = gr.Button("STOP", elem_id="stop-btn")
-                        gr.HTML(
-                            '<div style="color:#cc2200;font-size:0.6em;letter-spacing:0.12em;'
-                            'text-align:center;margin-top:4px;font-family:\'Courier New\',monospace">'
-                            'E-HALT</div>'
-                        )
+                        gr.HTML('<div style="color:#ff0066;font-size:0.6em;letter-spacing:0.12em;text-align:center;margin-top:6px;font-family:\'Courier New\',monospace;text-shadow:0 0 10px #ff006666">E-HALT</div>')
 
-                # Motor status text
                 motor_status = gr.Textbox(
                     label="", show_label=False,
                     interactive=False, max_lines=1,
@@ -872,83 +759,53 @@ def build_ui():
                     placeholder="Motor status"
                 )
 
-                # ── Drive system gauge — directly below joystick ──────────
-                gr.HTML('<div class="panel-head">DRIVE SYSTEM</div>')
+                gr.HTML('<div class="panel-head">◈ DRIVE SYSTEM</div>')
                 motor_display = gr.HTML(value=_motor_telemetry_html("stopped", 0.0, 0.0))
 
-                # ── Utilities ─────────────────────────────────────────────
-                with gr.Accordion("UTILITIES", open=False):
-                    util_out = gr.Textbox(label="", show_label=False, lines=5, interactive=False)
-                    with gr.Row():
-                        gr.Button("INTRODUCE", elem_classes=["ctrl-btn", "ctrl-wide"]).click(
-                            action_introduce, outputs=util_out
-                        )
-                        gr.Button("LOOK",      elem_classes=["ctrl-btn", "ctrl-wide"]).click(
-                            action_look, outputs=util_out
-                        )
-                        gr.Button("STATUS",    elem_classes=["ctrl-btn", "ctrl-wide"]).click(
-                            action_status, outputs=util_out
-                        )
+                # SYSTEM LOG moved to bottom of right column
+                gr.HTML('<div class="panel-head">◈ SYSTEM LOG</div>')
+                log_box = gr.Textbox(
+                    value="",
+                    label="",
+                    show_label=False,
+                    interactive=False,
+                    lines=6,
+                    max_lines=10,
+                    elem_id="sys-log",
+                    placeholder="System events..."
+                )
 
-        # ── Event wiring ───────────────────────────────────────────────────
+        # ─── Event wiring ───────────────────────────────────────────────────
 
         mission_dd.change(on_mission_select, inputs=mission_dd, outputs=briefing_box)
-        refresh_btn.click(
-            lambda: gr.update(choices=load_mission_choices()),
-            outputs=mission_dd
-        )
+        refresh_btn.click(lambda: gr.update(choices=load_mission_choices()), outputs=mission_dd)
 
         stop_btn.click(action_stop, outputs=eric_says_box)
         engage_btn.click(action_engage, inputs=briefing_box, outputs=eric_says_box)
+        disengage_btn.click(action_disengage, outputs=eric_says_box)
 
-        char_btn.click(
-            action_char_reply,
-            inputs=[char_name, char_says],
-            outputs=[char_reply, char_says]
-        )
+        char_btn.click(action_char_reply, inputs=[char_name, char_says], outputs=[char_reply, char_says])
 
         # Manual drive
-        btn_fwd.click(
-            lambda s: (motors.forward(s),   f"▲ FWD {s:.2f}m/s")[1],
-            inputs=speed_slider, outputs=motor_status
-        )
-        btn_back.click(
-            lambda s: (motors.backward(s),  f"▼ REV {s:.2f}m/s")[1],
-            inputs=speed_slider, outputs=motor_status
-        )
-        btn_left.click(
-            lambda s: (motors.left(s),      f"◀ LEFT {s:.2f}m/s")[1],
-            inputs=speed_slider, outputs=motor_status
-        )
-        btn_right.click(
-            lambda s: (motors.right(s),     f"▶ RIGHT {s:.2f}m/s")[1],
-            inputs=speed_slider, outputs=motor_status
-        )
-        btn_halt.click(
-            lambda: (motors.stop(), "■ STOPPED")[1],
-            outputs=motor_status
-        )
-        btn_spin_l.click(
-            lambda s: (motors._send(-s, s), f"↺ SPIN L {s:.2f}m/s")[1],
-            inputs=speed_slider, outputs=motor_status
-        )
-        btn_spin_r.click(
-            lambda s: (motors._send(s, -s), f"↻ SPIN R {s:.2f}m/s")[1],
-            inputs=speed_slider, outputs=motor_status
-        )
+        btn_fwd.click(lambda s: (motors.forward(s), f"▲ FWD {s:.2f}")[1], inputs=speed_slider, outputs=motor_status)
+        btn_back.click(lambda s: (motors.backward(s), f"▼ REV {s:.2f}")[1], inputs=speed_slider, outputs=motor_status)
+        btn_left.click(lambda s: (motors.left(s), f"◀ L {s:.2f}")[1], inputs=speed_slider, outputs=motor_status)
+        btn_right.click(lambda s: (motors.right(s), f"▶ R {s:.2f}")[1], inputs=speed_slider, outputs=motor_status)
+        btn_halt.click(lambda: (motors.stop(), "■ STOP")[1], outputs=motor_status)
+        btn_spin_l.click(lambda s: (motors._send(-s, s), f"↺ SPIN {s:.2f}")[1], inputs=speed_slider, outputs=motor_status)
+        btn_spin_r.click(lambda s: (motors._send(s, -s), f"↻ SPIN {s:.2f}")[1], inputs=speed_slider, outputs=motor_status)
 
-        # ── Live polling timers ────────────────────────────────────────────
-        gr.Timer(1.0).tick(get_webcam,             outputs=webcam_img)
-        gr.Timer(1.0).tick(get_pantilt,            outputs=pantilt_img)
-        gr.Timer(1.0).tick(get_eric,               outputs=eric_says_box)
-        gr.Timer(1.5).tick(get_log,                outputs=log_box)
-        gr.Timer(0.5).tick(get_motor_telemetry,    outputs=motor_display)
-        gr.Timer(1.0).tick(get_lidar_html,         outputs=lidar_display)
-        gr.Timer(1.0).tick(get_oakd_html,          outputs=oakd_display)
+        # Live polling
+        gr.Timer(1.0).tick(get_webcam, outputs=webcam_img)
+        gr.Timer(1.0).tick(get_pantilt, outputs=pantilt_img)
+        gr.Timer(1.0).tick(get_eric, outputs=eric_says_box)
+        gr.Timer(1.5).tick(get_log, outputs=log_box)
+        gr.Timer(0.5).tick(get_motor_telemetry, outputs=motor_display)
+        gr.Timer(1.0).tick(get_lidar_html, outputs=lidar_display)
+        gr.Timer(1.0).tick(get_oakd_html, outputs=oakd_display)
         gr.Timer(2.0).tick(get_module_status_html, outputs=module_status)
 
     return demo
-
 
 # ─── Launch ───────────────────────────────────────────────────────────────────
 
@@ -961,6 +818,6 @@ def launch():
         server_port=GRADIO_PORT,
         show_error=True,
         quiet=False,
-        theme=gr.themes.Base(primary_hue="green", neutral_hue="green"),
+        theme=gr.themes.Base(primary_hue="cyan", neutral_hue="slate"),
         css=_CSS,
     )
