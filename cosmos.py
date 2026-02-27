@@ -338,8 +338,8 @@ def get_buffered_frames(device: int, n: int = 6) -> list[str]:
 #           1 fps is enough to keep the V4L2 kernel buffer drained without
 #           wasting any CPU on frames that will never be used.
 _CAMERA_FPS = {
-    CAMERA_PANTILT: 5.0,
-    CAMERA_WEBCAM:  1.0,
+    CAMERA_PANTILT: 10.0,  # raised from 5.0 — fresh frame every 100ms, reduces blur on capture
+    CAMERA_WEBCAM:   1.0,
 }
 
 

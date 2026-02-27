@@ -2073,7 +2073,7 @@ def _capture_sharp(device: int, retries: int = MAX_BLUR_RETRIES) -> str | None:
             return f   # sharp enough
         log.info(f"Blurry frame on cam {device} (attempt {attempt+1}) — waiting and retrying...")
         best = f       # keep as fallback
-        time.sleep(0.5)
+        time.sleep(0.8)  # raised from 0.5 — allow chassis vibration to fully damp
     return best  # return best we got even if still blurry
 
 
@@ -2173,14 +2173,14 @@ def _scan_360_pantilt() -> dict:
     _ui("status", "360 SCANNING")
     motors.oled(0, "360 Scan")
     motors.stop()
-    time.sleep(0.2)
+    time.sleep(0.5)  # raised from 0.2 — chassis damping before 360 sweep capture
     log.info("Starting pan-tilt 360 scan — async inference pipeline")
     log_mission_event("scan_360_start", "async sweep 7×30° + 180° chassis")
 
     # ── Constants ─────────────────────────────────────────────────────────────
     PAN_STEPS    = [-90, -60, -30, 0, 30, 60, 90]
     TILT_GROUND  = 15   # fixed ground-level tilt throughout sweep — no tilt changes
-    PAN_SETTLE   = 0.25 # seconds after pantilt() before capture
+    PAN_SETTLE   = 0.40 # seconds after pantilt() before capture — raised from 0.25 for servo + frame settle
 
     def _pan_to_chassis_turn_sec(pan: int) -> float:
         return abs(pan) / 90.0 * TURN_90_SEC
@@ -4001,7 +4001,7 @@ def _mission_loop():
             _ms.nav_clips_since_scan = 0
             _ms.scans_since_360 += 1
             motors.stop()
-            time.sleep(0.3)
+            time.sleep(0.5)  # raised from 0.3 — chassis damping before capture
 
             do_360 = (_ms.empty_scans >= EMPTY_SCAN_LIMIT or
                       _ms.scans_since_360 >= SCANS_BEFORE_360)
