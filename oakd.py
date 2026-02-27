@@ -252,11 +252,11 @@ def init_oakd() -> bool:
         mono_left.setResolution(
             dai.MonoCameraProperties.SensorResolution.THE_400_P)
         mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
-        mono_left.setFps(15)
+        mono_left.setFps(10)
         mono_right.setResolution(
             dai.MonoCameraProperties.SensorResolution.THE_400_P)
         mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
-        mono_right.setFps(15)
+        mono_right.setFps(10)
 
         stereo.setLeftRightCheck(True)
         stereo.setExtendedDisparity(False)
