@@ -1,0 +1,5 @@
+ERIC — Edge Robotics Innovation by Cosmos
+ERIC is a tracked ground robot that runs NVIDIA Cosmos Reason 2 fully at the edge — no cloud, no server, no internet. A plain-English mission briefing is all it needs. Cosmos handles everything else: parsing multi-step goals, navigating via live camera frames, scanning 360° across 42 positions, escaping obstacles, conducting character conversations, and confirming targets before triggering alerts.
+Cosmos is not just the object detector — it is the entire decision layer. Navigation commands, obstacle escape angles, eye-contact gating, false-positive rejection, and mission completion announcements all flow through a single 2B VLM running at 16–17 tokens/sec on a $250 Jetson Orin Nano.
+The demo tests open-world object search: ERIC locates a target specified only by natural language description — no pre-trained classifier, no environment map. A size- and colour-matched decoy is placed in plain sight with no briefing hint; Cosmos must discriminate on shape and feature reasoning alone. The target is partially occluded and wrapped in reflective material.
+Hardware total: under $800 CAD. Built solo in 3 days.
