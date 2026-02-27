@@ -2611,6 +2611,92 @@ def _scan_360_video_sweep() -> dict:
         return dict(_SCAN_FALLBACK)
 
 
+def _circumnavigate_obstacle() -> bool:
+    """
+    Attempt to peek around a blocking obstacle (e.g. a cardboard box) by
+    side-stepping left then right, doing a quick scan from each position.
+
+    Only runs when YAML flag  circumnavigate_on_empty: true  is set.
+    Completely inert for all other missions — the flag is False by default.
+
+    SLAM-safe: all movement goes through _move_forward() and
+    _turn_nav2_or_direct() which already support Nav2 goals.
+    When SLAM is added those calls automatically use the costmap —
+    no changes needed here.
+
+    Strategy (tuned for a ~30cm wide box at ~1–2m distance):
+      1. Side-step LEFT  → quick scan  → found? return True
+      2. Return to centre
+      3. Side-step RIGHT → quick scan  → found? return True
+      4. Return to centre
+      5. If still nothing, return False so the normal 360 runs as fallback
+
+    Tune SIDE_STEP_SEC and SIDE_DIST_M in the YAML or here for your room.
+
+    Returns True if the target was found during circumnavigation so the
+    caller can call _process_scan() on the result instead of a 360.
+    """
+    if not _ms.mission_flags.get("circumnavigate_on_empty", False):
+        return False
+
+    # ── Tunable constants ─────────────────────────────────────────────────────
+    SIDE_STEP_SEC  = float(_ms.mission_flags.get("circum_step_sec",  1.8))
+    SIDE_DIST_M    = float(_ms.mission_flags.get("circum_dist_m",    0.4))
+    FORWARD_SEC    = float(_ms.mission_flags.get("circum_forward_sec", 0.0))
+
+    log.info("🔄 Circumnavigation: trying to peek around obstacle")
+    log_mission_event("circumnavigate_start", f"step_sec={SIDE_STEP_SEC} dist_m={SIDE_DIST_M}")
+    _ui("log", "🔄 Obstacle blocking — peeking around it...")
+    _ui("status", "CIRCUMNAVIGATING")
+    motors.oled(0, "Peek around")
+
+    # Optional short forward nudge before side-stepping (closes distance to box)
+    if FORWARD_SEC > 0:
+        _move_forward(duration_sec=FORWARD_SEC, distance_m=SIDE_DIST_M * 0.5)
+        motors.stop()
+        time.sleep(0.3)
+
+    for side, turn_fwd, turn_back in [
+        ("left",  "left",  "right"),
+        ("right", "right", "left"),
+    ]:
+        if not _ms.mission_active:
+            break
+
+        motors.oled(1, f"Peek {side}")
+        _ui("log", f"   Stepping {side}...")
+
+        # Step sideways
+        _turn_nav2_or_direct(turn_fwd, SIDE_STEP_SEC)
+        motors.stop()
+        time.sleep(0.4)   # settle before capture
+
+        # Quick scan from new position
+        _ui("log", f"   Scanning from {side} position...")
+        scan = _quick_scan()
+
+        if scan.get("target_visible"):
+            log.info(f"🎯 Circumnavigate: target found from {side} position!")
+            log_mission_event("circumnavigate_found", f"side={side}")
+            _ui("log", f"✅ Found from {side}! Returning to centre then approaching")
+            # Return to centre so approach starts from a known heading
+            _turn_nav2_or_direct(turn_back, SIDE_STEP_SEC)
+            motors.stop()
+            time.sleep(0.3)
+            _process_scan(scan, from_360=True)
+            return True
+
+        _ui("log", f"   Nothing from {side} — returning to centre")
+        # Return to centre before trying the other side
+        _turn_nav2_or_direct(turn_back, SIDE_STEP_SEC)
+        motors.stop()
+        time.sleep(0.3)
+
+    log_mission_event("circumnavigate_failed", "target not found from either side")
+    _ui("log", "🔄 Circumnavigation: no target found — falling back to 360 scan")
+    return False
+
+
 def _best_360_scan() -> dict:
     """
     Route to the correct 360° scan strategy based on mission YAML.
@@ -4248,7 +4334,18 @@ def _mission_loop():
                       _ms.scans_since_360 >= SCANS_BEFORE_360)
 
             if do_360:
+                # ── Try circumnavigation first (only if YAML flag set) ─────────
+                # Peeks around the blocking obstacle before committing to a full
+                # 360. If it finds the target, _process_scan() is called inside
+                # _circumnavigate_obstacle() and we skip the 360 entirely.
                 if _ms.empty_scans >= EMPTY_SCAN_LIMIT:
+                    if _circumnavigate_obstacle():
+                        _ms.scans_since_360 = _ms.empty_scans = 0
+                        if _ms.mission_active and _ms.mission_state == State.SEARCHING:
+                            if not _void_check()["void"]:
+                                if _safe_to_fwd():
+                                    motors.forward(MOTOR_SPEED_SLOW)
+                        continue   # back to top of loop — target handled
                     eric_say("Nothing found. Performing a full 360 scan.")
                 else:
                     _ui("log", "Periodic 360 scan...")
