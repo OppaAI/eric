@@ -1,105 +1,56 @@
 ```mermaid
 flowchart TD
 
-    START(["🤖 ERIC POWERS ON"])
-    LOAD["📋 Load rescue_pikachu.yaml"]
-    SET_BRIEF["📡 Set Mission Briefing in Cosmos"]
+    START(["🤖 ERIC"])
 
-    START --> LOAD --> SET_BRIEF
-
-    subgraph SWEEP ["STAGE 1 — INITIAL AWARENESS SWEEP"]
-        INIT_SWEEP["📷 Pan-tilt ±60° — 5 frames captured"]
-        COSMOS_SWEEP[["🟩 COSMOS REASON2 VLM
-        Analyse 5 frames
-        target_visible? · clearest_direction?
-        physical_reasoning logged"]]
-        INIT_SWEEP --> COSMOS_SWEEP
+    subgraph SEARCH ["🔍 SEARCH"]
+        SWEEP[["🟩 COSMOS REASON2
+        Initial 360° sweep"]]
+        MOVE["🚗 Move forward
+        LiDAR guard · YOLO poll 100ms"]
+        QUICK[["🟩 COSMOS REASON2
+        Quick scan — stopped
+        every 3 move clips"]]
+        SCAN_360[["🟩 COSMOS REASON2
+        Full 360° scan
+        every 6 quick scans or 3 empty scans"]]
+        REJECT[["🟩 COSMOS REASON2
+        Wall-E rejected
+        ✗ boxy · ✗ no ears · ✗ no red cheeks"]]
     end
 
-    SET_BRIEF --> SWEEP
-
-    SWEEP_Q{"Target spotted?"}
-    COSMOS_SWEEP --> SWEEP_Q
-    SWEEP_Q -- "YES ⚡" --> CONFIRM
-    SWEEP_Q -- "NO" --> ANNOUNCE["🔊 TTS: Narrate observations
-    Announce first move direction"]
-
-    subgraph HUNT ["STAGE 2 — 360° TARGET HUNT LOOP"]
-        SCAN_360["🔄 Full 360° Scan
-        ±90° pan-tilt in 30° steps + 180° chassis
-        14 capture positions total"]
-        COSMOS_360[["🟩 COSMOS REASON2 VLM
-        14-frame video clip analysis
-        Spot yellow shapes at floor level
-        Handle occlusion & bag distortion"]]
-        MOVE["🚗 Forward Slow
-        Nav2 · LiDAR guard · YOLO 100ms poll"]
-        QUICK["📷 Quick Scan — motors stopped
-        Settle delay · dual-camera capture"]
-        COSMOS_QUICK[["🟩 COSMOS REASON2 VLM
-        Dual-frame inference
-        Yellow shape behind the box?
-        Look through plastic reflections"]]
-        EMPTY{"empty_scans ≥ threshold?"}
-
-        SCAN_360 --> COSMOS_360
-        COSMOS_360 -- "Nothing found" --> MOVE
-        MOVE --> QUICK --> COSMOS_QUICK
-        COSMOS_QUICK -- "Not found" --> EMPTY
-        EMPTY -- "NO" --> MOVE
-        EMPTY -- "YES" --> SCAN_360
+    subgraph FIND ["🎯 FIND"]
+        CONFIRM[["🟩 COSMOS REASON2
+        Pikachu confirmed
+        ✅ round · yellow · ears · red cheeks"]]
+        APPROACH["🚗 Approach
+        YOLO steering · LiDAR gate at 0.8m"]
     end
 
-    ANNOUNCE --> HUNT
-
-    subgraph REJECT ["WALL-E DECOY REJECTION"]
-        COSMOS_REJECT[["🟩 COSMOS REASON2 VLM
-        Yellow shape detected — check against briefing:
-        ✗ Boxy body  ✗ No ears  ✗ No red cheeks
-        → Not my target — continue search"]]
+    subgraph RESCUE ["🚨 RESCUE"]
+        SIREN["🚨 Siren · Announce location"]
+        PHOTO[["🟩 COSMOS REASON2
+        Dual-cam photo
+        Blur check · Auto-centre both cams"]]
+        STAY["🤖 Stay with Pikachu"]
     end
 
-    COSMOS_360 -- "Yellow shape spotted" --> COSMOS_REJECT
-    COSMOS_QUICK -- "Yellow shape spotted" --> COSMOS_REJECT
-    COSMOS_REJECT --> MOVE
+    START --> SWEEP
+    SWEEP -- "not found" --> MOVE
+    MOVE --> QUICK
+    QUICK -- "not found" --> MOVE
+    QUICK -- "empty scans threshold" --> SCAN_360
+    SCAN_360 -- "not found" --> MOVE
+    QUICK -- "yellow shape" --> REJECT
+    SCAN_360 -- "yellow shape" --> REJECT
+    REJECT -- "not Pikachu" --> MOVE
+    QUICK -- "candidate" --> CONFIRM
+    SCAN_360 -- "candidate" --> CONFIRM
+    SWEEP -- "candidate" --> CONFIRM
+    CONFIRM -- "false positive" --> MOVE
+    CONFIRM -- "confirmed ✅" --> APPROACH
+    APPROACH --> SIREN --> PHOTO --> STAY
 
-    subgraph CONFIRM ["STAGE 3 — PIKACHU CONFIRMATION"]
-        COSMOS_CONFIRM[["🟩 COSMOS REASON2 VLM
-        5-point confirmation checklist:
-        ✅ Round body  ✅ Bright yellow
-        ✅ Pointed black-tipped ears
-        ✅ Red circular cheek patches
-        ✅ Visible through plastic bag"]]
-        CONFIRM_Q{"All features confirmed?"}
-        COSMOS_CONFIRM --> CONFIRM_Q
-    end
-
-    COSMOS_360 -- "Pikachu candidate" --> CONFIRM
-    COSMOS_QUICK -- "Pikachu candidate" --> CONFIRM
-    CONFIRM_Q -- "NO — false positive" --> MOVE
-    CONFIRM_Q -- "YES ✅" --> RESCUE
-
-    subgraph RESCUE ["STAGE 4 — RESCUE SEQUENCE"]
-        APPROACH["🚗 Approach — slow forward
-        Pan-tilt tracks · 1.5m LiDAR threshold"]
-        STOP["🛑 Motors Stop
-        OLED: PIKACHU FOUND!"]
-        SIREN["🚨 Sound Rescue Siren"]
-        COSMOS_ANNOUNCE[["🟩 COSMOS REASON2 VLM
-        Generate rescue announcement
-        Exact location · Team Rocket defeated!
-        Personality shaped by briefing"]]
-        PHOTO["📸 Photograph Pikachu"]
-        STAY["🤖 Stay With Pikachu
-        Pika pika! PIKACHUUU! 🎉"]
-
-        APPROACH --> STOP --> SIREN --> COSMOS_ANNOUNCE --> PHOTO --> STAY
-    end
-
-    COMPLETE(["✅ MISSION COMPLETE"])
-    STAY --> COMPLETE
-
-    classDef cosmos fill:#1a3a00,stroke:#76b900,stroke-width:3px,color:#b8e060
-
-    class COSMOS_SWEEP,COSMOS_360,COSMOS_QUICK,COSMOS_REJECT,COSMOS_CONFIRM,COSMOS_ANNOUNCE cosmos
+    classDef cosmos fill:#76b900,stroke:#76b900,stroke-width:3px,color:#000000
+    class SWEEP,QUICK,SCAN_360,REJECT,CONFIRM,PHOTO cosmos
 ```
