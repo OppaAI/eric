@@ -115,34 +115,21 @@ def init_odom() -> bool:
         if not rclpy.ok():
             rclpy.init()
 
-        # Reuse existing ROS2 node if Nav2/LiDAR already created one
-        try:
-            from nav2 import _node as nav2_node
-            if nav2_node:
-                _node = nav2_node
-                log.info("Odom: reusing Nav2 ROS2 node")
-            else:
-                _node = rclpy.create_node("eric_odom")
-        except Exception:
-            _node = rclpy.create_node("eric_odom")
+        _node = rclpy.create_node("eric_odom")
 
         _odom_pub       = _node.create_publisher(Odometry, "/odom", 10)
         _tf_broadcaster = TransformBroadcaster(_node)
 
-        # Start ROS2 spin only if not already spinning
-        try:
-            from nav2 import _ros_thread as nav2_thread
-            if nav2_thread and nav2_thread.is_alive():
-                log.info("Odom: ROS2 already spinning via Nav2")
-            else:
-                raise Exception("nav2 not spinning")
-        except Exception:
-            _ros_thread = threading.Thread(
-                target=lambda: rclpy.spin(_node),
-                daemon=True,
-                name="odom-ros-spin"
-            )
-            _ros_thread.start()
+        # Start ROS2 executor in background thread
+        import rclpy.executors
+        _executor = rclpy.executors.SingleThreadedExecutor()
+        _executor.add_node(_node)
+        _ros_thread = threading.Thread(
+            target=_executor.spin,
+            daemon=True,
+            name="odom-ros-spin"
+        )
+        _ros_thread.start()
 
         _last_time = time.monotonic()
 
@@ -191,14 +178,21 @@ def _uart_reader_loop():
                 # Fallback: integrate from commanded speeds
                 _integrate_from_commanded()
                 time.sleep(0.05)   # 20Hz when using fallback
+            # Always publish at steady rate — SLAM needs continuous /odom
+            with _lock:
+                x, y, theta, vx, vtheta = _x, _y, _theta, _vx, _vtheta
+            _publish_odom(x, y, theta, vx, vtheta)
         except Exception as e:
             log.debug(f"Odom UART loop error: {e}")
             time.sleep(0.1)
 
 
 def _read_from_uart(ser):
-    """Read one line from UART and process if it's a speed feedback packet."""
+    """Read one line from UART only if data is waiting — never blocks."""
     try:
+        if ser.in_waiting == 0:
+            time.sleep(0.02)   # 50Hz polling when idle
+            return
         line = ser.readline().decode("utf-8", errors="ignore").strip()
         if not line:
             return

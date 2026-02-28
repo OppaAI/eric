@@ -160,11 +160,11 @@ def init_slam() -> bool:
         from nav_msgs.msg import OccupancyGrid
 
         try:
-            from nav2 import _node as nav2_node
-            if nav2_node:
-                _node = nav2_node
+            from odom import _node as odom_node
+            if odom_node:
+                _node = odom_node
             else:
-                _node = rclpy.create_node("eric_slam_monitor")
+                raise Exception("odom node not ready")
         except Exception:
             _node = rclpy.create_node("eric_slam_monitor")
 
