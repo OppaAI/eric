@@ -1146,6 +1146,13 @@ def start_mission(briefing: str, mission_name: str = ""):
         return "No mission briefing provided."
 
     _ms.reset_for_new_mission()
+
+    # Always reset Cosmos context at mission start — belt-and-suspenders.
+    # stop_mission() does this too, but if the previous mission ended
+    # unexpectedly (exception, crash) this ensures a clean slate regardless.
+    from cosmos import reset_mission_context
+    reset_mission_context()
+
     try:
         from avoidance import reset_avoid_counter
         reset_avoid_counter()
@@ -1220,9 +1227,69 @@ def start_mission(briefing: str, mission_name: str = ""):
 
 
 def stop_mission():
+    """
+    Cleanly stop the current mission and fully reset all runtime state.
+
+    Fixes applied here:
+      1. Cancel pending_nav future — prevents stale nav result bleeding into
+         the next mission's first loop iteration.
+      2. stop_alarm() — ensures siren/alert from a find doesn't carry into
+         next mission startup.
+      3. Recycle _cosmos_executor — cancels all in-flight Cosmos threads and
+         creates a fresh pool. Root cause of Jetson overload after 3 missions:
+         zombie futures accumulate, burning GPU/CPU while new ones queue up.
+      4. Flush vLLM KV cache — releases GPU memory held by the previous
+         mission's context. Biggest contributor to slowdown by mission 3.
+      5. reset_mission_context() — wipes _system_prompt back to base so the
+         next mission's acknowledgement call has zero memory of this mission.
+      6. gc.collect() — releases numpy arrays, base64 frames, and dicts still
+         referenced by completed futures.
+    """
+    global _cosmos_executor
+
     _ms.mission_active = False
     _ms.mission_state  = State.IDLE
     motors.stop()
+
+    # 1. Cancel pending nav future
+    if _ms.pending_nav is not None:
+        _ms.pending_nav.cancel()
+        _ms.pending_nav = None
+        log.info("stop_mission: pending nav future cancelled")
+
+    # 2. Stop any running alarm
+    try:
+        stop_alarm()
+    except Exception as _exc:
+        log.debug(f"stop_alarm error: {_exc}")
+
+    # 3. Recycle executor — kills all zombie Cosmos threads
+    try:
+        _cosmos_executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        _cosmos_executor.shutdown(wait=False)   # Python < 3.9
+    _cosmos_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="cosmos"
+    )
+    log.info("stop_mission: cosmos executor recycled — zombie threads cleared")
+
+    # 4. Flush vLLM KV cache
+    try:
+        import requests as _req
+        vllm_base = VLLM_URL.rstrip("/").rsplit("/", 1)[0]
+        _req.post(f"{vllm_base}/reset_prefix_cache", timeout=5)
+        log.info("stop_mission: vLLM KV cache flushed")
+    except Exception as _exc:
+        log.debug(f"vLLM cache flush skipped ({_exc})")
+
+    # 5. Reset Cosmos system prompt — no cross-mission memory
+    from cosmos import reset_mission_context
+    reset_mission_context()
+
+    # 6. Python GC
+    import gc; gc.collect()
+    log.info("stop_mission: GC collected")
+
     # Cancel any in-progress Nav2 goal
     try:
         from config import USE_NAV2
@@ -1230,8 +1297,9 @@ def stop_mission():
             from nav2 import cancel_goal, nav2_available
             if nav2_available():
                 cancel_goal()
-    except Exception as _exc:  # nav2
+    except Exception as _exc:
         log.debug(f"nav2 unavailable: {_exc}")
+
     motors.lights(0, 0)
     motors.pantilt(0, 5)
     motors.oled(0, "ERIC STOPPED")
@@ -3270,6 +3338,28 @@ def _handle_mission_complete(obj_name):
     end_mission_log(completed=True)
 
     _ms.mission_active = False
+
+    # Same cleanup as stop_mission() — recycle executor, flush cache, GC
+    # so the Jetson is clean before the operator starts the next mission.
+    global _cosmos_executor
+    try:
+        _cosmos_executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        _cosmos_executor.shutdown(wait=False)
+    _cosmos_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="cosmos"
+    )
+    try:
+        import requests as _req
+        vllm_base = VLLM_URL.rstrip("/").rsplit("/", 1)[0]
+        _req.post(f"{vllm_base}/reset_prefix_cache", timeout=5)
+    except Exception:
+        pass
+    from cosmos import reset_mission_context
+    reset_mission_context()
+    import gc; gc.collect()
+    log.info("mission_complete: executor recycled, cache flushed, GC collected")
+
     _ui("status", "MISSION COMPLETE")
     motors.oled(0, "TARGET FOUND!")
     motors.oled(1, "Mission done!")
