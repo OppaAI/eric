@@ -239,76 +239,107 @@ _recording_final_path = ""
 
 
 # ── Battery ──────────────────────────────────────────────────────────────────
-# Zero serial usage: we never open the UART ourselves.
+# The Waveshare MCU broadcasts battery voltage continuously on /dev/ttyTHS1.
+# Each JSON packet arrives null-padded in 128-byte frames; the Jetson UART
+# drops the leading bytes, so only the tail ('NNNN}') arrives reliably.
+# We extract the voltage with a regex rather than JSON parsing.
 #
-# Priority order:
-#  1. motors.base_data["v"]  — Waveshare BaseController caches latest feedback
-#  2. /tmp/eric_battery.json — shared file any other process can write to:
-#                              echo '{"v":12.3}' > /tmp/eric_battery.json
-#  3. motors._base_data, motors.base_data["BatteryVoltage"] etc. (variants)
-#
-# No serial port opened → zero conflict with other scripts, zero extra RAM.
-# The thread wakes once every 10 s and does a dict lookup + file stat.
+# 3S LiPo thresholds:
+#   HIGH     > 75%   12.19–12.60 V   cyan   #00ffff
+#   MEDIUM   > 40%   11.67–12.19 V   green  #39ff14
+#   LOW      > 15%   11.07–11.67 V   amber  #ff9900
+#   CRITICAL ≤ 15%   10.50–11.07 V   red    #ff2d55
+
+import re as _re
+import serial as _serial
+
+_BATT_V_MAX  = 12.6
+_BATT_V_MIN  = 10.5
+_BATT_PORT   = os.getenv('SERIAL_PORT', '/dev/ttyTHS1')
+_BATT_BAUD   = 115200
 
 _battery_voltage = None
 _battery_lock    = threading.Lock()
+_battery_ser     = None   # kept open so FIFO stays primed
 
-_BATTERY_FILE = os.getenv("BATTERY_FILE", "/tmp/eric_battery.json")
 
 def _battery_poll_loop():
-    global _battery_voltage
-
-    def _read():
-        # Check every attribute variant the motors module might expose
-        for attr in ("base_data", "_base_data"):
-            try:
-                d = getattr(motors, attr, None)
-                if isinstance(d, dict):
-                    for key in ("v", "voltage", "BatteryVoltage"):
-                        if key in d:
-                            v = float(d[key])
-                            if 5.0 < v < 25.0:
-                                return v
-            except Exception:
-                pass
-
-        # Shared file fallback — written by whichever process owns the UART
-        try:
-            if os.path.exists(_BATTERY_FILE):
-                if time.time() - os.path.getmtime(_BATTERY_FILE) < 120:
-                    with open(_BATTERY_FILE) as f:
-                        d = json.load(f)
-                    for key in ("v", "voltage", "BatteryVoltage"):
-                        if key in d:
-                            v = float(d[key])
-                            if 5.0 < v < 25.0:
-                                return v
-        except Exception:
-            pass
-
-        return None
-
-    time.sleep(5)  # let motors init first
-    while True:
-        v = _read()
-        if v is not None:
-            with _battery_lock:
-                _battery_voltage = round(v, 2)
-            log.debug("Battery: %.2fV", _battery_voltage)
-        time.sleep(10)
+    global _battery_voltage, _battery_ser
+    try:
+        ser = _serial.Serial(_BATT_PORT, _BATT_BAUD,
+            parity=_serial.PARITY_NONE,
+            stopbits=_serial.STOPBITS_ONE,
+            bytesize=_serial.EIGHTBITS,
+            timeout=0)
+        ser.reset_input_buffer()
+        _battery_ser = ser
+        log.info("Battery: serial opened on %s", _BATT_PORT)
+        buf = b""
+        while True:
+            n = ser.in_waiting
+            if n:
+                buf += ser.read(n)
+                # Strip nulls and scan for voltage tail pattern: digits followed by '}'
+                text    = buf.replace(b'\x00', b'').decode('utf-8', errors='replace')
+                compact = ''.join(text.split())
+                for m in _re.findall(r'(\d+)\}', compact):
+                    val = int(m)
+                    if 900 <= val <= 1350:          # 9.00–13.50 V sanity range
+                        with _battery_lock:
+                            _battery_voltage = round(val / 100.0, 2)
+                # Keep buffer bounded
+                if len(buf) > 1024:
+                    buf = buf[-512:]
+            else:
+                time.sleep(0.05)
+    except Exception as e:
+        log.warning("Battery thread error: %s", e)
 
 threading.Thread(target=_battery_poll_loop, daemon=True, name="battery").start()
+
+
+def _battery_level(pct: int) -> tuple[str, str, str]:
+    """Return (label, color, glow_color) for a battery percentage."""
+    if pct > 75:
+        return "HIGH",     "#00ffff", "#00ffff55"   # bright cyan
+    elif pct > 40:
+        return "MEDIUM",   "#00aacc", "#00aacc55"   # mid cyan
+    elif pct > 15:
+        return "LOW",      "#006688", "#00668855"   # dark cyan
+    else:
+        return "CRITICAL", "#ff0066", "#ff006655"   # stop button magenta-red
+
 
 def get_battery_html() -> str:
     with _battery_lock:
         v = _battery_voltage
-    mono = "font-family:'Share Tech Mono',monospace;font-size:0.75rem"
+    mono = "font-family:'Share Tech Mono',monospace"
     if v is None:
-        return f'<span style="color:#4a5568;{mono}">BATT --.-V</span>'
-    pct   = max(0, min(100, int((v - 9.0) / (12.6 - 9.0) * 100)))
-    color = "#39ff14" if pct > 60 else ("#ff6b00" if pct > 25 else "#ff2d55")
-    bar   = "█" * (pct // 10) + "░" * (10 - pct // 10)
-    return f'<span style="color:{color};{mono}">BATT {v}V [{bar}] {pct}%</span>'
+        return (
+            f'<div style="{mono};font-size:0.72rem;color:#4a5568;'
+            f'background:#0f1215;border:1px solid #1e2530;border-radius:4px;'
+            f'padding:6px 10px;letter-spacing:0.08em">'
+            f'⚡ BATT &nbsp;<span style="color:#2a3545">-- . - V</span>'
+            f'</div>'
+        )
+    pct              = max(0, min(100, int((v - _BATT_V_MIN) / (_BATT_V_MAX - _BATT_V_MIN) * 100)))
+    label, color, glow = _battery_level(pct)
+    filled           = round(pct / 10)
+    bar_filled       = f'<span style="color:{color}">{"█" * filled}</span>'
+    bar_empty        = f'<span style="color:#2a3545">{"░" * (10 - filled)}</span>'
+    return (
+        f'<div style="{mono};font-size:0.72rem;'
+        f'background:#0a0c0e;border:1px solid {color}66;border-radius:4px;'
+        f'padding:6px 12px;box-shadow:0 0 12px {glow}, 0 0 24px {color}22;letter-spacing:0.06em;'
+        f'display:flex;align-items:center;gap:10px">'
+        f'<span style="color:{color};font-size:0.8em;letter-spacing:0.2em;'
+        f'text-shadow:0 0 8px {color},0 0 16px {color}88">⚡ {label}</span>'
+        f'<span style="color:#c8d6e5;font-size:1.05em;font-weight:bold;'
+        f'text-shadow:0 0 6px #c8d6e5aa">{v:.2f}V</span>'
+        f'<span style="font-size:0.85em;letter-spacing:0;'
+        f'text-shadow:0 0 6px {color}66">{bar_filled}{bar_empty}</span>'
+        f'</div>'
+    )
 
 
 # ── Lights ────────────────────────────────────────────────────────────────────
@@ -455,15 +486,16 @@ CUSTOM_CSS = """
 @import url('https://fonts.googleapis.com/css2?family=Share+Tech+Mono&family=Barlow+Condensed:wght@300;400;600;700;900&display=swap');
 
 :root {
-    --bg:     #0a0c0e;
-    --panel:  #0f1215;
-    --border: #1e2530;
-    --accent: #00e5ff;
+    --bg:     #050508;
+    --panel:  #161622;
+    --border: #00ffff22;
+    --accent: #00ffff;
+    --magenta:#ff00ff;
     --green:  #39ff14;
-    --danger: #ff2d55;
-    --warn:   #ff6b00;
-    --text:   #c8d6e5;
-    --dim:    #4a5568;
+    --danger: #ff0066;
+    --warn:   #ff9900;
+    --text:   #ccffff;
+    --dim:    #7a9aaa;
 }
 
 *, *::before, *::after { box-sizing: border-box; }
@@ -475,21 +507,46 @@ CUSTOM_CSS = """
 
 body, .gradio-container {
     background: var(--bg) !important;
-    font-family: 'Barlow Condensed', sans-serif !important;
+    font-family: 'Share Tech Mono', 'Courier New', monospace !important;
     margin: 0 !important; padding: 0 !important;
+    background-image:
+        linear-gradient(rgba(0,255,255,0.06) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,255,255,0.06) 1px, transparent 1px),
+        radial-gradient(ellipse at 50% 0%, rgba(0,255,255,0.06) 0%, transparent 50%);
+    background-size: 40px 40px, 40px 40px, 100% 100%;
 }
+/* CRT scanline */
 body::after {
     content:''; position:fixed; inset:0; pointer-events:none; z-index:9998;
-    background: repeating-linear-gradient(0deg,transparent,transparent 2px,
-        rgba(0,0,0,0.05) 2px,rgba(0,0,0,0.05) 4px);
+    background: repeating-linear-gradient(0deg,
+        rgba(0,255,255,0.012) 0px, rgba(0,255,255,0.012) 1px,
+        transparent 1px, transparent 3px);
 }
+footer, .built-with { display:none !important; }
 
 #eric-header {
     font-family:'Share Tech Mono',monospace;
     display:flex; align-items:center; justify-content:space-between;
-    padding:12px 20px 10px; border-bottom:1px solid var(--border); margin-bottom:8px;
+    padding:10px 20px 8px;
+    border-bottom:1px solid #ff00ff44;
+    margin-bottom:0;
 }
-#eric-title { color:var(--accent); letter-spacing:0.3em; font-size:1.15rem; }
+#eric-title {
+    color:#00ffff; letter-spacing:0.3em; font-size:1.3rem;
+    text-shadow: 0 0 10px #00ffff, 0 0 20px #00ffffaa, 0 0 40px #00ffff66;
+}
+
+/* Battery bar — sits right below the header title bar, full-width strip */
+#batt-html {
+    padding: 0 20px 8px !important;
+    margin: 0 !important;
+    display: flex !important;
+    justify-content: flex-end !important;
+    border-bottom: 1px solid #ff00ff22 !important;
+    margin-bottom: 8px !important;
+    background: transparent !important;
+}
+#batt-html > div { width: auto !important; }
 
 #status-box {
     font-family:'Share Tech Mono',monospace !important; font-size:0.85rem !important;
@@ -497,120 +554,165 @@ body::after {
     border:1px solid var(--border) !important; border-radius:4px !important;
     padding:10px 16px !important; text-align:center; min-height:42px !important;
     margin-bottom:10px;
+    text-shadow: 0 0 8px #00ffff55;
 }
 
 #camera-feed img { display:block !important; width:100% !important; border-radius:0 !important; }
 
+/* ── Stream / cam switch buttons ── */
 #btn-stream button {
     font-family:'Share Tech Mono',monospace !important; font-size:0.75rem !important;
     letter-spacing:0.12em !important; width:100% !important; margin-top:6px !important;
-    background:#0d2a1a !important; border:1px solid #1a5a30 !important;
-    color:#39ff14 !important; border-radius:4px !important;
-    transition:all 0.15s !important;
+    background:#002a1a !important; border:1px solid #39ff1488 !important;
+    color:#39ff14 !important; border-radius:3px !important; transition:all 0.15s !important;
+    box-shadow: 0 0 10px rgba(57,255,20,0.18), inset 0 0 8px rgba(57,255,20,0.06) !important;
+    text-shadow: 0 0 10px #39ff1499 !important;
 }
-#btn-stream button:hover { background:#133d24 !important; box-shadow:0 0 10px rgba(57,255,20,0.2) !important; }
+#btn-stream button:hover { box-shadow:0 0 20px rgba(57,255,20,0.35), 0 0 40px rgba(57,255,20,0.12) !important; border-color:#39ff14 !important; text-shadow:0 0 12px #39ff14 !important; }
 
 #btn-cam-switch button {
     font-family:'Share Tech Mono',monospace !important; font-size:0.75rem !important;
     letter-spacing:0.08em !important; width:100% !important; margin-top:6px !important;
-    background:#0d1a2a !important; border:1px solid #1a3a5a !important;
-    color:#00aacc !important; border-radius:4px !important;
-    transition:all 0.15s !important;
+    background:#001a2a !important; border:1px solid #00ffff88 !important;
+    color:#00eeff !important; border-radius:3px !important; transition:all 0.15s !important;
+    box-shadow: 0 0 10px rgba(0,255,255,0.15), inset 0 0 8px rgba(0,255,255,0.05) !important;
+    text-shadow: 0 0 10px #00ffff99 !important;
 }
-#btn-cam-switch button:hover { background:#0f2540 !important; box-shadow:0 0 10px rgba(0,170,204,0.2) !important; }
+#btn-cam-switch button:hover { box-shadow:0 0 20px rgba(0,255,255,0.3), 0 0 40px rgba(0,255,255,0.1) !important; border-color:#00ffff !important; text-shadow:0 0 12px #00ffff !important; }
 
 /* ── Drive buttons ── */
 .dpad-btn {
     font-family:'Share Tech Mono',monospace !important; font-size:1.4rem !important;
-    background:#131820 !important; border:1px solid var(--border) !important;
-    border-radius:4px !important; color:var(--dim) !important;
+    background:#0a0a0f !important; border:1px solid #00ffff44 !important;
+    border-radius:2px !important; color:#4a99bb !important;
     width:76px !important; height:76px !important; min-width:76px !important;
     transition:all 0.1s !important;
+    box-shadow: 0 0 6px rgba(0,255,255,0.08), inset 0 0 8px rgba(0,255,255,0.03) !important;
+    text-shadow: 0 0 8px #00ffff44 !important;
 }
-.dpad-btn:hover { background:#1a2535 !important; border-color:var(--accent) !important;
-    color:var(--accent) !important; box-shadow:0 0 12px rgba(0,229,255,0.15) !important; }
-.dpad-btn:active { background:#0d3a4a !important; transform:scale(0.95) !important; }
+.dpad-btn:hover { background:#001a1a !important; border-color:#00ffff !important;
+    color:#00ffff !important; box-shadow:0 0 20px rgba(0,255,255,0.35), 0 0 40px rgba(0,255,255,0.15), inset 0 0 12px rgba(0,255,255,0.08) !important;
+    text-shadow: 0 0 12px #00ffffff !important; }
+.dpad-btn:active { background:#003333 !important; transform:scale(0.95) !important; box-shadow:0 0 30px rgba(0,255,255,0.5) !important; }
 
 .stop-btn {
     font-family:'Share Tech Mono',monospace !important; font-size:1.1rem !important;
-    background:#120a0a !important; border:1px solid #3a1515 !important;
-    border-radius:4px !important; color:#5a2020 !important;
+    background:#0a0005 !important; border:1px solid #ff006644 !important;
+    border-radius:2px !important; color:#cc2255 !important;
     width:76px !important; height:76px !important; min-width:76px !important;
     transition:all 0.1s !important;
+    box-shadow: 0 0 6px rgba(255,0,102,0.1), inset 0 0 8px rgba(255,0,102,0.04) !important;
+    text-shadow: 0 0 8px #ff006644 !important;
 }
-.stop-btn:hover { border-color:var(--danger) !important; color:var(--danger) !important;
-    box-shadow:0 0 12px rgba(255,45,85,0.2) !important; }
-.stop-btn:active { transform:scale(0.95) !important; }
+.stop-btn:hover { border-color:#ff0066 !important; color:#ff0066 !important;
+    box-shadow:0 0 20px rgba(255,0,102,0.4), 0 0 40px rgba(255,0,102,0.15), inset 0 0 12px rgba(255,0,102,0.1) !important;
+    text-shadow: 0 0 12px #ff0066ff !important; }
+.stop-btn:active { transform:scale(0.95) !important; box-shadow:0 0 30px rgba(255,0,102,0.6) !important; }
 
 .spin-btn {
     font-family:'Share Tech Mono',monospace !important; font-size:1.3rem !important;
-    background:#0d1520 !important; border:1px solid #1a3040 !important;
-    border-radius:4px !important; color:#2a5060 !important;
+    background:#0a0a0f !important; border:1px solid #ff00ff44 !important;
+    border-radius:2px !important; color:#bb22bb !important;
     width:76px !important; height:76px !important; min-width:76px !important;
     transition:all 0.1s !important;
+    box-shadow: 0 0 6px rgba(255,0,255,0.08), inset 0 0 8px rgba(255,0,255,0.03) !important;
+    text-shadow: 0 0 8px #ff00ff44 !important;
 }
-.spin-btn:hover { border-color:#00aacc !important; color:#00aacc !important; }
-.spin-btn:active { transform:scale(0.95) !important; }
+.spin-btn:hover { border-color:#ff00ff !important; color:#ff00ff !important;
+    box-shadow:0 0 20px rgba(255,0,255,0.35), 0 0 40px rgba(255,0,255,0.15), inset 0 0 12px rgba(255,0,255,0.08) !important;
+    text-shadow: 0 0 12px #ff00ffff !important; }
+.spin-btn:active { transform:scale(0.95) !important; box-shadow:0 0 30px rgba(255,0,255,0.5) !important; }
 
-/* ── Pan-tilt buttons — amber ── */
+/* ── Pan-tilt buttons — amber/gold ── */
 .pt-btn {
     font-family:'Share Tech Mono',monospace !important; font-size:1.2rem !important;
-    background:#130f05 !important; border:1px solid #2a2010 !important;
-    border-radius:4px !important; color:#4a3a10 !important;
+    background:#0a0a0f !important; border:1px solid #ff990044 !important;
+    border-radius:2px !important; color:#cc8800 !important;
     width:60px !important; height:60px !important; min-width:60px !important;
     transition:all 0.1s !important;
+    box-shadow: 0 0 5px rgba(255,153,0,0.08), inset 0 0 6px rgba(255,153,0,0.03) !important;
+    text-shadow: 0 0 8px #ff990044 !important;
 }
 .pt-btn:hover { border-color:#ff9900 !important; color:#ff9900 !important;
-    box-shadow:0 0 10px rgba(255,153,0,0.15) !important; }
-.pt-btn:active { transform:scale(0.95) !important; }
+    box-shadow:0 0 18px rgba(255,153,0,0.35), 0 0 36px rgba(255,153,0,0.12), inset 0 0 10px rgba(255,153,0,0.08) !important;
+    text-shadow: 0 0 10px #ff9900ff !important; }
+.pt-btn:active { transform:scale(0.95) !important; box-shadow:0 0 28px rgba(255,153,0,0.5) !important; }
 
 .pt-centre-btn {
     font-family:'Share Tech Mono',monospace !important; font-size:0.7rem !important;
-    background:#130f05 !important; border:1px solid #3a2a10 !important;
-    border-radius:4px !important; color:#6a5a20 !important;
+    background:#0a0a0f !important; border:1px solid #ff990044 !important;
+    border-radius:2px !important; color:#cc9922 !important;
     width:60px !important; height:60px !important; min-width:60px !important;
     letter-spacing:0.08em !important; transition:all 0.1s !important;
+    box-shadow: 0 0 5px rgba(255,153,0,0.06) !important;
 }
-.pt-centre-btn:hover { border-color:#ff9900 !important; color:#ff9900 !important; }
+.pt-centre-btn:hover { border-color:#ff9900 !important; color:#ff9900 !important;
+    box-shadow:0 0 15px rgba(255,153,0,0.3) !important; text-shadow:0 0 8px #ff9900 !important; }
 .pt-centre-btn:active { transform:scale(0.95) !important; }
 
 /* ── Speed radio ── */
 .speed-radio span.svelte-1gfkfd6 { display:none !important; }
 .speed-radio .wrap { gap:6px !important; justify-content:center !important; }
 .speed-radio label {
-    font-family:'Barlow Condensed',sans-serif !important; font-size:0.78rem !important;
+    font-family:'Share Tech Mono',monospace !important; font-size:0.72rem !important;
     letter-spacing:0.15em !important; text-transform:uppercase !important;
-    color:var(--dim) !important; background:#131820 !important;
-    border:1px solid var(--border) !important; border-radius:3px !important;
+    color:#aaddee !important; background:var(--panel) !important;
+    border:1px solid #00ffff44 !important; border-radius:2px !important;
     padding:6px 16px !important; cursor:pointer !important;
+    transition: all 0.15s !important;
 }
-.speed-radio label:hover { border-color:var(--accent) !important; color:var(--text) !important; }
+.speed-radio label:hover { border-color:var(--accent) !important; color:var(--text) !important;
+    box-shadow: 0 0 10px rgba(0,255,255,0.2) !important; text-shadow: 0 0 6px #00ffff88 !important; }
+
+/* ── Photo & Record buttons ── */
+#btn-photo button {
+    font-family:'Share Tech Mono',monospace !important; font-size:0.75rem !important;
+    background:#001a2a !important; border:1px solid #00ffff44 !important;
+    color:#00ffff !important; border-radius:3px !important; transition:all 0.15s !important;
+    box-shadow: 0 0 6px rgba(0,255,255,0.1) !important; text-shadow: 0 0 8px #00ffff55 !important;
+    width:100% !important; margin-bottom:4px !important;
+}
+#btn-photo button:hover { box-shadow:0 0 16px rgba(0,255,255,0.3), 0 0 32px rgba(0,255,255,0.1) !important;
+    border-color:#00ffff !important; text-shadow:0 0 10px #00ffff !important; }
+
+#circle-btn button {
+    font-family:'Share Tech Mono',monospace !important; font-size:0.75rem !important;
+    background:#2a0010 !important; border:1px solid #ff006644 !important;
+    color:#ff0066 !important; border-radius:3px !important; transition:all 0.15s !important;
+    box-shadow: 0 0 6px rgba(255,0,102,0.12) !important; text-shadow: 0 0 8px #ff006655 !important;
+    width:100% !important;
+}
+#circle-btn button:hover { box-shadow:0 0 16px rgba(255,0,102,0.3), 0 0 32px rgba(255,0,102,0.1) !important;
+    border-color:#ff0066 !important; text-shadow:0 0 10px #ff0066 !important; }
 
 /* ── Side panels ── */
-.side-panel { background:var(--panel); border:1px solid var(--border); border-radius:4px; padding:14px; }
-.side-panel label {
-    font-family:'Barlow Condensed',sans-serif !important; font-size:0.85rem !important;
-    letter-spacing:0.1em !important; text-transform:uppercase !important;
-    color:var(--dim) !important; transition:color 0.15s !important;
+.side-panel {
+    background:var(--panel); border:1px solid #ff00ff22;
+    border-radius:4px; padding:14px;
+    box-shadow: 0 0 10px rgba(255,0,255,0.04), inset 0 0 20px rgba(0,0,0,0.3);
 }
-.side-panel input:checked ~ label { color:#ffdd44 !important; }
+.side-panel label {
+    font-family:'Share Tech Mono',monospace !important; font-size:0.78rem !important;
+    letter-spacing:0.1em !important; text-transform:uppercase !important;
+    color:#aaddee !important; transition:color 0.15s !important;
+}
+.side-panel input:checked ~ label { color:#ff00ff !important; text-shadow:0 0 8px #ff00ff66 !important; }
 .section-header {
-    font-family:'Share Tech Mono',monospace; font-size:0.6rem; letter-spacing:0.2em;
-    color:var(--dim); text-transform:uppercase; padding-bottom:8px;
-    border-bottom:1px solid var(--border); margin-bottom:10px;
+    font-family:'Share Tech Mono',monospace; font-size:0.82rem; letter-spacing:0.18em;
+    color:#ff44ff; text-transform:uppercase; padding-bottom:8px; text-shadow:0 0 10px #ff00ff99;
+    border-bottom:1px solid #ff00ff44; margin-bottom:10px;
 }
 #gamepad-status {
     font-family:'Share Tech Mono',monospace; font-size:0.68rem; color:var(--dim);
     text-align:center; padding:6px 8px; border:1px solid var(--border);
     border-radius:3px; background:var(--panel); margin-top:8px; transition:all 0.3s;
 }
-#gamepad-status.connected { color:var(--green); border-color:var(--green); box-shadow:0 0 8px rgba(57,255,20,0.15); }
+#gamepad-status.connected { color:var(--green); border-color:var(--green); box-shadow:0 0 8px rgba(57,255,20,0.2); }
 #key-hints {
     font-family:'Share Tech Mono',monospace; font-size:0.6rem; color:var(--dim);
     text-align:center; letter-spacing:0.06em; padding:8px 0 2px;
     border-top:1px solid var(--border); margin-top:6px;
 }
-footer, .built-with { display:none !important; }
 
 /* ════════════════════════════════
    MOBILE
@@ -637,10 +739,10 @@ footer, .built-with { display:none !important; }
         position:fixed; top:0; left:0; right:0; z-index:100;
         display:flex !important; align-items:center; justify-content:space-between;
         padding:10px 14px;
-        background:linear-gradient(to bottom, rgba(0,0,0,0.75) 0%, transparent 100%);
-        font-family:'Share Tech Mono',monospace; font-size:0.72rem; color:var(--accent); letter-spacing:0.15em;
+        background:linear-gradient(to bottom, rgba(5,5,8,0.85) 0%, transparent 100%);
+        font-family:'Share Tech Mono',monospace; font-size:0.72rem; color:#00ffff; letter-spacing:0.15em;
     }
-    #mobile-hud-title { font-size:0.85rem; letter-spacing:0.3em; }
+    #mobile-hud-title { font-size:0.85rem; letter-spacing:0.3em; text-shadow:0 0 10px #00ffff88; }
 
     #mobile-speed {
         position:fixed; top:44px; right:14px; z-index:100;
@@ -1259,11 +1361,11 @@ def handle_raw_pt(raw: str) -> str:
 # ── Build UI ──────────────────────────────────────────────────────────────────
 with gr.Blocks(title="ERIC — Robot Teleoperation", css=CUSTOM_CSS) as demo:
 
-    gr.HTML(f'''
+    gr.HTML('''
     <div id="eric-header">
-        <div id="eric-title">ERIC <span style="color:#4a5568">/ CONTROL</span></div>
-        <div>{get_battery_html()}</div>
+        <div id="eric-title">ERIC <span style="color:#6a7a8a">/ CONTROL</span></div>
     </div>''')
+    batt_html = gr.HTML(get_battery_html(), elem_id="batt-html")
 
     with gr.Row(equal_height=False):
 
@@ -1344,7 +1446,7 @@ with gr.Blocks(title="ERIC — Robot Teleoperation", css=CUSTOM_CSS) as demo:
 
             with gr.Group(elem_classes=["side-panel"]):
                 gr.HTML('<div class="section-header">📡 &nbsp; Telemetry</div>')
-                batt_html = gr.HTML(get_battery_html(), elem_id="batt-html")
+                gr.HTML('<div id="telemetry-info" style="font-family:\'Share Tech Mono\',monospace;font-size:0.68rem;color:#5a7a8a;padding:4px 0">voltage in header ↑</div>')
 
             gr.HTML('<div style="height:10px"></div>')
 
@@ -1354,10 +1456,10 @@ with gr.Blocks(title="ERIC — Robot Teleoperation", css=CUSTOM_CSS) as demo:
                 circle_btn = gr.Button("⏺ Record", variant="stop", elem_id="circle-btn")
                 capture_status = gr.HTML(
                     '<div style="font-family:\'Share Tech Mono\',monospace;'
-                    'font-size:0.7rem;color:#4a5568;padding:4px 0">ready</div>'
+                    'font-size:0.7rem;color:#7a9aaa;padding:4px 0">ready</div>'
                 )
                 gr.HTML(f'<div style="font-family:\'Share Tech Mono\',monospace;'
-                        f'font-size:0.58rem;color:#2a3a4a;padding:2px 0 0">'
+                        f'font-size:0.58rem;color:#4a6677;padding:2px 0 0">'
                         f'📁 {_PHOTO_DIR}<br>🎥 {_VIDEO_DIR}</div>')
 
     # ── Timers ────────────────────────────────────────────────────────────────

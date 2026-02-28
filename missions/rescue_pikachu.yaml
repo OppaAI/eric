@@ -45,7 +45,7 @@ target_objects:
 photo_on_find:     true
 announce_location: true
 stay_with_target:  true
-generate_report:   false
+generate_report:   true
 
 # ── Circumnavigation — peek around the box to find hidden Pikachu ─────────────
 circumnavigate_on_empty: true   # enable box peek-around behaviour
@@ -56,7 +56,7 @@ circum_forward_sec:      0.0    # forward nudge before stepping (0 = disabled)
 scan_strategy:      target_hunt
 loop_mission:       false
 approach_on_detect: true
-detect_distance:    1.5   # metres — confirm visually before triggering
+detect_distance:    0.2   # metres — confirm visually before triggering
 
 
 characters:
@@ -70,11 +70,11 @@ mission_stages:
   - stage: 2
     goal: "Investigate any yellow shapes — confirm identity carefully before alarming"
   - stage: 3
-    goal: "Locate Pikachu in the plastic bag — look through reflections for the yellow figure"
+    goal: "Locate Pikachu for the yellow figure"
   - stage: 4
     goal: "Confirm: round, yellow, ears, red cheeks — sound the siren"
   - stage: 5
-    goal: "Photograph, announce location, stay with Pikachu"
+    goal: "Photograph, announce location, approach Pikachu, stay with Pikachu and continue to sound siren until help arrives"
 
 
 terrain:
