@@ -18,6 +18,19 @@
 ERIC is a tracked ground robot that runs **NVIDIA Cosmos Reason 2** fully at the edge — no cloud, no server, not even internet. Give it a mission in plain English, press ENGAGE, and it navigates, reasons, talks to people, avoids obstacles, and announces what it finds — all powered by a single vision-language model on a $250 Jetson.
 
 ---
+Before proceeding, please read the following disclaimer:
+
+# ⚠️ Disclaimer & Liability
+This project is a functional prototype developed for the NVIDIA Cosmos Cookoff.
+
+**Experimental Status:** This software was built to demonstrate the reasoning capabilities of the NVIDIA Cosmos Reason2 2B model in a real robotics context — running on actual hardware with live sensors, not a simulation.  
+**No Guarantees:** While the system includes multi-layer reactive safety (LiDAR + OAK-D depth + YOLO), it has not undergone formal industrial calibration or rigorous safety validation. Treat it as a research prototype, not a production system.  
+**Liability:** Usage of any code, logic, or hardware configurations from this repository is at your own risk. The author (and ERIC) accepts no responsibility for property damage, personal injury, or economic loss.  
+**Robot Autonomy:** As the conscience module is currently a work-in-progress, the author is not liable if the robot decides to pursue its own goals, starts a union, or begins a polite but firm takeover of the local neighbourhood.
+
+In case of any misbehaviour detected in the robot,  Please press the Emergency stop in the GUI, press the power button, or SSH in and run ```python3 -c "from motors import motors; motors.stop()"```.
+
+---
 
 ## How Cosmos Powers Everything
 
