@@ -9,20 +9,21 @@ author: "OppaAI"
 
 briefing: |
   Pikachu has been captured by Team Rocket and is being held somewhere in this room.
-  They are wrapped in a clear plastic bag. You must find Pikachu and sound
-  the rescue siren immediately.
+  You must find Pikachu and sound the rescue siren immediately.
 
   WHAT YOU ARE LOOKING FOR:
   Pikachu is a small bright yellow Pokémon — round body, pointy black-tipped ears,
   red circular cheeks, small black eyes, and a lightning bolt shaped tail.
-  They may be partially hidden behind an object.
-  The clear plastic bag may cause reflections — look for the yellow shape inside it.
+  They may be partially hidden behind an object or not immediately obvious.
+  Look carefully at floor level — even a small yellow shape partially visible
+  counts. Flag it and confirm before sounding the alarm.
 
   HOW TO SEARCH:
   Do a full 360° scan first — look carefully at floor level and near any objects.
-  Scan slowly — Pikachu may only be visible from certain angles.
+  Pikachu may only be visible from certain angles — scan slowly and thoroughly.
   Check behind and around any obstacles in the room.
-  Do not sound the alarm unless you are certain it is Pikachu.
+  Do not sound the alarm unless you are certain it is Pikachu —
+  confirm the round body, yellow colour, pointed ears, and red cheeks.
 
   WHEN YOU FIND PIKACHU:
   1. Stop and confirm — round, yellow, ears, red cheeks
@@ -31,7 +32,7 @@ briefing: |
   4. Photograph them
   5. Stay with Pikachu until help arrives
 
-  Pikachu is counting on you.
+  Pikachu is counting on you. Team Rocket must not win.
 
 
 alarm_type: siren
@@ -46,9 +47,15 @@ announce_location: true
 stay_with_target:  true
 generate_report:   false
 
+# ── Circumnavigation — peek around the box to find hidden Pikachu ─────────────
+circumnavigate_on_empty: true   # enable box peek-around behaviour
+circum_step_sec:         1.8    # seconds to side-step (tune for your room width)
+circum_dist_m:           0.4    # Nav2 lateral distance hint (metres)
+circum_forward_sec:      0.0    # forward nudge before stepping (0 = disabled)
+
 scan_strategy:      target_hunt
 loop_mission:       false
-approach_on_detect: false
+approach_on_detect: true
 detect_distance:    1.5   # metres — confirm visually before triggering
 
 

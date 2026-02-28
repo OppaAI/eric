@@ -1146,6 +1146,13 @@ def start_mission(briefing: str, mission_name: str = ""):
         return "No mission briefing provided."
 
     _ms.reset_for_new_mission()
+
+    # Always reset Cosmos context at mission start — belt-and-suspenders.
+    # stop_mission() does this too, but if the previous mission ended
+    # unexpectedly (exception, crash) this ensures a clean slate regardless.
+    from cosmos import reset_mission_context
+    reset_mission_context()
+
     try:
         from avoidance import reset_avoid_counter
         reset_avoid_counter()
@@ -1220,9 +1227,69 @@ def start_mission(briefing: str, mission_name: str = ""):
 
 
 def stop_mission():
+    """
+    Cleanly stop the current mission and fully reset all runtime state.
+
+    Fixes applied here:
+      1. Cancel pending_nav future — prevents stale nav result bleeding into
+         the next mission's first loop iteration.
+      2. stop_alarm() — ensures siren/alert from a find doesn't carry into
+         next mission startup.
+      3. Recycle _cosmos_executor — cancels all in-flight Cosmos threads and
+         creates a fresh pool. Root cause of Jetson overload after 3 missions:
+         zombie futures accumulate, burning GPU/CPU while new ones queue up.
+      4. Flush vLLM KV cache — releases GPU memory held by the previous
+         mission's context. Biggest contributor to slowdown by mission 3.
+      5. reset_mission_context() — wipes _system_prompt back to base so the
+         next mission's acknowledgement call has zero memory of this mission.
+      6. gc.collect() — releases numpy arrays, base64 frames, and dicts still
+         referenced by completed futures.
+    """
+    global _cosmos_executor
+
     _ms.mission_active = False
     _ms.mission_state  = State.IDLE
     motors.stop()
+
+    # 1. Cancel pending nav future
+    if _ms.pending_nav is not None:
+        _ms.pending_nav.cancel()
+        _ms.pending_nav = None
+        log.info("stop_mission: pending nav future cancelled")
+
+    # 2. Stop any running alarm
+    try:
+        stop_alarm()
+    except Exception as _exc:
+        log.debug(f"stop_alarm error: {_exc}")
+
+    # 3. Recycle executor — kills all zombie Cosmos threads
+    try:
+        _cosmos_executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        _cosmos_executor.shutdown(wait=False)   # Python < 3.9
+    _cosmos_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="cosmos"
+    )
+    log.info("stop_mission: cosmos executor recycled — zombie threads cleared")
+
+    # 4. Flush vLLM KV cache
+    try:
+        import requests as _req
+        vllm_base = VLLM_URL.rstrip("/").rsplit("/", 1)[0]
+        _req.post(f"{vllm_base}/reset_prefix_cache", timeout=5)
+        log.info("stop_mission: vLLM KV cache flushed")
+    except Exception as _exc:
+        log.debug(f"vLLM cache flush skipped ({_exc})")
+
+    # 5. Reset Cosmos system prompt — no cross-mission memory
+    from cosmos import reset_mission_context
+    reset_mission_context()
+
+    # 6. Python GC
+    import gc; gc.collect()
+    log.info("stop_mission: GC collected")
+
     # Cancel any in-progress Nav2 goal
     try:
         from config import USE_NAV2
@@ -1230,8 +1297,9 @@ def stop_mission():
             from nav2 import cancel_goal, nav2_available
             if nav2_available():
                 cancel_goal()
-    except Exception as _exc:  # nav2
+    except Exception as _exc:
         log.debug(f"nav2 unavailable: {_exc}")
+
     motors.lights(0, 0)
     motors.pantilt(0, 5)
     motors.oled(0, "ERIC STOPPED")
@@ -1337,7 +1405,7 @@ OUTPUT: A single JSON object. Use ONLY these exact field names — no others:
   "mission_complete": false
 }
 
-"object" must be ONE word: person | robot | slipper | shoe | obstacle | wall | clear | unknown
+"object" must be ONE word: person | robot | slipper | shoe | obstacle | wall | clear | unknown | pokemon | figure | animal
 "speak" = speech output. NOT "speaker". NOT "speech". NOT "tts".
 "physical_reasoning" = reasoning. NOT "reasoning". NOT "explanation".
 "target_visible" = detection flag. NOT "target_visibility". NOT "target_found".
@@ -2073,7 +2141,7 @@ def _capture_sharp(device: int, retries: int = MAX_BLUR_RETRIES) -> str | None:
             return f   # sharp enough
         log.info(f"Blurry frame on cam {device} (attempt {attempt+1}) — waiting and retrying...")
         best = f       # keep as fallback
-        time.sleep(0.5)
+        time.sleep(0.8)  # raised from 0.5 — allow chassis vibration to fully damp
     return best  # return best we got even if still blurry
 
 
@@ -2173,14 +2241,24 @@ def _scan_360_pantilt() -> dict:
     _ui("status", "360 SCANNING")
     motors.oled(0, "360 Scan")
     motors.stop()
-    time.sleep(0.2)
+    time.sleep(0.5)  # raised from 0.2 — chassis damping before 360 sweep capture
     log.info("Starting pan-tilt 360 scan — async inference pipeline")
     log_mission_event("scan_360_start", "async sweep 7×30° + 180° chassis")
 
     # ── Constants ─────────────────────────────────────────────────────────────
     PAN_STEPS    = [-90, -60, -30, 0, 30, 60, 90]
     TILT_GROUND  = 15   # fixed ground-level tilt throughout sweep — no tilt changes
-    PAN_SETTLE   = 0.25 # seconds after pantilt() before capture
+    PAN_SETTLE   = 0.40 # seconds after pantilt() before capture — raised from 0.25 for servo + frame settle
+
+    # Webcam is zip-tied to the pan-tilt head, offset slightly to the LEFT.
+    # When pan-tilt is at angle X, webcam center is at X + WEBCAM_PAN_OFFSET.
+    # Compensate by panning WEBCAM_PAN_OFFSET degrees RIGHT during confirmation
+    # so the webcam centers on the candidate rather than seeing it at the edge.
+    # ── MEASURE THIS PHYSICALLY ──────────────────────────────────────────────
+    # Place an object at 1m directly ahead (0°). Pan until webcam centers it.
+    # That angle is your offset. Positive = webcam is left of pan-tilt center.
+    # Example: if webcam centers at pan=+8°, set WEBCAM_PAN_OFFSET = 8
+    WEBCAM_PAN_OFFSET = 8   # degrees — adjust after physical measurement
 
     def _pan_to_chassis_turn_sec(pan: int) -> float:
         return abs(pan) / 90.0 * TURN_90_SEC
@@ -2195,8 +2273,11 @@ def _scan_360_pantilt() -> dict:
         _ui("log", f"🔍 Candidate at pan {pan:+d}° — aiming & webcam confirmation...")
         log_mission_event("candidate_found", f"pan={pan}")
 
-        # Pan-tilt to detected angle for webcam alignment
-        motors.pantilt(pan, TILT_GROUND, speed=80)
+        # Pan-tilt to detected angle, compensated for webcam physical offset.
+        # Webcam is zip-tied to pan-tilt head but offset left — pan right by
+        # WEBCAM_PAN_OFFSET degrees so webcam centers on the candidate.
+        webcam_pan = max(-90, min(90, pan + WEBCAM_PAN_OFFSET))
+        motors.pantilt(webcam_pan, TILT_GROUND, speed=80)
         time.sleep(PAN_SETTLE + 0.1)
 
         wc_frame = capture_frame(CAMERA_WEBCAM, 640, 480)
@@ -2212,10 +2293,16 @@ def _scan_360_pantilt() -> dict:
 
         confirm_prompt = (
             mission_ov +
-            "CONFIRMATION: Wide-angle scan flagged a possible target at this bearing. "
-            "The second image is a webcam zoom shot aimed at that exact angle. "
-            "Confirm or deny: is the mission target actually present? "
-            "Set target_visible=true ONLY if 60%+ confident. Be conservative.\n\n"
+            "CONFIRMATION: Wide-angle pan-tilt camera flagged a possible target at this bearing. "
+            "The first image is the wide-angle frame that flagged the candidate. "
+            "The second image is from a narrow focal length webcam mounted slightly LEFT "
+            "of the pan-tilt on the same servo head — it sees a narrower, more detailed "
+            "view of the same scene. The target may appear toward the right side of the "
+            "webcam frame due to the physical offset. "
+            "Use BOTH images together to confirm or deny — the target may be clearer "
+            "in one than the other. "
+            "Set target_visible=true ONLY if 60%+ confident across both images. "
+            "Be conservative — a false positive wastes mission time.\n\n"
         ) + (sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT)
 
         try:
@@ -2592,6 +2679,92 @@ def _scan_360_video_sweep() -> dict:
         return dict(_SCAN_FALLBACK)
 
 
+def _circumnavigate_obstacle() -> bool:
+    """
+    Attempt to peek around a blocking obstacle (e.g. a cardboard box) by
+    side-stepping left then right, doing a quick scan from each position.
+
+    Only runs when YAML flag  circumnavigate_on_empty: true  is set.
+    Completely inert for all other missions — the flag is False by default.
+
+    SLAM-safe: all movement goes through _move_forward() and
+    _turn_nav2_or_direct() which already support Nav2 goals.
+    When SLAM is added those calls automatically use the costmap —
+    no changes needed here.
+
+    Strategy (tuned for a ~30cm wide box at ~1–2m distance):
+      1. Side-step LEFT  → quick scan  → found? return True
+      2. Return to centre
+      3. Side-step RIGHT → quick scan  → found? return True
+      4. Return to centre
+      5. If still nothing, return False so the normal 360 runs as fallback
+
+    Tune SIDE_STEP_SEC and SIDE_DIST_M in the YAML or here for your room.
+
+    Returns True if the target was found during circumnavigation so the
+    caller can call _process_scan() on the result instead of a 360.
+    """
+    if not _ms.mission_flags.get("circumnavigate_on_empty", False):
+        return False
+
+    # ── Tunable constants ─────────────────────────────────────────────────────
+    SIDE_STEP_SEC  = float(_ms.mission_flags.get("circum_step_sec",  1.8))
+    SIDE_DIST_M    = float(_ms.mission_flags.get("circum_dist_m",    0.4))
+    FORWARD_SEC    = float(_ms.mission_flags.get("circum_forward_sec", 0.0))
+
+    log.info("🔄 Circumnavigation: trying to peek around obstacle")
+    log_mission_event("circumnavigate_start", f"step_sec={SIDE_STEP_SEC} dist_m={SIDE_DIST_M}")
+    _ui("log", "🔄 Obstacle blocking — peeking around it...")
+    _ui("status", "CIRCUMNAVIGATING")
+    motors.oled(0, "Peek around")
+
+    # Optional short forward nudge before side-stepping (closes distance to box)
+    if FORWARD_SEC > 0:
+        _move_forward(duration_sec=FORWARD_SEC, distance_m=SIDE_DIST_M * 0.5)
+        motors.stop()
+        time.sleep(0.3)
+
+    for side, turn_fwd, turn_back in [
+        ("left",  "left",  "right"),
+        ("right", "right", "left"),
+    ]:
+        if not _ms.mission_active:
+            break
+
+        motors.oled(1, f"Peek {side}")
+        _ui("log", f"   Stepping {side}...")
+
+        # Step sideways
+        _turn_nav2_or_direct(turn_fwd, SIDE_STEP_SEC)
+        motors.stop()
+        time.sleep(0.4)   # settle before capture
+
+        # Quick scan from new position
+        _ui("log", f"   Scanning from {side} position...")
+        scan = _quick_scan()
+
+        if scan.get("target_visible"):
+            log.info(f"🎯 Circumnavigate: target found from {side} position!")
+            log_mission_event("circumnavigate_found", f"side={side}")
+            _ui("log", f"✅ Found from {side}! Returning to centre then approaching")
+            # Return to centre so approach starts from a known heading
+            _turn_nav2_or_direct(turn_back, SIDE_STEP_SEC)
+            motors.stop()
+            time.sleep(0.3)
+            _process_scan(scan, from_360=True)
+            return True
+
+        _ui("log", f"   Nothing from {side} — returning to centre")
+        # Return to centre before trying the other side
+        _turn_nav2_or_direct(turn_back, SIDE_STEP_SEC)
+        motors.stop()
+        time.sleep(0.3)
+
+    log_mission_event("circumnavigate_failed", "target not found from either side")
+    _ui("log", "🔄 Circumnavigation: no target found — falling back to 360 scan")
+    return False
+
+
 def _best_360_scan() -> dict:
     """
     Route to the correct 360° scan strategy based on mission YAML.
@@ -2648,6 +2821,230 @@ def _face_direction(direction: str):
 # ─── Obstacle Avoidance ───────────────────────────────────────────────────────
 # ─── Mission Complete ─────────────────────────────────────────────────────────
 
+def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[str]:
+    """
+    Capture sharp, centred final photos of the confirmed target from both cameras.
+
+    Pipeline:
+      1. Stop motors + centre pan-tilt → settle 0.6 s (chassis + servo damp).
+      2. Adaptive LED — light up if frame is dark.
+      3. Pan-tilt camera (primary): up to PHOTO_MAX_BLUR_RETRIES attempts.
+         Each attempt: capture → Laplacian blur check → Cosmos centre check.
+         Cosmos is asked whether the target is in the centre third of the frame.
+         If off-centre, nudge pan by PHOTO_PAN_NUDGE_DEG degrees and retry.
+         Fall back to the sharpest frame seen if loop never converges.
+      4. Webcam (secondary): same blur-retry loop AND same Cosmos centre check.
+         Pan stays at the accepted angle from step 3 so both cameras see the same scene.
+         If the webcam sees the target off-centre, pan nudges independently for the
+         webcam pass — the webcam has a slightly different physical offset on the head.
+      5. Save both files:
+           <alarm>_<n>_<obj>_<ts>_pantilt.jpg
+           <alarm>_<n>_<obj>_<ts>_webcam.jpg
+      6. Returns list of saved filenames for logging.
+
+    Never raises — all errors are caught and logged.
+    """
+    import base64 as _b64
+
+    PHOTO_MAX_BLUR_RETRIES = 4     # attempts per camera before giving up on sharpness
+    PHOTO_SETTLE_SEC       = 0.6   # chassis + servo damping before first capture
+    PHOTO_RETRY_SETTLE_SEC = 0.5   # wait between retries
+    PHOTO_PAN_NUDGE_DEG    = 12    # degrees to nudge pan if target is off-centre
+
+    out_dir  = pathlib.Path("missions/photos")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    safe_obj = obj_name.replace(" ", "_")[:20]
+    saved    = []
+
+    # ── 1. Stop + centre pan-tilt ─────────────────────────────────────────────
+    motors.stop()
+    motors.pantilt(0, 15)          # 15° tilt → ground-level target sits in mid-frame
+    time.sleep(PHOTO_SETTLE_SEC)
+
+    # ── 2. Adaptive LED ───────────────────────────────────────────────────────
+    test_frame = capture_frame(CAMERA_PANTILT, 320, 240)
+    led_on = test_frame and _is_pitch_black(test_frame)
+    if led_on:
+        motors.lights(base=180, head=255)
+        time.sleep(0.3)
+
+    # ── 3. Pan-tilt camera — sharp + centred ─────────────────────────────────
+    _ui("log", "📸 Capturing final photo (pan-tilt)...")
+    pt_frame  = None
+    pt_best   = None    # sharpest frame seen regardless of centering (fallback)
+    pan_angle = 0       # current pan offset from centre, adjusted by nudges
+
+    for attempt in range(PHOTO_MAX_BLUR_RETRIES):
+        motors.pantilt(pan_angle, 15)
+        time.sleep(PHOTO_RETRY_SETTLE_SEC if attempt > 0 else 0.0)
+
+        f = capture_frame(CAMERA_PANTILT, 640, 480)
+        if not f:
+            break
+
+        # Blur check — reject if Laplacian variance is below threshold
+        if _is_blurry(f):
+            _ui("log", f"📸 Pan-tilt attempt {attempt + 1}: blurry — retrying")
+            if pt_best is None:
+                pt_best = f        # keep first frame as absolute last resort
+            time.sleep(PHOTO_RETRY_SETTLE_SEC)
+            continue
+
+        pt_best = f    # not blurry — update best
+
+        # Cosmos centre check: is the target in the middle third of the frame?
+        centre_prompt = (
+            f"This is a photo of the confirmed target: {obj_name}. "
+            "Is the main target approximately centred — within the middle horizontal "
+            "third of the frame (not clipped at the far left or far right edge)? "
+            'Reply ONLY with this JSON: {"centred": true_or_false, "offset": "left|right|centre"}'
+        )
+        try:
+            cr = requests.post(VLLM_URL, json={
+                "model": COSMOS_MODEL,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
+                    {"type": "text", "text": centre_prompt},
+                ]}],
+                "max_tokens": 40,
+                "temperature": 0.1,
+            }, timeout=20)
+            cr.raise_for_status()
+            craw    = cr.json()["choices"][0]["message"]["content"].strip()
+            cresult = _parse_json(craw, {"centred": True, "offset": "centre"}, "PHOTO_CENTRE")
+            log_ai("photo_centre_check", craw, label="PHOTO_CENTRE")
+
+            if cresult.get("centred", True):
+                pt_frame = f
+                _ui("log", f"📸 Pan-tilt: sharp + centred (attempt {attempt + 1})")
+                break
+            else:
+                offset = str(cresult.get("offset", "centre")).lower()
+                _ui("log", f"📸 Pan-tilt attempt {attempt + 1}: target {offset} — nudging pan")
+                if offset == "left":
+                    pan_angle = max(-60, pan_angle - PHOTO_PAN_NUDGE_DEG)
+                elif offset == "right":
+                    pan_angle = min(60,  pan_angle + PHOTO_PAN_NUDGE_DEG)
+
+        except Exception as e:
+            log_exception("photo_centre_cosmos", e)
+            pt_frame = f    # Cosmos failed — accept the sharp frame as-is
+            break
+
+    # Centre loop never converged — use sharpest frame seen
+    if pt_frame is None:
+        pt_frame = pt_best
+        if pt_frame:
+            _ui("log", "📸 Pan-tilt: using sharpest frame (centre check did not converge)")
+
+    if pt_frame:
+        try:
+            fname = out_dir / (
+                f"{alarm_type}_{_ms.mission_find_count:02d}_"
+                f"{safe_obj}_{ts_str}_pantilt.jpg"
+            )
+            fname.write_bytes(_b64.b64decode(pt_frame))
+            _ui("log", f"📸 Saved pan-tilt: {fname.name}")
+            log_mission_event("photo_saved_pantilt", fname.name)
+            saved.append(fname.name)
+        except Exception as e:
+            log_exception("photo_save_pantilt", e)
+
+    # ── 4. Webcam — sharp + centred ──────────────────────────────────────────
+    # Start at the accepted pan angle from the pan-tilt pass, then nudge
+    # independently — the webcam sits slightly offset on the same servo head
+    # so it may need a small additional correction of its own.
+    _ui("log", "📸 Capturing final photo (webcam)...")
+    wc_pan_angle = pan_angle   # inherit accepted pan, may shift further below
+    motors.pantilt(wc_pan_angle, 15)
+    time.sleep(0.3)
+
+    wc_frame = None
+    wc_best  = None
+
+    for attempt in range(PHOTO_MAX_BLUR_RETRIES):
+        motors.pantilt(wc_pan_angle, 15)
+        time.sleep(PHOTO_RETRY_SETTLE_SEC if attempt > 0 else 0.0)
+
+        f = capture_frame(CAMERA_WEBCAM, 640, 480)
+        if not f:
+            break
+
+        # Blur check
+        if _is_blurry(f):
+            _ui("log", f"📸 Webcam attempt {attempt + 1}: blurry — retrying")
+            if wc_best is None:
+                wc_best = f
+            time.sleep(PHOTO_RETRY_SETTLE_SEC)
+            continue
+
+        wc_best = f   # not blurry — update best
+
+        # Cosmos centre check (same prompt as pan-tilt pass)
+        centre_prompt = (
+            f"This is a photo of the confirmed target: {obj_name}. "
+            "Is the main target approximately centred — within the middle horizontal "
+            "third of the frame (not clipped at the far left or far right edge)? "
+            'Reply ONLY with this JSON: {"centred": true_or_false, "offset": "left|right|centre"}'
+        )
+        try:
+            cr = requests.post(VLLM_URL, json={
+                "model": COSMOS_MODEL,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
+                    {"type": "text", "text": centre_prompt},
+                ]}],
+                "max_tokens": 40,
+                "temperature": 0.1,
+            }, timeout=20)
+            cr.raise_for_status()
+            craw    = cr.json()["choices"][0]["message"]["content"].strip()
+            cresult = _parse_json(craw, {"centred": True, "offset": "centre"}, "PHOTO_CENTRE_WC")
+            log_ai("photo_centre_check_webcam", craw, label="PHOTO_CENTRE_WC")
+
+            if cresult.get("centred", True):
+                wc_frame = f
+                _ui("log", f"📸 Webcam: sharp + centred (attempt {attempt + 1})")
+                break
+            else:
+                offset = str(cresult.get("offset", "centre")).lower()
+                _ui("log", f"📸 Webcam attempt {attempt + 1}: target {offset} — nudging pan")
+                if offset == "left":
+                    wc_pan_angle = max(-60, wc_pan_angle - PHOTO_PAN_NUDGE_DEG)
+                elif offset == "right":
+                    wc_pan_angle = min(60,  wc_pan_angle + PHOTO_PAN_NUDGE_DEG)
+
+        except Exception as e:
+            log_exception("photo_centre_cosmos_webcam", e)
+            wc_frame = f   # Cosmos failed — accept the sharp frame as-is
+            break
+
+    if wc_frame is None:
+        wc_frame = wc_best
+        if wc_frame:
+            _ui("log", "📸 Webcam: using sharpest frame (centre check did not converge)")
+
+    if wc_frame:
+        try:
+            fname = out_dir / (
+                f"{alarm_type}_{_ms.mission_find_count:02d}_"
+                f"{safe_obj}_{ts_str}_webcam.jpg"
+            )
+            fname.write_bytes(_b64.b64decode(wc_frame))
+            _ui("log", f"📸 Saved webcam:   {fname.name}")
+            log_mission_event("photo_saved_webcam", fname.name)
+            saved.append(fname.name)
+        except Exception as e:
+            log_exception("photo_save_webcam", e)
+
+    # ── 5. LEDs off + re-centre pan ───────────────────────────────────────────
+    if led_on:
+        motors.lights(0, 0)
+    motors.pantilt(0, 15)    # re-centre pan — both cameras may have nudged it
+
+    return saved
+
+
 def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
                            severity: str = "WARNING", frame_b64: str = None):
     """
@@ -2703,19 +3100,17 @@ def _trigger_mission_alarm(obj_name: str, location_hint: str = "",
     log_mission_event("target_alarm", f"[{severity}] {obj_name} @ {location_hint}")
     _ui("log", f"🚨 [{alarm_type.upper()}] #{_ms.mission_find_count}: {obj_name} — {severity}")
 
-    # ── Save photo if configured ──────────────────────────────────────────────
-    if _ms.mission_flags.get("photo_on_find") and frame_b64:
-        import base64 as _b64
-        safe_obj = obj_name.replace(" ", "_")[:20]
-        fname = (pathlib.Path("missions/photos") /
-                 f"{alarm_type}_{_ms.mission_find_count:02d}_{safe_obj}_{ts.replace(':','')}.jpg")
-        fname.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            fname.write_bytes(_b64.b64decode(frame_b64))
-            _ui("log", f"📸 Saved: {fname.name}")
-            log_mission_event("photo_saved", fname.name)
-        except Exception as e:
-            log_exception("alarm_photo_save", e)
+    # ── Save photos if configured ─────────────────────────────────────────────
+    # Captures fresh frames from BOTH cameras with blur-check + Cosmos centre-check
+    # rather than saving the scan frame that triggered the alarm.
+    if _ms.mission_flags.get("photo_on_find"):
+        saved_photos = _capture_final_photo(
+            obj_name  = obj_name,
+            ts_str    = ts.replace(":", ""),
+            alarm_type = alarm_type,
+        )
+        if not saved_photos:
+            _ui("log", "⚠️  photo_on_find: no photos saved (capture failed)")
 
     # ── OLED display ──────────────────────────────────────────────────────────
     oled_label = "FOUND!" if alarm_type == AlarmType.NONE else f"{alarm_type.upper()}!"
@@ -2943,6 +3338,28 @@ def _handle_mission_complete(obj_name):
     end_mission_log(completed=True)
 
     _ms.mission_active = False
+
+    # Same cleanup as stop_mission() — recycle executor, flush cache, GC
+    # so the Jetson is clean before the operator starts the next mission.
+    global _cosmos_executor
+    try:
+        _cosmos_executor.shutdown(wait=False, cancel_futures=True)
+    except TypeError:
+        _cosmos_executor.shutdown(wait=False)
+    _cosmos_executor = concurrent.futures.ThreadPoolExecutor(
+        max_workers=2, thread_name_prefix="cosmos"
+    )
+    try:
+        import requests as _req
+        vllm_base = VLLM_URL.rstrip("/").rsplit("/", 1)[0]
+        _req.post(f"{vllm_base}/reset_prefix_cache", timeout=5)
+    except Exception:
+        pass
+    from cosmos import reset_mission_context
+    reset_mission_context()
+    import gc; gc.collect()
+    log.info("mission_complete: executor recycled, cache flushed, GC collected")
+
     _ui("status", "MISSION COMPLETE")
     motors.oled(0, "TARGET FOUND!")
     motors.oled(1, "Mission done!")
@@ -3412,7 +3829,9 @@ def _process_scan(scan, from_360=False):
         _should_alarm = False
         _alarm_severity = "WARNING"
         if _ms.mission_alarm_type in (AlarmType.SIREN, AlarmType.SUSPICIOUS):
-            _should_alarm = True
+            t_lower = str(obj_name or obj).lower()
+            _should_alarm = any(kw.lower() in t_lower
+                                for kw in (_ms.mission_target_objects or [obj]))
             _alarm_severity = "CRITICAL"
         elif _ms.mission_alarm_type in (AlarmType.HAZARD, AlarmType.NATURE):
             t_lower = str(obj_name or obj).lower()
@@ -3421,12 +3840,10 @@ def _process_scan(scan, from_360=False):
             _alarm_severity = scan.get("severity", "WARNING")
 
         if _should_alarm:
-            alarm_frame = capture_frame(CAMERA_PANTILT, 640, 480)
             _trigger_mission_alarm(
                 obj_name or obj,
                 location_hint = reason,
                 severity      = _alarm_severity,
-                frame_b64     = alarm_frame,
             )
 
         if direction in ("down", "below"):
@@ -4001,13 +4418,24 @@ def _mission_loop():
             _ms.nav_clips_since_scan = 0
             _ms.scans_since_360 += 1
             motors.stop()
-            time.sleep(0.3)
+            time.sleep(0.5)  # raised from 0.3 — chassis damping before capture
 
             do_360 = (_ms.empty_scans >= EMPTY_SCAN_LIMIT or
                       _ms.scans_since_360 >= SCANS_BEFORE_360)
 
             if do_360:
+                # ── Try circumnavigation first (only if YAML flag set) ─────────
+                # Peeks around the blocking obstacle before committing to a full
+                # 360. If it finds the target, _process_scan() is called inside
+                # _circumnavigate_obstacle() and we skip the 360 entirely.
                 if _ms.empty_scans >= EMPTY_SCAN_LIMIT:
+                    if _circumnavigate_obstacle():
+                        _ms.scans_since_360 = _ms.empty_scans = 0
+                        if _ms.mission_active and _ms.mission_state == State.SEARCHING:
+                            if not _void_check()["void"]:
+                                if _safe_to_fwd():
+                                    motors.forward(MOTOR_SPEED_SLOW)
+                        continue   # back to top of loop — target handled
                     eric_say("Nothing found. Performing a full 360 scan.")
                 else:
                     _ui("log", "Periodic 360 scan...")
