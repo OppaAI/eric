@@ -78,6 +78,27 @@ def get_mission_briefing() -> str:
     return _mission_briefing
 
 
+def reset_mission_context():
+    """
+    Reset Cosmos system prompt and briefing to clean base state.
+
+    MUST be called at the start of every new mission, before set_mission_briefing().
+
+    Why this matters:
+      _system_prompt is module-level and persists across missions in the same
+      Python process. Without this reset, the new mission acknowledgement call
+      runs with the PREVIOUS mission briefing still in the system prompt —
+      Cosmos has full memory of what it was just doing.
+
+      This also prevents vLLM from seeing a growing/stale system prompt that
+      inflates KV cache usage across missions.
+    """
+    global _system_prompt, _mission_briefing
+    _mission_briefing = ""
+    _system_prompt    = _BASE_SYSTEM_PROMPT
+    log.info("🔄 Cosmos mission context reset — system prompt cleared to base")
+
+
 # ─── Camera ───────────────────────────────────────────────────────────────────
 # Persistent capture objects — one per device index.
 # Avoids repeated open/close overhead and keeps buffer state tuned.
