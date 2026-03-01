@@ -5,29 +5,35 @@ Required by SLAM Toolbox for localisation between LiDAR scans.
 
 ESP32 UART feedback format (Waveshare UGV Beast):
   {"T":1001,"L":speed_l,"R":speed_r}   — wheel speeds in m/s
-  {"T":1003,...,"ax":...,"ay":...}      — IMU data (yaw unreliable, ignored)
 
   NOTE: Run `cat /dev/ttyTHS1` while driving to confirm exact format.
-        If your firmware sends different keys, update _parse_feedback() below.
-        Fields L/R may also be named "lv"/"rv" or "left"/"right" depending
-        on firmware version — adjust KEY_LEFT / KEY_RIGHT constants below.
+        Fields L/R may also be named "lv"/"rv" depending on firmware.
+        Adjust KEY_LEFT / KEY_RIGHT constants below if needed.
 
-Architecture:
-  ESP32 UART → _uart_reader_loop() → dead-reckoning integration
-                                           ↓
-                              ROS2 /odom topic (nav_msgs/Odometry)
-                                           ↓
-                              SLAM Toolbox (map building)
-                              Nav2 (path planning)
+UART sharing:
+  This module no longer opens /dev/ttyTHS1 directly. Instead it registers
+  a subscriber queue with motors.subscribe_uart(1001, queue), so all
+  modules share the single port owned by motors.py. Battery packets,
+  odom packets, and future IMU packets are routed without byte theft.
+
+ROS2 node sharing:
+  Uses ros_core.get_node() — the single shared 'eric_robot' node.
+  No longer creates its own node or executor. ensure_spinning() is called
+  once after subscribing, which is a no-op if already spinning.
 
 Dead-reckoning:
   Tracked robot — differential drive kinematics.
   x, y, theta integrated from left/right wheel speeds + time delta.
-  No IMU yaw fusion — ESP32 yaw is too noisy to help.
+  No IMU yaw fusion — ESP32 yaw is too noisy.
   SLAM Toolbox scan-matching corrects accumulated drift every scan cycle.
 
+Odometry sign convention:
+  motors._send() stores raw commanded values — negative = forward on UGV Beast.
+  ODOM_SIGN = -1 negates before integrating so positive = forward in odom frame.
+  If SLAM map drifts backwards on straight runs, flip ODOM_SIGN to +1.
+
 Usage:
-  init_odom()           → start UART reader + ROS2 publisher
+  init_odom()           → start UART subscriber + ROS2 publisher
   odom_available()      → True if receiving feedback and publishing
   get_pose()            → {x, y, theta} current dead-reckoning pose
   reset_pose()          → zero pose at mission start
@@ -36,44 +42,47 @@ Usage:
 import json
 import logging
 import math
+import queue
 import threading
 import time
 
 log = logging.getLogger("eric.odom")
 
 # ── Robot geometry (Waveshare UGV Beast) ──────────────────────────────────────
-# Measure these on your actual robot if SLAM drift is excessive.
-WHEEL_BASE_M     = 0.30    # distance between left and right tracks (meters)
-                           # UGV Beast: approx 30cm — measure track centre-to-centre
+WHEEL_BASE_M  = 0.30   # distance between left and right tracks (metres)
+                       # Measure track centre-to-centre on your robot.
+                       # Excessive SLAM drift on turns = wrong WHEEL_BASE_M.
 
 # ── ESP32 UART feedback keys ──────────────────────────────────────────────────
-# Adjust these if your firmware uses different field names.
-# Run: cat /dev/ttyTHS1  to see raw output and confirm keys.
-FEEDBACK_TYPE    = 1001    # T value for speed feedback packet
-KEY_LEFT         = "L"     # left wheel speed key
-KEY_RIGHT        = "R"     # right wheel speed key
+FEEDBACK_TYPE = 1001   # T value for speed feedback packet
+KEY_LEFT      = "L"    # left wheel speed key  — change to "lv" if needed
+KEY_RIGHT     = "R"    # right wheel speed key — change to "rv" if needed
+
+# ── Sign convention ───────────────────────────────────────────────────────────
+# motors._send() stores raw commanded values where negative = forward.
+# Negate here so the odom frame uses positive = forward convention.
+# If SLAM builds a mirrored or reversed map on straight runs, flip to +1.
+ODOM_SIGN = -1
 
 # ── Module state ──────────────────────────────────────────────────────────────
-_odom_ok         = False
-_x               = 0.0
-_y               = 0.0
-_theta           = 0.0     # heading in radians
-_vx              = 0.0     # current linear velocity
-_vtheta          = 0.0     # current angular velocity
-_last_time       = 0.0
-_lock            = threading.Lock()
+_odom_ok        = False
+_x              = 0.0
+_y              = 0.0
+_theta          = 0.0
+_vx             = 0.0
+_vtheta         = 0.0
+_last_time      = 0.0
+_lock           = threading.Lock()
 
-_node            = None
-_odom_pub        = None
-_tf_broadcaster  = None
-_ros_thread      = None
-_uart_thread     = None
+_odom_pub       = None
+_tf_broadcaster = None
+_uart_thread    = None
+_uart_queue     = queue.Queue(maxsize=50)   # packets routed from motors.py
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
 def odom_available() -> bool:
-    """True if odometry is running and publishing."""
     return _odom_ok
 
 
@@ -87,11 +96,7 @@ def reset_pose():
     """Zero the odometry pose. Call at mission start for a clean origin."""
     global _x, _y, _theta, _vx, _vtheta
     with _lock:
-        _x      = 0.0
-        _y      = 0.0
-        _theta  = 0.0
-        _vx     = 0.0
-        _vtheta = 0.0
+        _x = _y = _theta = _vx = _vtheta = 0.0
     log.info("🔄 Odometry pose reset to origin")
 
 
@@ -99,50 +104,48 @@ def reset_pose():
 
 def init_odom() -> bool:
     """
-    Start UART reader and ROS2 odometry publisher.
-    Returns True if ROS2 available and UART readable.
-    Safe to call once at startup — non-blocking.
+    Start UART subscriber and ROS2 odometry publisher.
+    Must be called before init_slam() and init_nav2().
+    Returns True if ROS2 available and UART subscriber registered.
+    Non-blocking — all work happens in background threads.
     """
-    global _odom_ok, _node, _odom_pub, _tf_broadcaster, _ros_thread
-    global _uart_thread, _last_time
+    global _odom_ok, _odom_pub, _tf_broadcaster, _uart_thread, _last_time
 
+    # ── Subscribe to UART packets via motors router ────────────────────────────
     try:
-        import rclpy
+        from motors import motors as _m
+        _m.subscribe_uart(FEEDBACK_TYPE, _uart_queue)
+        log.info(f"Odom: subscribed to UART T={FEEDBACK_TYPE} via motors router")
+    except Exception as e:
+        log.warning(f"⚠️  Odom: could not subscribe to UART router ({e}) "
+                    "— falling back to commanded-speed integration")
+
+    # ── ROS2 publisher ─────────────────────────────────────────────────────────
+    try:
+        from ros_core import get_node, ensure_spinning
         from nav_msgs.msg import Odometry
-        from geometry_msgs.msg import TransformStamped
         from tf2_ros import TransformBroadcaster
 
-        if not rclpy.ok():
-            rclpy.init()
+        node = get_node()
+        if node is None:
+            raise RuntimeError("ROS2 not available")
 
-        _node = rclpy.create_node("eric_odom")
-
-        _odom_pub       = _node.create_publisher(Odometry, "/odom", 10)
-        _tf_broadcaster = TransformBroadcaster(_node)
-
-        # Start ROS2 executor in background thread
-        import rclpy.executors
-        _executor = rclpy.executors.SingleThreadedExecutor()
-        _executor.add_node(_node)
-        _ros_thread = threading.Thread(
-            target=_executor.spin,
-            daemon=True,
-            name="odom-ros-spin"
-        )
-        _ros_thread.start()
+        _odom_pub       = node.create_publisher(Odometry, "/odom", 10)
+        _tf_broadcaster = TransformBroadcaster(node)
+        ensure_spinning()
 
         _last_time = time.monotonic()
 
-        # Start UART reader thread
+        # Start UART consumer thread
         _uart_thread = threading.Thread(
-            target=_uart_reader_loop,
+            target=_uart_consumer_loop,
             daemon=True,
-            name="odom-uart-reader"
+            name="odom-uart-consumer"
         )
         _uart_thread.start()
 
         _odom_ok = True
-        log.info("✅ Odometry: UART reader + /odom publisher active")
+        log.info("✅ Odometry: /odom publisher active")
         return True
 
     except ImportError:
@@ -155,70 +158,42 @@ def init_odom() -> bool:
         return False
 
 
-# ─── UART reader ──────────────────────────────────────────────────────────────
+# ─── UART consumer ────────────────────────────────────────────────────────────
 
-def _uart_reader_loop():
+def _uart_consumer_loop():
     """
-    Read JSON feedback from ESP32 over UART.
-    Parses wheel speed packets and integrates pose.
-    Publishes /odom and broadcasts map→odom TF on every update.
-
-    If UART is unavailable, falls back to reading from motors._current_left/right
-    which are updated by every motors._send() call — this gives approximate
-    odometry without needing ESP32 feedback, at the cost of no slip detection.
+    Drain the UART queue populated by motors.py router.
+    On queue timeout: fall back to integrating from commanded speeds.
+    Publishes /odom at steady rate regardless of source.
     """
-    log.info("Odom UART reader started")
+    log.info("Odom UART consumer started")
+    fallback_interval = 0.05   # 20 Hz fallback when no UART packets
 
     while True:
         try:
-            from motors import motors as _m
-            if _m._ser and _m._ser.is_open:
-                _read_from_uart(_m._ser)
-            else:
-                # Fallback: integrate from commanded speeds
-                _integrate_from_commanded()
-                time.sleep(0.05)   # 20Hz when using fallback
-            # Always publish at steady rate — SLAM needs continuous /odom
-            with _lock:
-                x, y, theta, vx, vtheta = _x, _y, _theta, _vx, _vtheta
-            _publish_odom(x, y, theta, vx, vtheta)
-        except Exception as e:
-            log.debug(f"Odom UART loop error: {e}")
-            time.sleep(0.1)
-
-
-def _read_from_uart(ser):
-    """Read one line from UART only if data is waiting — never blocks."""
-    try:
-        if ser.in_waiting == 0:
-            time.sleep(0.02)   # 50Hz polling when idle
-            return
-        line = ser.readline().decode("utf-8", errors="ignore").strip()
-        if not line:
-            return
-        data = json.loads(line)
-        if data.get("T") == FEEDBACK_TYPE:
-            speed_l = float(data.get(KEY_LEFT, 0.0))
-            speed_r = float(data.get(KEY_RIGHT, 0.0))
+            # Block up to fallback_interval — then use commanded speeds
+            data = _uart_queue.get(timeout=fallback_interval)
+            speed_l = float(data.get(KEY_LEFT,  0.0)) * ODOM_SIGN
+            speed_r = float(data.get(KEY_RIGHT, 0.0)) * ODOM_SIGN
             _integrate_speeds(speed_l, speed_r)
-    except (json.JSONDecodeError, KeyError, ValueError):
-        pass   # non-JSON lines (debug output etc) — ignore silently
-    except Exception as e:
-        log.debug(f"UART read error: {e}")
+        except queue.Empty:
+            # No UART feedback — integrate from last commanded speeds
+            _integrate_from_commanded()
+        except Exception as e:
+            log.debug(f"Odom consumer error: {e}")
+            time.sleep(0.1)
 
 
 def _integrate_from_commanded():
     """
-    Fallback odometry using last commanded motor speeds.
-    Less accurate than encoder feedback but better than nothing.
-    motors._send() updates _current_left/_current_right on every command.
-    Note: UGV Beast uses negative = forward convention, so negate here.
+    Fallback: integrate using last commanded motor speeds.
+    Less accurate than encoder feedback (no slip detection) but better
+    than no odometry at all. ODOM_SIGN applied here too.
     """
     try:
         from motors import motors as _m
-        # Negate: negative motor value = forward on UGV Beast
-        speed_l = -_m._current_left
-        speed_r = -_m._current_right
+        speed_l = _m._current_left  * ODOM_SIGN
+        speed_r = _m._current_right * ODOM_SIGN
         _integrate_speeds(speed_l, speed_r)
     except Exception:
         pass
@@ -228,7 +203,7 @@ def _integrate_speeds(speed_l: float, speed_r: float):
     """
     Differential drive dead-reckoning integration.
     Updates x, y, theta from left/right wheel speeds and elapsed time.
-    Publishes updated /odom message and broadcasts base_link TF.
+    Publishes /odom and broadcasts odom→base_link TF on every call.
 
     Kinematics:
       v     = (speed_r + speed_l) / 2          linear velocity
@@ -245,8 +220,7 @@ def _integrate_speeds(speed_l: float, speed_r: float):
         _last_time = now
 
     if dt <= 0 or dt > 1.0:
-        # Skip if time delta is invalid or too large (startup / pause)
-        return
+        return   # invalid delta — startup gap or long pause
 
     v     = (speed_r + speed_l) / 2.0
     omega = (speed_r - speed_l) / WHEEL_BASE_M
@@ -268,45 +242,38 @@ def _publish_odom(x: float, y: float, theta: float,
                   vx: float, vtheta: float):
     """
     Publish nav_msgs/Odometry on /odom and broadcast odom→base_link TF.
-    Both are required by SLAM Toolbox and Nav2.
+    Both required by SLAM Toolbox and Nav2.
     """
-    if not _odom_ok or _node is None or _odom_pub is None:
+    if not _odom_ok or _odom_pub is None:
         return
 
     try:
-        import rclpy.time
+        from ros_core import get_node
         from nav_msgs.msg import Odometry
-        from geometry_msgs.msg import TransformStamped, Quaternion
-        from std_msgs.msg import Header
+        from geometry_msgs.msg import TransformStamped
 
-        now_msg = _node.get_clock().now().to_msg()
-
-        # Yaw → quaternion (z, w only for 2D)
-        qz = math.sin(theta / 2.0)
-        qw = math.cos(theta / 2.0)
+        node    = get_node()
+        now_msg = node.get_clock().now().to_msg()
+        qz      = math.sin(theta / 2.0)
+        qw      = math.cos(theta / 2.0)
 
         # ── Odometry message ──────────────────────────────────────────────────
-        odom              = Odometry()
-        odom.header.stamp = now_msg
+        odom                          = Odometry()
+        odom.header.stamp             = now_msg
         odom.header.frame_id          = "odom"
         odom.child_frame_id           = "base_link"
-
         odom.pose.pose.position.x     = x
         odom.pose.pose.position.y     = y
         odom.pose.pose.position.z     = 0.0
-        odom.pose.pose.orientation.x  = 0.0
-        odom.pose.pose.orientation.y  = 0.0
         odom.pose.pose.orientation.z  = qz
         odom.pose.pose.orientation.w  = qw
-
         odom.twist.twist.linear.x     = vx
         odom.twist.twist.angular.z    = vtheta
 
-        # Covariance — moderate uncertainty since we're using dead-reckoning
-        # Diagonal elements: x, y, z, roll, pitch, yaw
-        odom.pose.covariance[0]  = 0.05   # x
-        odom.pose.covariance[7]  = 0.05   # y
-        odom.pose.covariance[35] = 0.1    # yaw — higher uncertainty
+        # Covariance — moderate uncertainty for dead-reckoning
+        odom.pose.covariance[0]   = 0.05   # x
+        odom.pose.covariance[7]   = 0.05   # y
+        odom.pose.covariance[35]  = 0.1    # yaw — higher uncertainty
         odom.twist.covariance[0]  = 0.05
         odom.twist.covariance[35] = 0.1
 
@@ -314,17 +281,15 @@ def _publish_odom(x: float, y: float, theta: float,
 
         # ── TF: odom → base_link ──────────────────────────────────────────────
         if _tf_broadcaster:
-            t                             = TransformStamped()
-            t.header.stamp                = now_msg
-            t.header.frame_id             = "odom"
-            t.child_frame_id              = "base_link"
-            t.transform.translation.x     = x
-            t.transform.translation.y     = y
-            t.transform.translation.z     = 0.0
-            t.transform.rotation.x        = 0.0
-            t.transform.rotation.y        = 0.0
-            t.transform.rotation.z        = qz
-            t.transform.rotation.w        = qw
+            t                         = TransformStamped()
+            t.header.stamp            = now_msg
+            t.header.frame_id         = "odom"
+            t.child_frame_id          = "base_link"
+            t.transform.translation.x = x
+            t.transform.translation.y = y
+            t.transform.translation.z = 0.0
+            t.transform.rotation.z    = qz
+            t.transform.rotation.w    = qw
             _tf_broadcaster.sendTransform(t)
 
     except Exception as e:

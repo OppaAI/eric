@@ -240,60 +240,70 @@ _recording_final_path = ""
 
 # ── Battery ──────────────────────────────────────────────────────────────────
 # The Waveshare MCU broadcasts battery voltage continuously on /dev/ttyTHS1.
-# Each JSON packet arrives null-padded in 128-byte frames; the Jetson UART
-# drops the leading bytes, so only the tail ('NNNN}') arrives reliably.
-# We extract the voltage with a regex rather than JSON parsing.
+#
+# UART sharing fix:
+#   Previously this module opened /dev/ttyTHS1 directly, competing with
+#   motors.py (which also owns the port for motor commands) and odom.py
+#   (which read encoder feedback). Three openers on one serial port causes
+#   byte theft and corrupted JSON.
+#
+#   Fix: motors.py owns the port and routes all incoming packets by T-type.
+#   Battery packets don't have a consistent T value across firmware versions,
+#   so we register a catch-all queue that receives every unmatched packet.
+#   We extract the voltage with a regex on the raw JSON string — same logic
+#   as before, now reading from the queue instead of the serial port.
 #
 # 3S LiPo thresholds:
-#   HIGH     > 75%   12.19–12.60 V   cyan   #00ffff
-#   MEDIUM   > 40%   11.67–12.19 V   green  #39ff14
-#   LOW      > 15%   11.07–11.67 V   amber  #ff9900
-#   CRITICAL ≤ 15%   10.50–11.07 V   red    #ff2d55
+#   HIGH     > 75%   12.19–12.60 V   bright cyan  #00ffff
+#   MEDIUM   > 40%   11.67–12.19 V   mid cyan     #00aacc
+#   LOW      > 15%   11.07–11.67 V   dark cyan    #006688
+#   CRITICAL ≤ 15%   10.50–11.07 V   magenta-red  #ff0066
 
 import re as _re
-import serial as _serial
+import queue as _queue
 
-_BATT_V_MAX  = 12.6
-_BATT_V_MIN  = 10.5
-_BATT_PORT   = os.getenv('SERIAL_PORT', '/dev/ttyTHS1')
-_BATT_BAUD   = 115200
-
+_BATT_V_MAX      = 12.6
+_BATT_V_MIN      = 10.5
 _battery_voltage = None
 _battery_lock    = threading.Lock()
-_battery_ser     = None   # kept open so FIFO stays primed
+_battery_queue   = _queue.Queue(maxsize=20)
 
 
 def _battery_poll_loop():
-    global _battery_voltage, _battery_ser
+    """
+    Drain battery voltage packets from the motors UART router.
+    Motors owns /dev/ttyTHS1 — we subscribe to unmatched packets via
+    the catch-all queue, then regex-extract the voltage value.
+    Falls back gracefully if motors.py is not available (simulation mode).
+    """
+    global _battery_voltage
+
+    # Register catch-all queue with motors UART router
     try:
-        ser = _serial.Serial(_BATT_PORT, _BATT_BAUD,
-            parity=_serial.PARITY_NONE,
-            stopbits=_serial.STOPBITS_ONE,
-            bytesize=_serial.EIGHTBITS,
-            timeout=0)
-        ser.reset_input_buffer()
-        _battery_ser = ser
-        log.info("Battery: serial opened on %s", _BATT_PORT)
-        buf = b""
-        while True:
-            n = ser.in_waiting
-            if n:
-                buf += ser.read(n)
-                # Strip nulls and scan for voltage tail pattern: digits followed by '}'
-                text    = buf.replace(b'\x00', b'').decode('utf-8', errors='replace')
-                compact = ''.join(text.split())
-                for m in _re.findall(r'(\d+)\}', compact):
-                    val = int(m)
-                    if 900 <= val <= 1350:          # 9.00–13.50 V sanity range
-                        with _battery_lock:
-                            _battery_voltage = round(val / 100.0, 2)
-                # Keep buffer bounded
-                if len(buf) > 1024:
-                    buf = buf[-512:]
-            else:
-                time.sleep(0.05)
+        from motors import motors as _m
+        _m.subscribe_uart_catchall(_battery_queue)
+        log.info("Battery: subscribed to motors UART router (catch-all)")
     except Exception as e:
-        log.warning("Battery thread error: %s", e)
+        log.warning("Battery: could not subscribe to UART router (%s) — voltage unavailable", e)
+        return
+
+    while True:
+        try:
+            data = _battery_queue.get(timeout=2.0)
+            # Voltage is embedded in the JSON as a 4-digit integer (e.g. 1185 = 11.85V).
+            # Scan all numeric values in the packet to find one in the 9.00-13.50V range.
+            raw = json.dumps(data)
+            for m in _re.findall(r'(\d+)', raw):
+                val = int(m)
+                if 900 <= val <= 1350:      # 9.00–13.50 V sanity range
+                    with _battery_lock:
+                        _battery_voltage = round(val / 100.0, 2)
+                    break
+        except _queue.Empty:
+            pass   # no packet — voltage stays at last known value
+        except Exception as e:
+            log.debug("Battery poll error: %s", e)
+            time.sleep(0.5)
 
 threading.Thread(target=_battery_poll_loop, daemon=True, name="battery").start()
 

@@ -1,43 +1,82 @@
 """
-ERIC — ROS2 Nav2 Integration
-Sends navigation goals to Nav2 stack.
-Falls back gracefully if ROS2 not running.
+ERIC — ROS2 Nav2 Integration  (SLAM version)
+Sends navigation goals to Nav2 with live SLAM map support.
+
+Fixes vs previous version:
+──────────────────────────
+1. ROS2 node sharing — uses ros_core.get_node() instead of creating its own
+   node and executor. No longer registers a node in multiple executors.
+
+2. Startup race fixed — init_nav2() now waits for slam_available() to return
+   True before starting its Nav2 action server timeout countdown.
+   Previously Nav2's 5s timeout expired before SLAM Toolbox had started
+   (typically 8-12s on Jetson), so Nav2 always reported unavailable.
+
+3. MAP_MIN_CELLS counts occupied cells only — was counting all known cells
+   (free=0 counts as known). 100 free cells can appear in the first 1-2 scans
+   before any walls are mapped. Now counts c > 0 (occupied) only, with a
+   lower threshold of 50 — meaning real wall cells must be present.
+
+4. costmap_clear() service path fixed — was "/nav2/{costmap}/..." but the
+   actual Nav2 service name has no /nav2/ prefix. Silent failures every time
+   SLAM updated. Corrected to "/{costmap}/clear_entirely_costmap".
 
 Architecture:
-  Cosmos decides WHERE to go (mission reasoning)
-  Nav2 decides HOW to get there safely (path planning + obstacle avoidance)
-  LiDAR (D500) + OAK-D Lite feed Nav2 costmap continuously
+  odom.py    → /odom     ──┐
+  lidar.py → /scan     ──┼──→ SLAM Toolbox → /map
+  oakd.py  → /oakd/depth┘          ↓
+                                Nav2 costmap
+                                     ↓
+                          nav2.py send_goal()
+                                     ↓
+                               motors (cmd_vel)
 
 Usage:
-  nav2_available()          → check if ROS2/Nav2 is running
-  send_goal(x, y, yaw)     → navigate to map coordinates
-  cancel_goal()            → abort navigation
-  get_pose()               → current robot pose on map
-  is_navigating()          → True while Nav2 is executing a goal
+  nav2_available()         → True once ROS2 + Nav2 running
+  map_ready()              → True once SLAM map has enough occupied cells
+  send_goal(x, y, yaw)    → navigate to map coordinates
+  cancel_goal()           → abort navigation
+  get_pose()              → current robot pose on map
+  is_navigating()         → True while goal is executing
+  costmap_clear()         → clear costmap after SLAM map update
 """
 
 import logging
+import math
 import threading
 import time
 
 log = logging.getLogger("eric.nav2")
 
-_nav2_ok        = False   # True once ROS2 + Nav2 confirmed running
-_navigating     = False
-_current_goal   = None
-_pose           = {"x": 0.0, "y": 0.0, "yaw": 0.0}
+_nav2_ok      = False
+_map_ok       = False
+_navigating   = False
+_current_goal = None
+_pose         = {"x": 0.0, "y": 0.0, "yaw": 0.0}
 
-# ROS2 objects (lazy-initialized)
-_node           = None
-_executor       = None   # SingleThreadedExecutor — safer for clean shutdown
-_nav_client     = None
-_tf_buffer      = None
-_ros_thread     = None
-_shutdown_event = threading.Event()   # signals spin thread to stop
+_nav_client   = None
+_tf_buffer    = None
+_map_sub      = None
+
+# Occupied-cell threshold for declaring map ready for path planning.
+# Counts cells with value > 0 (occupied) — NOT free cells (value=0).
+# 50 occupied cells means real walls are present, not just scanned empty space.
+MAP_MIN_OCCUPIED_CELLS = 50
+
+# How long to wait for SLAM to be available before giving up on Nav2 init.
+SLAM_WAIT_TIMEOUT = 60.0   # seconds — SLAM Toolbox takes 8-15s on Jetson
 
 
 def nav2_available() -> bool:
     return _nav2_ok
+
+
+def map_ready() -> bool:
+    """
+    True when SLAM has mapped enough occupied cells for reliable path planning.
+    Check this before sending goals — planning on an empty map produces bad paths.
+    """
+    return _nav2_ok and _map_ok
 
 
 def is_navigating() -> bool:
@@ -50,119 +89,140 @@ def get_pose() -> dict:
     return dict(_pose)
 
 
-def _spin_thread_fn():
-    """
-    Background spin thread.
-
-    Uses SingleThreadedExecutor.spin() instead of rclpy.spin() so we can
-    call executor.shutdown() cleanly from the main thread before Python tears
-    down daemon threads.  Without this, the C++ layer inside rclpy raises an
-    exception during pthread_exit and std::terminate() fires.
-    """
-    try:
-        _executor.spin()
-    except Exception as e:
-        # Normal during shutdown — executor.shutdown() wakes spin() with an
-        # internal exception.  Log at debug so it doesn't pollute the console.
-        log.debug(f"ROS2 spin exited: {e}")
-    finally:
-        _shutdown_event.set()
-
-
 def init_nav2() -> bool:
     """
-    Initialize ROS2 node and Nav2 action client.
-    Returns True if successful, False if ROS2 not available.
-    Called once at startup — non-blocking, runs ROS spin in background thread.
+    Initialise Nav2 action client using the shared ros_core node.
+    Waits for slam_available() before starting — Nav2 action server needs
+    the SLAM map to be publishing before it can plan paths.
+
+    Call after init_odom(), init_lidar(), init_slam() in main.py.
+    Returns True if Nav2 action server found within timeout.
     """
-    global _nav2_ok, _node, _executor, _nav_client, _tf_buffer, _ros_thread
+    global _nav2_ok, _map_ok, _nav_client, _tf_buffer, _map_sub
 
     try:
-        import rclpy
-        import rclpy.executors
-        from rclpy.node import Node
+        from ros_core import get_node, ensure_spinning
         from nav2_msgs.action import NavigateToPose
         from rclpy.action import ActionClient
         from tf2_ros import Buffer, TransformListener
+        from nav_msgs.msg import OccupancyGrid
 
-        if not rclpy.ok():
-            rclpy.init()
+        node = get_node()
+        if node is None:
+            raise RuntimeError("ROS2 not available")
 
-        _node      = rclpy.create_node("eric_nav2")
-        _executor  = rclpy.executors.SingleThreadedExecutor()
-        _executor.add_node(_node)
+        _tf_buffer  = Buffer()
+        _           = TransformListener(_tf_buffer, node)
+        _nav_client = ActionClient(node, NavigateToPose, "navigate_to_pose")
 
-        _tf_buffer = Buffer()
-        _          = TransformListener(_tf_buffer, _node)
-        _nav_client = ActionClient(_node, NavigateToPose, "navigate_to_pose")
-
-        # Start the spin thread — daemon=True so it doesn't block process exit,
-        # but shutdown() will cleanly stop it before the interpreter tears it down.
-        _ros_thread = threading.Thread(
-            target=_spin_thread_fn,
-            daemon=True,
-            name="rclpy-spin"
+        # Subscribe to /map for occupied-cell tracking
+        _map_sub = node.create_subscription(
+            OccupancyGrid, "/map", _map_callback, 10
         )
-        _ros_thread.start()
 
-        # Wait up to 5 s for Nav2 action server
+        ensure_spinning()
+
+        # ── Wait for SLAM to be available before timing out on Nav2 ───────────
+        # SLAM Toolbox typically takes 8-15s to start on the Jetson.
+        # If we start the Nav2 timeout countdown immediately it always expires
+        # before SLAM is ready, so Nav2 reports unavailable on every boot.
+        log.info("⏳ Waiting for SLAM map before connecting Nav2...")
+        slam_deadline = time.monotonic() + SLAM_WAIT_TIMEOUT
+        while time.monotonic() < slam_deadline:
+            try:
+                from slam import slam_available
+                if slam_available():
+                    log.info("🗺️  SLAM ready — connecting Nav2 action server...")
+                    break
+            except ImportError:
+                break   # slam.py not loaded — skip wait
+            time.sleep(1.0)
+        else:
+            log.warning("⚠️  SLAM did not become available within "
+                        f"{SLAM_WAIT_TIMEOUT}s — continuing Nav2 init anyway")
+
+        # ── Wait for Nav2 action server ────────────────────────────────────────
         log.info("⏳ Waiting for Nav2 action server...")
-        if _nav_client.wait_for_server(timeout_sec=5.0):
+        if _nav_client.wait_for_server(timeout_sec=10.0):
             _nav2_ok = True
             log.info("✅ Nav2 connected — autonomous navigation enabled")
         else:
-            log.warning("⚠️  Nav2 action server not found — falling back to direct motor control")
+            log.warning("⚠️  Nav2 action server not found — "
+                        "falling back to direct motor control")
             _nav2_ok = False
 
         return _nav2_ok
 
     except ImportError:
-        log.warning("⚠️  ROS2 not found — falling back to direct motor control")
+        log.warning("⚠️  ROS2 not found — Nav2 disabled")
         _nav2_ok = False
         return False
     except Exception as e:
-        log.warning(f"⚠️  Nav2 init failed ({e}) — falling back to direct motor control")
+        log.warning(f"⚠️  Nav2 init failed ({e}) — direct motor control only")
         _nav2_ok = False
         return False
+
+
+def _map_callback(msg):
+    """
+    Called on each /map update from SLAM Toolbox.
+    Counts occupied cells (value > 0) to decide if map is ready for planning.
+
+    Previous version counted ALL known cells (c >= 0), which includes free
+    space (value=0). 100 free cells appear in the first 1-2 scans before any
+    walls are mapped — declaring map_ready() that early caused Nav2 to plan
+    paths through unmapped walls.
+    """
+    global _map_ok
+    try:
+        occupied = sum(1 for c in msg.data if c > 0)
+        if occupied >= MAP_MIN_OCCUPIED_CELLS and not _map_ok:
+            _map_ok = True
+            w = round(msg.info.width  * msg.info.resolution, 1)
+            h = round(msg.info.height * msg.info.resolution, 1)
+            log.info(f"🗺️  Map ready for Nav2 — {w}m × {h}m "
+                     f"({occupied} occupied cells)")
+    except Exception as e:
+        log.debug(f"map_callback error: {e}")
 
 
 def send_goal(x: float, y: float, yaw: float = 0.0,
               on_complete=None, on_fail=None) -> bool:
     """
     Send a navigation goal to Nav2.
-    x, y: target position in map frame (meters)
-    yaw: target heading (radians, 0 = forward)
-    on_complete: optional callback when goal reached
-    on_fail: optional callback if goal fails
+    x, y: target in map frame (metres from SLAM origin).
+    yaw:  target heading (radians, 0 = forward).
+    Checks map_ready() — won't plan on an empty SLAM map.
     Returns True if goal was accepted.
     """
     global _navigating, _current_goal
 
     if not _nav2_ok:
-        log.warning("Nav2 not available — cannot send goal")
+        log.warning("Nav2 not available")
+        return False
+    if not _map_ok:
+        log.warning("SLAM map not ready — goal deferred")
         return False
 
     try:
-        import math
         from nav2_msgs.action import NavigateToPose
         from geometry_msgs.msg import PoseStamped
-        from std_msgs.msg import Header
+        from ros_core import get_node
 
+        node     = get_node()
         goal_msg = NavigateToPose.Goal()
         goal_msg.pose = PoseStamped()
-        goal_msg.pose.header = Header()
-        goal_msg.pose.header.frame_id = "map"
-        goal_msg.pose.header.stamp = _node.get_clock().now().to_msg()
-        goal_msg.pose.pose.position.x = float(x)
-        goal_msg.pose.pose.position.y = float(y)
-        goal_msg.pose.pose.position.z = 0.0
-
-        # Convert yaw to quaternion
+        goal_msg.pose.header.frame_id    = "map"
+        goal_msg.pose.header.stamp       = node.get_clock().now().to_msg()
+        goal_msg.pose.pose.position.x    = float(x)
+        goal_msg.pose.pose.position.y    = float(y)
+        goal_msg.pose.pose.position.z    = 0.0
         goal_msg.pose.pose.orientation.z = math.sin(yaw / 2.0)
         goal_msg.pose.pose.orientation.w = math.cos(yaw / 2.0)
 
         _navigating = True
-        log.info(f"🧭 Nav2 goal → ({x:.2f}, {y:.2f}, yaw={yaw:.2f})")
+        log.info(f"🧭 Nav2 goal → ({x:.2f}, {y:.2f}, "
+                 f"yaw={math.degrees(yaw):.0f}°)")
 
         future = _nav_client.send_goal_async(goal_msg)
         future.add_done_callback(
@@ -196,7 +256,6 @@ def _on_goal_response(future, on_complete, on_fail):
 
     _current_goal = goal_handle
     log.info("Nav2 goal accepted — navigating...")
-
     result_future = goal_handle.get_result_async()
     result_future.add_done_callback(
         lambda f: _on_goal_result(f, on_complete, on_fail)
@@ -207,7 +266,6 @@ def _on_goal_result(future, on_complete, on_fail):
     global _navigating, _current_goal
     _navigating   = False
     _current_goal = None
-
     try:
         status = future.result().status
         from action_msgs.msg import GoalStatus
@@ -233,19 +291,38 @@ def cancel_goal():
             _current_goal.cancel_goal_async()
             log.info("Nav2 goal cancelled")
         except Exception as e:
-            log.debug(f"cancel_goal error (may be harmless): {e}")
+            log.debug(f"cancel_goal error: {e}")
     _navigating   = False
     _current_goal = None
 
 
+def costmap_clear():
+    """
+    Clear Nav2 costmaps after SLAM map updates significantly.
+    Fixed: was "/nav2/{costmap}/..." — correct path has no /nav2/ prefix.
+    Verify with: ros2 service list | grep clear
+    """
+    try:
+        import subprocess
+        for costmap in ("global_costmap", "local_costmap"):
+            subprocess.run(
+                ["ros2", "service", "call",
+                 f"/{costmap}/clear_entirely_costmap",
+                 "nav2_msgs/srv/ClearEntireCostmap", "{}"],
+                capture_output=True, timeout=3.0
+            )
+        log.debug("Nav2 costmaps cleared")
+    except Exception as e:
+        log.debug(f"costmap_clear error: {e}")
+
+
 def _refresh_pose():
-    """Update _pose from TF map→base_link transform."""
+    """Update _pose from TF map→base_link (provided by SLAM Toolbox)."""
     global _pose
     if not _nav2_ok or not _tf_buffer:
         return
     try:
-        import math
-        import rclpy.time  # explicit import — avoids NameError in module scope
+        import rclpy.time
         t = _tf_buffer.lookup_transform(
             "map", "base_link", rclpy.time.Time()
         )
@@ -257,83 +334,56 @@ def _refresh_pose():
             1.0 - 2.0 * (q.y * q.y + q.z * q.z)
         )
     except Exception:
-        pass   # TF not ready yet — use last known pose
+        pass
 
 
 def navigate_to_person(direction: str = "front") -> bool:
     """
-    High-level: navigate toward a person detected by Cosmos.
+    Navigate toward a detected person using SLAM map pose.
+    Waits for map_ready() — will not send a goal on an empty map.
     direction: "front" | "left" | "right" | "behind"
-    Uses relative goal offset from current pose.
     """
     if not _nav2_ok:
         return False
+    if not _map_ok:
+        log.info("navigate_to_person: map not ready — using direct approach")
+        return False
 
-    import math
     pose = get_pose()
     yaw  = pose["yaw"]
-
     dir_offsets = {
-        "front":  (1.5,  0.0,  0.0),
-        "left":   (0.5,  0.8,  math.pi / 2),
-        "right":  (0.5, -0.8, -math.pi / 2),
-        "behind": (-1.0, 0.0,  math.pi),
+        "front":  ( 1.0,  0.0,  0.0),
+        "left":   ( 0.5,  0.7,  math.pi / 2),
+        "right":  ( 0.5, -0.7, -math.pi / 2),
+        "behind": (-1.0,  0.0,  math.pi),
     }
-    dx, dy, dyaw = dir_offsets.get(direction, (1.5, 0.0, 0.0))
-
+    dx, dy, dyaw = dir_offsets.get(direction, (1.0, 0.0, 0.0))
     target_x   = pose["x"] + dx * math.cos(yaw) - dy * math.sin(yaw)
     target_y   = pose["y"] + dx * math.sin(yaw) + dy * math.cos(yaw)
     target_yaw = yaw + dyaw
-
-    log.info(f"Navigating toward person ({direction}) → ({target_x:.2f}, {target_y:.2f})")
+    log.info(f"🧭 Navigating toward person ({direction}) → "
+             f"({target_x:.2f}, {target_y:.2f})")
     return send_goal(target_x, target_y, target_yaw)
 
 
 def shutdown():
-    """
-    Clean shutdown of ROS2 node.
-
-    Call this from main.py via atexit / signal handlers BEFORE the interpreter
-    tears down daemon threads.  Proper ordering prevents std::terminate().
-
-    Correct call order:
-      1. cancel_goal()          — tell Nav2 to abort
-      2. executor.shutdown()    — wakes spin() cleanly, thread exits normally
-      3. node.destroy_node()    — releases ROS2 resources
-      4. rclpy.shutdown()       — tears down the context
-    """
-    global _nav2_ok, _node, _executor
-
+    """Clean Nav2 shutdown — call from main.py atexit."""
+    global _nav2_ok, _map_ok
     log.info("Nav2 shutting down...")
     _nav2_ok = False
-
-    # 1. Cancel any active navigation goal
+    _map_ok  = False
     cancel_goal()
-
-    # 2. Stop the executor — this wakes _spin_thread_fn() cleanly
-    if _executor is not None:
-        try:
-            _executor.shutdown(timeout_sec=2.0)
-        except Exception as e:
-            log.debug(f"executor.shutdown error: {e}")
-
-    # 3. Wait for spin thread to actually exit (up to 3 s)
-    if _ros_thread is not None and _ros_thread.is_alive():
-        _ros_thread.join(timeout=3.0)
-        if _ros_thread.is_alive():
-            log.warning("ROS2 spin thread did not exit cleanly within 3 s")
-
-    # 4. Destroy node and shutdown rclpy context
-    try:
-        import rclpy
-        if _node is not None:
-            _node.destroy_node()
-        if rclpy.ok():
-            rclpy.shutdown()
-    except Exception as e:
-        log.debug(f"rclpy.shutdown error: {e}")
-    finally:
-        _node     = None
-        _executor = None
-
+    # ros_core.shutdown() handles node/executor/rclpy teardown
     log.info("Nav2 shutdown complete")
+
+
+def get_status() -> dict:
+    pose = get_pose()
+    return {
+        "available":  _nav2_ok,
+        "map_ready":  _map_ok,
+        "navigating": _navigating,
+        "x":          round(pose["x"], 2),
+        "y":          round(pose["y"], 2),
+        "yaw_deg":    round(math.degrees(pose["yaw"]), 1),
+    }

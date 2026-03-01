@@ -8,7 +8,11 @@ Architecture:
   /odom        ──┼──→ SLAM Toolbox (online_async) → /map topic
   /tf           ──┘                                      ↓
                                                    Nav2 costmap
-                                                   (path planning)
+
+ROS2 node sharing:
+  Uses ros_core.get_node() — no longer creates its own node.
+  /map subscription shares the single 'eric_robot' node with
+  odom, lidar, and nav2.
 
 SLAM Toolbox must be installed:
   sudo apt install ros-humble-slam-toolbox
@@ -18,13 +22,10 @@ Usage:
   slam_available()         → True when map is being built
   save_map(mission_id)     → save .pgm + .yaml to missions/ folder
   reset_slam()             → clear map between missions
-  get_status()             → map size, pose, status for GUI
+  get_status()             → map size, status dict for GUI
 
-Maps are saved to:
-  missions/YYYY-MM-DD_HHMMSS_<mission_id>/map.pgm
-  missions/YYYY-MM-DD_HHMMSS_<mission_id>/map.yaml
-
-Each mission gets its own folder — full history preserved for SAR review.
+Maps saved to:
+  missions/YYYY-MM-DD_HHMMSS_<mission_id>/map.pgm + map.yaml
 """
 
 import logging
@@ -38,28 +39,27 @@ from pathlib import Path
 log = logging.getLogger("eric.slam")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-MAPS_DIR             = Path("missions")          # base directory for saved maps
-SLAM_LAUNCH_TIMEOUT  = 15.0                      # seconds to wait for SLAM ready
-SLAM_CHECK_INTERVAL  = 2.0                       # how often to check map topic
-MAP_TOPIC            = "/map"                    # SLAM Toolbox publishes here
-SLAM_NODE_NAME       = "async_slam_toolbox_node" # ROS2 node name to check
+MAPS_DIR             = Path("missions")
+SLAM_LAUNCH_TIMEOUT  = 40.0    # seconds to wait for SLAM node to appear (Jetson needs 20-35s)
+SLAM_CHECK_INTERVAL  = 2.0     # health monitor poll interval
+MAP_TOPIC            = "/map"
+SLAM_NODE_NAME       = "slam_toolbox"
 
-# ── SLAM Toolbox params written at runtime ────────────────────────────────────
-# These are written to a temp file and passed to slam_toolbox at launch.
-# Tuned for D500 LiDAR + UGV Beast geometry.
+# ── SLAM Toolbox params ───────────────────────────────────────────────────────
+# Tuned for D500 LiDAR + UGV Beast.
+# minimum_travel_distance reduced to 0.05m (was 0.20m) — the robot must be
+# able to update the map while turning in a doorway without moving 20cm
+# linearly first. At 0.20m, SLAM misses walls discovered during slow turns.
 SLAM_PARAMS = """
 slam_toolbox:
   ros__parameters:
-    # Solver
     solver_plugin: solver_plugins::CeresSolver
     ceres_linear_solver: SPARSE_NORMAL_CHOLESKY
     ceres_preconditioner: SCHUR_JACOBI
     ceres_trust_strategy: LEVENBERG_MARQUARDT
 
-    # Online async mode — builds map in real time, no pre-built map needed
     mode: mapping
 
-    # Topics
     odom_frame:   odom
     map_frame:    map
     base_frame:   base_link
@@ -67,13 +67,14 @@ slam_toolbox:
     use_scan_matching: true
     use_scan_barycenter: true
 
-    # Map resolution and size
     resolution: 0.05             # 5cm per cell — good for indoor SAR
     max_laser_range: 12.0        # D500 max range
-    minimum_travel_distance: 0.2 # only update map after moving 20cm
-    minimum_travel_heading: 0.1  # or turning 0.1 rad (~6°)
 
-    # Loop closure — finds when robot returns to known area
+    # Reduced from 0.20m — allows map updates during slow turns and
+    # doorway traversal without needing a full 20cm linear move first.
+    minimum_travel_distance: 0.05
+    minimum_travel_heading: 0.05  # ~3° — was 0.1 rad (~6°)
+
     loop_search_maximum_distance: 3.0
     do_loop_closing: true
     loop_match_minimum_chain_size: 10
@@ -81,7 +82,6 @@ slam_toolbox:
     loop_match_minimum_response_coarse: 0.35
     loop_match_minimum_response_fine: 0.45
 
-    # Scan matcher
     correlation_search_space_dimension: 0.5
     correlation_search_space_resolution: 0.01
     correlation_search_space_smear_deviation: 0.1
@@ -92,23 +92,21 @@ slam_toolbox:
     coarse_angle_search_space_dimension: 0.349
     coarse_angle_search_space_resolution: 0.0349
 
-    # Serial mode off — we use async
     tf_buffer_duration: 30.0
     stack_size_to_use: 40000000
     enable_interactive_mode: false
 """
 
 # ── Module state ──────────────────────────────────────────────────────────────
-_slam_ok          = False
-_slam_process     = None     # subprocess handle
-_map_received     = False    # True once first /map message arrives
-_map_width        = 0        # cells
-_map_height       = 0        # cells
-_map_resolution   = 0.05     # m/cell
-_lock             = threading.Lock()
-_monitor_thread   = None
-_map_sub          = None
-_node             = None
+_slam_ok        = False
+_slam_process   = None
+_map_received   = False
+_map_width      = 0
+_map_height     = 0
+_map_resolution = 0.05
+_lock           = threading.Lock()
+_monitor_thread = None
+_map_sub        = None
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
@@ -121,10 +119,10 @@ def slam_available() -> bool:
 def init_slam() -> bool:
     """
     Launch SLAM Toolbox in online async mode and subscribe to /map.
-    Returns True if SLAM started successfully.
-    Call at mission start — after init_odom() and init_lidar().
+    Call after init_odom() — SLAM needs /odom to be publishing.
+    Returns True if SLAM Toolbox node appeared within SLAM_LAUNCH_TIMEOUT.
     """
-    global _slam_ok, _slam_process, _map_received, _node, _map_sub
+    global _slam_ok, _slam_process, _map_received, _map_sub
 
     _map_received = False
 
@@ -132,7 +130,6 @@ def init_slam() -> bool:
     params_path = Path("/tmp/eric_slam_params.yaml")
     params_path.write_text(SLAM_PARAMS)
 
-    # Launch slam_toolbox as a subprocess
     try:
         cmd = [
             "ros2", "launch", "slam_toolbox", "online_async_launch.py",
@@ -146,7 +143,8 @@ def init_slam() -> bool:
         )
         log.info(f"🗺️  SLAM Toolbox launched (PID {_slam_process.pid})")
     except FileNotFoundError:
-        log.error("❌ slam_toolbox not found — install: sudo apt install ros-humble-slam-toolbox")
+        log.error("❌ slam_toolbox not found — install: "
+                  "sudo apt install ros-humble-slam-toolbox")
         _slam_ok = False
         return False
     except Exception as e:
@@ -154,30 +152,23 @@ def init_slam() -> bool:
         _slam_ok = False
         return False
 
-    # Subscribe to /map to confirm SLAM is producing data
+    # Subscribe to /map using shared ros_core node
     try:
-        import rclpy
+        from ros_core import get_node, ensure_spinning
         from nav_msgs.msg import OccupancyGrid
 
-        try:
-            from odom import _node as odom_node
-            if odom_node:
-                _node = odom_node
-            else:
-                raise Exception("odom node not ready")
-        except Exception:
-            _node = rclpy.create_node("eric_slam_monitor")
-
-        _map_sub = _node.create_subscription(
-            OccupancyGrid,
-            MAP_TOPIC,
-            _map_callback,
-            10
-        )
+        node = get_node()
+        if node is not None:
+            _map_sub = node.create_subscription(
+                OccupancyGrid, MAP_TOPIC, _map_callback, 10
+            )
+            ensure_spinning()
+        else:
+            log.warning("⚠️  ROS2 unavailable — /map subscription skipped")
     except Exception as e:
         log.warning(f"⚠️  Could not subscribe to /map: {e}")
 
-    # Start monitor thread — waits for first map, logs SLAM health
+    # Start health monitor thread
     _monitor_thread = threading.Thread(
         target=_slam_monitor_loop,
         daemon=True,
@@ -185,7 +176,7 @@ def init_slam() -> bool:
     )
     _monitor_thread.start()
 
-    # Wait for SLAM to come up
+    # Wait for SLAM Toolbox node to appear
     deadline = time.monotonic() + SLAM_LAUNCH_TIMEOUT
     while time.monotonic() < deadline:
         if _is_slam_node_running():
@@ -194,7 +185,7 @@ def init_slam() -> bool:
             return True
         time.sleep(1.0)
 
-    log.warning("⚠️  SLAM Toolbox did not start within timeout — map building unavailable")
+    log.warning("⚠️  SLAM Toolbox did not start within timeout")
     _slam_ok = False
     return False
 
@@ -202,12 +193,7 @@ def init_slam() -> bool:
 def save_map(mission_id: str = "") -> str | None:
     """
     Save current map to missions/ directory.
-    Returns the path to the saved map folder, or None on failure.
-    Call at mission end or on operator request.
-
-    Saves:
-      missions/YYYY-MM-DD_HHMMSS_<mission_id>/map.pgm
-      missions/YYYY-MM-DD_HHMMSS_<mission_id>/map.yaml
+    Returns the path to the saved folder, or None on failure.
     """
     if not _slam_ok:
         log.warning("save_map: SLAM not running — nothing to save")
@@ -241,12 +227,8 @@ def save_map(mission_id: str = "") -> str | None:
 
 
 def reset_slam():
-    """
-    Clear the current map and restart SLAM from scratch.
-    Call between missions if robot stays in same process.
-    """
+    """Clear the current map and restart SLAM from scratch."""
     global _map_received, _map_width, _map_height
-
     try:
         subprocess.run(
             ["ros2", "service", "call",
@@ -258,7 +240,7 @@ def reset_slam():
             _map_received = False
             _map_width    = 0
             _map_height   = 0
-        log.info("🔄 SLAM map cleared — fresh map on next mission")
+        log.info("🔄 SLAM map cleared")
     except Exception as e:
         log.warning(f"reset_slam error: {e}")
 
@@ -278,10 +260,10 @@ def shutdown_slam():
     _slam_process = None
 
 
-# ─── Internal helpers ─────────────────────────────────────────────────────────
+# ─── Internal ─────────────────────────────────────────────────────────────────
 
 def _map_callback(msg):
-    """Called when /map publishes — confirms SLAM is producing data."""
+    """Called when SLAM Toolbox publishes a new /map."""
     global _map_received, _map_width, _map_height, _map_resolution
     with _lock:
         _map_received   = True
@@ -291,7 +273,6 @@ def _map_callback(msg):
 
 
 def _is_slam_node_running() -> bool:
-    """Check if slam_toolbox ROS2 node is alive."""
     try:
         result = subprocess.run(
             ["ros2", "node", "list"],
@@ -303,30 +284,21 @@ def _is_slam_node_running() -> bool:
 
 
 def _slam_monitor_loop():
-    """
-    Background thread — monitors SLAM health.
-    Logs when map first arrives. Detects if SLAM process dies unexpectedly.
-    """
-    global _slam_ok, _map_received
-
+    """Monitor SLAM health — logs first map, detects process death."""
+    global _slam_ok
     map_logged = False
     while True:
         time.sleep(SLAM_CHECK_INTERVAL)
-
         if not _slam_ok:
             break
-
-        # Log when first map arrives
         if _map_received and not map_logged:
             with _lock:
                 w, h, r = _map_width, _map_height, _map_resolution
             log.info(f"🗺️  First map received — {w}×{h} cells @ {r}m/cell "
                      f"({w*r:.1f}m × {h*r:.1f}m coverage)")
             map_logged = True
-
-        # Check if SLAM process died
         if _slam_process and _slam_process.poll() is not None:
-            log.error("❌ SLAM Toolbox process died unexpectedly — map building stopped")
+            log.error("❌ SLAM Toolbox process died — map building stopped")
             _slam_ok = False
             break
 
@@ -336,30 +308,26 @@ def _slam_monitor_loop():
 def get_status() -> dict:
     with _lock:
         return {
-            "available":     _slam_ok,
-            "map_received":  _map_received,
-            "map_width_m":   round(_map_width  * _map_resolution, 1),
-            "map_height_m":  round(_map_height * _map_resolution, 1),
-            "map_cells":     _map_width * _map_height,
+            "available":    _slam_ok,
+            "map_received": _map_received,
+            "map_width_m":  round(_map_width  * _map_resolution, 1),
+            "map_height_m": round(_map_height * _map_resolution, 1),
+            "map_cells":    _map_width * _map_height,
         }
 
 
 def slam_status_html() -> str:
-    """HTML status panel for Gradio GUI."""
     s = get_status()
-
     if not s["available"]:
         return """
         <div style="background:#1a1a1a;border:1px solid #444;border-radius:8px;
                     padding:10px;font-family:monospace;color:#666">
             🗺️  SLAM: not running
         </div>"""
-
     if not s["map_received"]:
         color, label = "#ff6600", "⏳ waiting for first scan..."
     else:
         color, label = "#76b900", f"✅ mapping — {s['map_width_m']}m × {s['map_height_m']}m"
-
     return f"""
     <div style="background:#1a1a1a;border:1px solid {color};border-radius:8px;
                 padding:10px;font-family:monospace;">
