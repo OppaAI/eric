@@ -65,7 +65,7 @@ _min_distance     = 999.0
 _safety_active    = True
 _avoidance_active = False
 
-_LOG_RATE_S         = 3.0
+_LOG_RATE_S         = 10.0
 _last_stop_log_time = 0.0
 _last_slow_log_time = 0.0
 _last_stop_dist     = 999.0
@@ -409,7 +409,7 @@ def _motors_slow(tag: str, reason: str):
         except Exception:
             dist = 0.0
         if now - _last_slow_log_time >= _LOG_RATE_S or abs(dist - _last_slow_dist) > 0.10:
-            log.info(f"⚠️  {tag} — {reason}")
+            log.debug(f"⚠️  {tag} — {reason}")
             _last_slow_log_time = now
             _last_slow_dist     = dist
     except Exception:
