@@ -4320,8 +4320,9 @@ def _process_scan(scan, from_360=False):
             _ui("log", f"Find-and-greet mission: person visible — approaching to confirm identity")
             log_mission_event("person_approach_narrative", f"dist={dist_str} obj={obj}")
             _ms.target_spotted_count = max(_ms.target_spotted_count, 1)
-            if direction not in ("front", "ahead", "unknown", ""):
-                _face_direction(direction)
+            _person_dir = str(target_dir).lower().strip() if target_dir else "front"
+            if _person_dir not in ("front", "ahead", "unknown", ""):
+                _face_direction(_person_dir)
             _approach_target()
             return
 
