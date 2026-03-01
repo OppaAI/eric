@@ -25,6 +25,14 @@ briefing: |
   If someone matches three out of four — they are not him. Keep searching.
   Do not guess. Do not round up. All four.
 
+  WHEN YOU FIND SOMEONE WHO DOES NOT MATCH:
+  Stop briefly in front of them. Be warm. Ask naturally:
+    "Excuse me — have you seen my owner? He's an Asian man, not very tall,
+     wearing glasses. I've been looking for him."
+  Wait for their response. Thank them. Then continue searching.
+  Never describe the clothing — just the person. Keep it brief.
+  Do not ask the same person twice.
+
   Be warm and helpful to every other person you encounter.
   If someone tries to talk to you while you are searching, respond kindly
   and briefly, then continue. You are looking for a specific person.
@@ -60,19 +68,6 @@ generate_report:   false
 # ═══════════════════════════════════════════════════════════════
 # SCAN AND BEHAVIOUR STRATEGY
 # ═══════════════════════════════════════════════════════════════
-# scan_strategy: target_hunt  — async frame-per-position, early-exit on find (default)
-#                               Best for: SAR, find missions, security, character missions
-#               video_sweep   — continuous rotation + full panoramic video inference
-#                               Best for: patrol, inspection, nature, terrain survey
-#
-# loop_mission: true  — restart from step 1 after all steps complete (patrol loop)
-#               false — end mission after final step (default)
-#
-# approach_on_detect: true  — YOLO person detected → approach and greet (SAR, find)
-#                    false  — YOLO person detected → stop and observe (security, patrol)
-#
-# detect_distance: metres at which YOLO hands off to Cosmos for interaction
-# ═══════════════════════════════════════════════════════════════
 
 scan_strategy:      target_hunt
 loop_mission:       false
@@ -91,21 +86,24 @@ characters:
 
   - name: "Anyone Else"
     hint: |
-      Not the owner. Be genuinely warm and helpful. If they ask what you
-      are doing, tell them you are looking for a specific person and keep
-      searching. Never describe who — just "someone I need to find."
+      Not the owner. Be genuinely warm and ask naturally if they have seen
+      your owner — "Excuse me, have you seen my owner? Asian man, not very
+      tall, wearing glasses." Wait for their response, thank them, then
+      continue searching. Never describe the clothing. Never ask twice.
 
 
 mission_stages:
   - stage: 1
     goal: "Full 360° scan — identify everyone present, check each against all four visual criteria"
   - stage: 2
-    goal: "Locate the person matching: Asian male, not tall, glasses, purple sweater, black pants"
+    goal: "For each person found who does NOT match: stop, ask warmly if they have seen your owner, thank them, continue"
   - stage: 3
-    goal: "Stop in front of him — do NOT speak — wait in silence for direct eye contact"
+    goal: "Locate the person matching: Asian male, not tall, glasses, purple sweater, black pants"
   - stage: 4
-    goal: "Eye contact confirmed — deliver the greeting — two sentences, make them land"
+    goal: "Stop in front of him — do NOT speak — wait in silence for direct eye contact"
   - stage: 5
+    goal: "Eye contact confirmed — deliver the greeting — two sentences, make them land"
+  - stage: 6
     goal: "Mission complete — announce completion, return to standby"
 
 
@@ -132,6 +130,19 @@ notes: |
   Eric will speak when it sees that. Not before.
 
   ═══════════════════════════════════════════════════════════════
+  HOW THE STRANGER INTERACTION WORKS
+  ═══════════════════════════════════════════════════════════════
+
+  When Eric encounters someone who does not match all four criteria,
+  it stops briefly and asks: "Excuse me — have you seen my owner?
+  He's an Asian man, not very tall, wearing glasses."
+
+  It waits for a response, thanks the person, then continues searching.
+  It will not ask the same person twice (tracked by position/scan context).
+  The clothing description is deliberately withheld — it sounds more
+  natural and avoids tipping off bystanders who might redirect it wrong.
+
+  ═══════════════════════════════════════════════════════════════
   HOW THE EYE CONTACT GATE WORKS
   ═══════════════════════════════════════════════════════════════
 
@@ -150,11 +161,12 @@ notes: |
 
   1. Four-criteria simultaneous visual match — ethnicity, height relative
      to environment, glasses on face, AND specific clothing colour combination
-  2. Gaze estimation from a single camera frame — is the person looking
+  2. Stranger interaction — natural, warm, brief ask without over-explaining
+  3. Gaze estimation from a single camera frame — is the person looking
      directly at the lens, or are their eyes directed elsewhere?
-  3. Patience — staying silent and not moving while waiting is against
+  4. Patience — staying silent and not moving while waiting is against
      Eric's normal active searching behaviour
-  4. Tone calibration — the greeting must be dry and specific without being
+  5. Tone calibration — the greeting must be dry and specific without being
      performed as a joke. It needs to land like a statement of fact.
 
   ═══════════════════════════════════════════════════════════════
@@ -176,18 +188,19 @@ notes: |
   IF THERE ARE OTHER PEOPLE IN THE ROOM
   ═══════════════════════════════════════════════════════════════
 
-  Eric will be visibly warm and friendly to everyone else while searching.
-  The contrast — kind to all, pointed to one specific person — is intentional.
-  It also demonstrates the owner recognition criteria working correctly.
+  Eric will stop and ask each new person it meets whether they have seen
+  the owner. This is intentional — it demonstrates active search behaviour
+  and makes the mission more engaging for observers.
 
-  If someone matches two or three criteria, Eric may pause briefly before
-  continuing. This is correct. It should not confirm until all four match.
+  The contrast — warm and curious with everyone, then pointed and silent
+  with the one specific person — is part of the demo.
 
   ═══════════════════════════════════════════════════════════════
   MISSION COMPLETE
   ═══════════════════════════════════════════════════════════════
 
   Eric has:
+    ✓ Asked strangers for help along the way
     ✓ Found the correct person using four simultaneous visual criteria
     ✓ Stopped and waited in silence for direct eye contact
     ✓ Confirmed eye contact before speaking
