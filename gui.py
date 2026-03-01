@@ -23,40 +23,65 @@ from mission import (
 log = logging.getLogger("eric.gui")
 
 # ─── Battery (regex reader — works around Jetson THS1 frame-drop) ────────────
-import re as _re, serial as _serial, os as _os
+import re as _re, os as _os, time as _time
 
 _BATT_V_MAX      = 12.6
 _BATT_V_MIN      = 10.5
 _battery_voltage = None
 _battery_lock    = threading.Lock()
 
+# ── Serial access lock shared with motors ────────────────────────────────────
+# We reuse motors._ser so there's only ONE connection to the MCU.
+# A dedicated lock prevents interleaving with motor commands.
+_serial_lock = threading.Lock()
+
+def _query_battery_via_motors():
+    """
+    Send T:105 through the motors serial port and extract voltage from reply.
+    Returns voltage in volts, or None on failure.
+    Uses the regex tail method from test_bat.py:  (\d+)\}  → val/100.
+    """
+    try:
+        ser = motors._ser
+        if ser is None or not ser.is_open:
+            return None
+        with _serial_lock:
+            ser.reset_input_buffer()
+            ser.write(b'{"T":105}\n')
+            _time.sleep(0.12)          # give MCU time to respond
+            raw = b""
+            deadline = _time.time() + 0.4
+            while _time.time() < deadline:
+                n = ser.in_waiting
+                if n:
+                    raw += ser.read(n)
+                else:
+                    _time.sleep(0.01)
+        text    = raw.replace(b'\x00', b'').decode('utf-8', errors='replace')
+        compact = ''.join(text.split())
+        for m in _re.findall(r'(\d+)\}', compact):
+            val = int(m)
+            if 900 <= val <= 1350:
+                return round(val / 100.0, 2)
+    except Exception as exc:
+        log.debug("battery query error: %s", exc)
+    return None
+
+
 def _battery_poll_loop():
     global _battery_voltage
-    port = _os.getenv('SERIAL_PORT', '/dev/ttyTHS1')
-    try:
-        ser = _serial.Serial(port, 115200,
-            parity=_serial.PARITY_NONE, stopbits=_serial.STOPBITS_ONE,
-            bytesize=_serial.EIGHTBITS, timeout=0)
-        ser.reset_input_buffer()
-        log.info("GUI battery reader opened %s", port)
-        buf = b""
-        while True:
-            n = ser.in_waiting
-            if n:
-                buf += ser.read(n)
-                text    = buf.replace(b'\x00', b'').decode('utf-8', errors='replace')
-                compact = ''.join(text.split())
-                for m in _re.findall(r'(\d+)\}', compact):
-                    val = int(m)
-                    if 900 <= val <= 1350:
-                        with _battery_lock:
-                            _battery_voltage = round(val / 100.0, 2)
-                if len(buf) > 1024:
-                    buf = buf[-512:]
-            else:
-                import time as _t; _t.sleep(0.05)
-    except Exception as e:
-        log.warning("GUI battery thread: %s", e)
+    # Wait for motors to initialise before first attempt
+    _time.sleep(5)
+    log.info("GUI battery poller started")
+    while True:
+        v = _query_battery_via_motors()
+        if v is not None:
+            with _battery_lock:
+                _battery_voltage = v
+            log.debug("Battery: %.2f V", v)
+        else:
+            log.debug("Battery query returned no data")
+        _time.sleep(30)   # poll every 30 s — battery changes slowly
 
 threading.Thread(target=_battery_poll_loop, daemon=True, name="gui-battery").start()
 
@@ -134,16 +159,46 @@ def get_log():      return _log_text
 
 # ─── Module status ────────────────────────────────────────────────────────────
 
+def _battery_row() -> str:
+    """Render a battery status row matching _dot() style for the system status box."""
+    with _battery_lock:
+        v = _battery_voltage
+    mono = "font-family:'Courier New',monospace"
+    if v is None:
+        return f"""
+    <div style="display:flex;align-items:center;gap:8px;padding:2px 0;{mono}">
+        <div style="width:8px;height:8px;border-radius:50%;background:#333;flex-shrink:0;"></div>
+        <span style="color:#aaa;font-size:0.7em;letter-spacing:0.04em;min-width:90px">BATTERY</span>
+        <span style="color:#444;font-size:0.65em;letter-spacing:0.06em">--.-V</span>
+    </div>"""
+    pct   = max(0, min(100, int((v - _BATT_V_MIN) / (_BATT_V_MAX - _BATT_V_MIN) * 100)))
+    label, color, _ = _battery_level_gui(pct)
+    filled = round(pct / 10)
+    bar = (f'<span style="color:{color}">{"█" * filled}</span>'
+           f'<span style="color:#1a1a22">{"░" * (10 - filled)}</span>')
+    return f"""
+    <div style="padding:2px 0 4px 0;{mono}">
+        <div style="display:flex;align-items:center;gap:8px">
+            <div style="width:8px;height:8px;border-radius:50%;background:{color};box-shadow:0 0 12px {color};flex-shrink:0;"></div>
+            <span style="color:#ddd;font-size:0.78em;letter-spacing:0.04em;min-width:90px">BATTERY</span>
+            <span style="color:{color};font-size:0.76em;letter-spacing:0.06em;font-weight:bold">{label}</span>
+            <span style="font-size:0.72em;margin-left:4px">{bar}</span>
+            <span style="color:#ccffff;font-size:0.78em;font-weight:bold;margin-left:4px">{v:.2f}V</span>
+            <span style="color:{color};font-size:0.72em;font-weight:bold;margin-left:2px">{pct}%</span>
+        </div>
+    </div>"""
+
+
 def _dot(active: bool, label: str, detail: str = "") -> str:
     color  = "#00ffff" if active else "#ff0066"
     glow   = f"0 0 12px {color}" if active else "none"
     state  = "ONLINE" if active else "OFFLINE"
-    detail_html = f'<span style="color:#555;font-size:0.65em;margin-left:4px">{detail}</span>' if detail else ""
+    detail_html = f'<span style="color:#999;font-size:0.8em;margin-left:4px">{detail}</span>' if detail else ""
     return f"""
-    <div style="display:flex;align-items:center;gap:8px;padding:2px 0;font-family:'Courier New',monospace">
-        <div style="width:8px;height:8px;border-radius:50%;background:{color};box-shadow:{glow};flex-shrink:0;"></div>
-        <span style="color:#aaa;font-size:0.7em;letter-spacing:0.04em;min-width:90px">{label}</span>
-        <span style="color:{color};font-size:0.65em;letter-spacing:0.06em">{state}</span>
+    <div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-family:'Courier New',monospace">
+        <div style="width:9px;height:9px;border-radius:50%;background:{color};box-shadow:{glow};flex-shrink:0;"></div>
+        <span style="color:#eee;font-size:0.84em;letter-spacing:0.04em;min-width:90px">{label}</span>
+        <span style="color:{color};font-size:0.82em;letter-spacing:0.06em;font-weight:bold">{state}</span>
         {detail_html}
     </div>"""
 
@@ -174,14 +229,19 @@ def get_module_status_html() -> str:
         lidar_ok, lidar_detail = False, ""
 
     try:
-        from oakd import oakd_available, get_front_depth
+        from oakd import oakd_available
         oakd_ok = oakd_available()
-        oakd_detail = ""
-        if oakd_ok:
+    except Exception as e:
+        log.debug("oakd_available check failed: %s", e)
+        oakd_ok = False
+    oakd_detail = ""
+    if oakd_ok:
+        try:
+            from oakd import get_front_depth
             d = get_front_depth()
             oakd_detail = f"{d:.2f}m" if d is not None else "—"
-    except Exception:
-        oakd_ok, oakd_detail = False, ""
+        except Exception as e:
+            log.debug("get_front_depth failed: %s", e)
 
     try:
         from nav2 import nav2_available, is_navigating
@@ -208,12 +268,13 @@ def get_module_status_html() -> str:
         _dot(oakd_ok,    "OAK-D", oakd_detail) +
         _dot(nav2_ok,    "NAV2", nav2_detail) +
         _dot(tts_ok,     "TTS", tts_detail) +
-        _dot(motors_ok,  "MOTORS", "UART")
+        _dot(motors_ok,  "MOTORS", "UART") +
+        _battery_row()
     )
 
     return f"""
     <div style="background:#0a0a0f;border:1px solid #ff00ff44;border-radius:4px;padding:8px 10px;">
-        <div style="color:#ff00ff;font-size:0.6em;letter-spacing:0.2em;margin-bottom:6px;border-bottom:1px solid #ff00ff33;padding-bottom:4px">SYSTEM STATUS</div>
+        <div style="color:#ff44ff;font-size:0.82em;letter-spacing:0.2em;margin-bottom:6px;border-bottom:1px solid #ff00ff55;padding-bottom:4px;font-weight:bold;text-shadow:0 0 10px #ff00ff88">SYSTEM STATUS</div>
         {rows}
     </div>"""
 
@@ -265,9 +326,9 @@ def get_motor_telemetry():
 
 def _sensor_panel(label: str, body_html: str, border_color: str = "#00ffff") -> str:
     return f"""
-    <div style="background:#0a0a0f;border:1px solid {border_color}44;border-radius:4px;padding:8px 10px;font-family:'Courier New',monospace;margin-bottom:4px">
-        <div style="color:{border_color};font-size:0.7em;font-weight:bold;letter-spacing:0.12em;margin-bottom:5px;border-bottom:1px solid {border_color}33;padding-bottom:3px">{label}</div>
-        {body_html}
+    <div style="background:#0a0a0f;border:1px solid {border_color}44;border-radius:4px;padding:6px 8px;font-family:'Courier New',monospace;">
+        <div style="color:{border_color};font-size:0.72em;font-weight:bold;letter-spacing:0.1em;margin-bottom:4px;border-bottom:1px solid {border_color}33;padding-bottom:2px">{label}</div>
+        <div style="text-align:center;padding:2px 0">{body_html}</div>
     </div>"""
 
 def get_lidar_html() -> str:
@@ -283,11 +344,7 @@ def get_lidar_html() -> str:
                 color, state = "#ffff00", "CAUTION"
             else:
                 color, state = "#00ffff", "CLEAR"
-            body = f"""
-            <div style="display:flex;justify-content:space-between;align-items:center">
-                <span style="color:{color};font-size:0.8em;letter-spacing:0.08em;text-shadow:0 0 8px {color}66">{state}</span>
-                <span style="color:#fff;font-size:1em;font-weight:bold">{dist}</span>
-            </div>"""
+            body = f'<span style="color:{color};font-size:0.78em;text-shadow:0 0 8px {color}66">{state}</span> <span style="color:#fff;font-size:1em;font-weight:bold">{dist}</span>'
             return _sensor_panel("LIDAR D500", body, color)
     except Exception:
         pass
@@ -295,12 +352,18 @@ def get_lidar_html() -> str:
 
 def get_oakd_html() -> str:
     try:
-        from oakd import oakd_available, get_front_depth
+        from oakd import oakd_available
         if oakd_available():
-            d = get_front_depth()
+            # Module is up — now try to get depth reading separately
+            try:
+                from oakd import get_front_depth
+                d = get_front_depth()
+            except Exception as e:
+                log.debug("get_front_depth failed: %s", e)
+                d = None
             if d is None:
-                body = '<span style="color:#555;font-size:0.75em">NO READING</span>'
-                color = "#444"
+                body = '<span style="color:#aaa;font-size:0.75em">NO READING</span>'
+                color = "#00ffff"
             elif d < 0.30:
                 color = "#ff0066"
                 body  = f'<span style="color:{color};font-size:0.8em;text-shadow:0 0 8px {color}66">CRITICAL</span> <span style="color:#fff;font-weight:bold">{d:.2f}m</span>'
@@ -311,8 +374,8 @@ def get_oakd_html() -> str:
                 color = "#00ffff"
                 body  = f'<span style="color:{color};font-size:0.8em;text-shadow:0 0 8px {color}66">OPTIMAL</span> <span style="color:#fff;font-weight:bold">{d:.2f}m</span>'
             return _sensor_panel("OAK-D DEPTH", body, color)
-    except Exception:
-        pass
+    except Exception as e:
+        log.debug("oakd_available failed: %s", e)
     return _sensor_panel("OAK-D LITE", '<span style="color:#333;font-size:0.75em">OFFLINE</span>', "#444")
 
 # ─── Mission helpers ──────────────────────────────────────────────────────────
@@ -423,8 +486,8 @@ body, .gradio-container {
     font-family: 'Share Tech Mono', 'Courier New', monospace !important;
     background-image:
         /* Dark cyan grid lines */
-        linear-gradient(rgba(0,255,255,0.08) 1px, transparent 1px),
-        linear-gradient(90deg, rgba(0,255,255,0.08) 1px, transparent 1px),
+        linear-gradient(rgba(0,255,255,0.32) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(0,255,255,0.32) 1px, transparent 1px),
         /* Subtle radial glows */
         radial-gradient(ellipse at 50% 0%, rgba(0,255,255,0.08) 0%, transparent 50%),
         radial-gradient(ellipse at 50% 100%, rgba(0,255,255,0.05) 0%, transparent 50%);
@@ -470,11 +533,11 @@ body::after {
         0 0 80px #00ffff33;
 }
 .eric-sub {
-    font-size: 0.7em;
-    color: #ff00ff;
+    font-size: 1.0em;
+    color: #ff55ff;
     letter-spacing: 0.1em;
     font-family: 'Share Tech Mono', monospace;
-    text-shadow: 0 0 10px #ff00ff66;
+    text-shadow: 0 0 10px #ff00ffaa;
 }
 
 /* ── STOP button — PERFECT CIRCLE ───────────────────────────────────── */
@@ -513,6 +576,19 @@ body::after {
 #stop-btn:active {
     transform: scale(0.95) !important;
     box-shadow: 0 0 20px #ff006688 !important;
+}
+
+/* ── EMERGENCY label above STOP ─────────────────────────────────────── */
+#emergency-label {
+    color: #ff1155;
+    font-size: 0.9em;
+    font-weight: bold;
+    letter-spacing: 0.16em;
+    text-align: center;
+    font-family: 'Share Tech Mono', monospace;
+    text-shadow: 0 0 14px #ff005599, 0 0 28px #ff005544;
+    padding: 0;
+    white-space: nowrap;
 }
 
 /* ── ENGAGE button ──────────────────────────────────────────────────── */
@@ -591,76 +667,174 @@ label span, .gr-label {
     background: #0a0a0f !important;
 }
 
-/* ── SQUARE joystick buttons ────────────────────────────────────────── */
+/* ── Pure HTML D-pad cross layout ────────────────────────────────────── */
+#dpad-container {
+    display: flex;
+    flex-direction: row;
+    align-items: center;
+    gap: 40px;
+    margin: 6px 0 8px 28px;
+}
+#dpad-cross {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    flex-shrink: 0;
+}
+.dpad-row {
+    display: flex;
+    flex-direction: row;
+    gap: 4px;
+    align-items: center;
+}
+.dpad-cell {
+    width: 46px;
+    height: 46px;
+    flex-shrink: 0;
+}
+.dpad-key {
+    width: 46px;
+    height: 46px;
+    flex-shrink: 0;
+    background: #080812;
+    border: 1.5px solid #00ffff55;
+    border-radius: 4px;
+    color: #00ffff;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 1.25em;
+    font-weight: bold;
+    cursor: pointer;
+    text-shadow: 0 0 8px #00ffff88;
+    transition: all 0.1s;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0;
+    line-height: 1;
+}
+.dpad-key:hover {
+    border-color: #00ffff;
+    background: #001a1a;
+    box-shadow: 0 0 14px #00ffff55;
+    transform: scale(1.1);
+}
+.dpad-key:active {
+    transform: scale(0.9);
+    box-shadow: 0 0 6px #00ffff44;
+}
+.dpad-key-stop {
+    border-color: #ff006655;
+    color: #ff0066;
+    text-shadow: 0 0 8px #ff006688;
+}
+.dpad-key-stop:hover {
+    border-color: #ff0066;
+    background: #1a0008;
+    box-shadow: 0 0 12px #ff006655;
+}
+.dpad-key-spin {
+    color: #ff00ff;
+    border-color: #ff00ff44;
+    text-shadow: 0 0 8px #ff00ff88;
+}
+.dpad-key-spin:hover {
+    border-color: #ff00ff;
+    background: #1a001a;
+    box-shadow: 0 0 12px #ff00ff55;
+}
+/* RIGHT side: EMERGENCY label + STOP circle */
+#dpad-emergency {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+/* STOP circle — sized to roughly match d-pad height (3 × 46px + 2 × 4px gap = 146px) */
+.stop-circle {
+    width: 130px;
+    height: 130px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 35%, #ff2266, #550011);
+    border: 3px solid #ff0066;
+    color: #fff;
+    font-family: 'Share Tech Mono', monospace;
+    font-size: 1.0em;
+    font-weight: bold;
+    letter-spacing: 0.12em;
+    cursor: pointer;
+    box-shadow: 0 0 28px #ff0066aa, 0 0 56px #ff006644;
+    transition: all 0.15s;
+    line-height: 1;
+}
+.stop-circle:hover {
+    box-shadow: 0 0 40px #ff0066ff, 0 0 80px #ff006666;
+    transform: scale(1.05);
+    border-color: #ff3399;
+}
+.stop-circle:active {
+    transform: scale(0.92);
+    box-shadow: 0 0 18px #ff006688;
+}
+/* Hidden Gradio buttons — kept in DOM for event binding, invisible */
+.hidden-offscreen {
+    position: absolute !important;
+    left: -9999px !important;
+    top: -9999px !important;
+    width: 1px !important;
+    height: 1px !important;
+    overflow: hidden !important;
+    pointer-events: none !important;
+    opacity: 0 !important;
+}
+/* ctrl-btn for refresh + transmit buttons */
 .ctrl-btn button {
     background: #0a0a0f !important;
-    border: 1px solid #00ffff66 !important;
+    border: 1px solid #00ffff44 !important;
     color: #00ffff !important;
     font-family: 'Share Tech Mono', monospace !important;
-    font-size: 1.1em !important;
-    font-weight: bold !important;
+    font-size: 0.9em !important;
     border-radius: 2px !important;
-    /* SQUARE: equal width and height */
-    width: 44px !important;
-    height: 44px !important;
-    min-width: 44px !important;
-    min-height: 44px !important;
-    max-width: 44px !important;
-    max-height: 44px !important;
-    padding: 0 !important;
-    text-shadow: 0 0 8px #00ffff88 !important;
+    padding: 4px 8px !important;
     transition: all 0.15s !important;
 }
 .ctrl-btn button:hover {
     border-color: #00ffff !important;
     background: #001a1a !important;
-    box-shadow: 0 0 15px #00ffff55 !important;
-    transform: scale(1.05) !important;
+    box-shadow: 0 0 12px #00ffff55 !important;
 }
-.ctrl-stop button {
-    border-color: #ff0066 !important;
-    color: #ff0066 !important;
-    text-shadow: 0 0 8px #ff006688 !important;
-}
-.ctrl-stop button:hover {
-    background: #1a0008 !important;
-    border-color: #ff3399 !important;
-    box-shadow: 0 0 15px #ff006655 !important;
-}
-/* Wide buttons for spin - also square but wider */
 .ctrl-wide button {
-    width: 44px !important;
-    height: 44px !important;
-    min-width: 44px !important;
-    min-height: 44px !important;
     font-size: 0.85em !important;
+    padding: 6px 10px !important;
 }
 
 /* ── Camera images ───────────────────────────────────────────────────── */
 .cam-label {
-    color: #ff00ff;
-    font-size: 0.65em;
+    color: #ff44ff;
+    font-size: 0.88em;
     font-weight: bold;
     letter-spacing: 0.15em;
     text-transform: uppercase;
     font-family: 'Share Tech Mono', monospace;
-    margin-bottom: 2px;
-    text-shadow: 0 0 10px #ff00ff66;
+    margin-bottom: 1px;
+    margin-top: 2px;
+    text-shadow: 0 0 10px #ff00ff99;
 }
 
 /* ── Section headers ─────────────────────────────────────────────────── */
 .panel-head {
     color: #00ffff;
-    font-size: 0.7em;
+    font-size: 0.9em;
     font-weight: bold;
     letter-spacing: 0.2em;
     text-transform: uppercase;
     font-family: 'Share Tech Mono', monospace;
-    border-bottom: 1px solid #00ffff44;
-    padding-bottom: 3px;
-    margin-bottom: 5px;
-    margin-top: 6px;
-    text-shadow: 0 0 10px #00ffff44;
+    border-bottom: 1px solid #00ffff66;
+    padding-bottom: 2px;
+    margin-bottom: 3px;
+    margin-top: 3px;
+    text-shadow: 0 0 12px #00ffff88;
 }
 
 /* ── Dropdown ────────────────────────────────────────────────────────── */
@@ -701,142 +875,10 @@ _HEADER_HTML = """
 <div class="eric-header">
     <span class="eric-title">E.R.I.C.</span>
     <span class="eric-sub">
-        EDGE ROBOTICS INNOVATION // COSMOS COOKOFF 2026 // JETSON ORIN NANO // WAVESHARE UGV // VANCOUVER BC // ~$750 CAD
+        EDGE ROBOTICS INNOVATION // JETSON ORIN NANO // WAVESHARE UGV ROVER
     </span>
 </div>
 """
-
-# ─── Build UI ─────────────────────────────────────────────────────────────────
-
-def build_ui():
-    default_text    = _default_mission_text()
-    default_mission = _default_mission_choice()
-
-    with gr.Blocks(title="ERIC — Mission Control", css=_CSS) as demo:
-
-        gr.HTML(_HEADER_HTML)
-
-        with gr.Row(equal_height=False):
-
-            # ═══════════════════════════════════════════════════════════════
-            # LEFT COLUMN — cameras + status + sensors
-            # ═══════════════════════════════════════════════════════════════
-            with gr.Column(scale=2, min_width=180):
-
-                gr.HTML('<div class="cam-label">◉ PAN-TILT FEED</div>')
-                pantilt_img = gr.Image(streaming=True, height=140, label="", show_label=False)
-
-                gr.HTML('<div class="cam-label">◉ WEBCAM FEED</div>')
-                webcam_img = gr.Image(streaming=True, height=110, label="", show_label=False)
-
-                gr.HTML('<div class="panel-head" style="margin-top:4px">◈ MODULE STATUS</div>')
-                module_status = gr.HTML(value=get_module_status_html())
-
-                gr.HTML('<div class="panel-head">◈ SENSORS</div>')
-                lidar_display = gr.HTML(value=get_lidar_html())
-                oakd_display  = gr.HTML(value=get_oakd_html())
-
-                gr.HTML('<div class="panel-head">◈ POWER</div>')
-                battery_display = gr.HTML(value=get_battery_html())
-
-            # ═══════════════════════════════════════════════════════════════
-            # CENTRE COLUMN — mission + comms (log moved to right)
-            # ═══════════════════════════════════════════════════════════════
-            with gr.Column(scale=3, min_width=300):
-
-                gr.HTML('<div class="panel-head">◈ MISSION BRIEFING</div>')
-                with gr.Row():
-                    mission_dd = gr.Dropdown(
-                        choices=load_mission_choices(),
-                        value=default_mission,
-                        label="",
-                        show_label=False,
-                        scale=4
-                    )
-                    refresh_btn = gr.Button("↻", scale=0, min_width=36, elem_classes=["ctrl-btn"])
-
-                briefing_box = gr.Textbox(
-                    value=default_text,
-                    label="",
-                    show_label=False,
-                    lines=5,
-                    max_lines=7,
-                    placeholder="Mission briefing..."
-                )
-
-                # ENGAGE and DISENGAGE side by side
-                with gr.Row():
-                    engage_btn = gr.Button("▶ ENGAGE", elem_id="engage-btn", variant="primary", scale=1)
-                    disengage_btn = gr.Button("◼ DISENGAGE", elem_id="disengage-btn", variant="secondary", scale=1)
-
-                gr.HTML('<div class="panel-head">◈ ERIC TRANSMISSION</div>')
-                eric_says_box = gr.Textbox(
-                    value="",
-                    label="",
-                    show_label=False,
-                    interactive=False,
-                    lines=4,
-                    max_lines=5,
-                    elem_id="eric-says",
-                    placeholder="Awaiting transmission..."
-                )
-
-                gr.HTML('<div class="panel-head">◈ CHARACTER COMMS</div>')
-                gr.HTML('<span style="color:#ff00ff88;font-size:0.65em;font-family:\'Courier New\',monospace;letter-spacing:0.05em">WHEN ERIC STOPS — TYPE AS CHARACTER</span>')
-                with gr.Row():
-                    char_name = gr.Textbox(placeholder="Name...", label="", show_label=False, scale=1)
-                    char_says = gr.Textbox(placeholder="Message...", label="", show_label=False, scale=3)
-                with gr.Row():
-                    char_btn = gr.Button("⟶ TRANSMIT", variant="secondary", scale=1, elem_classes=["ctrl-btn", "ctrl-wide"])
-                    char_reply = gr.Textbox(label="", show_label=False, interactive=False, lines=2, scale=3, placeholder="Response...")
-
-            # ═══════════════════════════════════════════════════════════════
-            # RIGHT COLUMN — joystick + STOP + drive + LOG (moved here)
-            # ═══════════════════════════════════════════════════════════════
-            with gr.Column(scale=2, min_width=200):
-
-                gr.HTML('<div class="panel-head" style="margin-top:0">◈ MANUAL OVERRIDE</div>')
-
-                # Speed slider at top
-                speed_slider = gr.Slider(minimum=0.05, maximum=0.50, value=0.20, step=0.05, label="SPEED m/s")
-
-                # Joystick layout with STOP on right
-                with gr.Row(equal_height=True):
-                    # Left side: D-pad + spin buttons integrated
-                    with gr.Column(scale=3, min_width=0):
-                        # Row 1: Forward
-                        with gr.Row():
-                            gr.HTML('<div style="flex:1"></div>')
-                            btn_fwd = gr.Button("▲", elem_classes=["ctrl-btn"])
-                            gr.HTML('<div style="flex:1"></div>')
-                        
-                        # Row 2: Left, Halt, Right
-                        with gr.Row():
-                            btn_left = gr.Button("◀", elem_classes=["ctrl-btn"])
-                            btn_halt = gr.Button("■", elem_classes=["ctrl-btn", "ctrl-stop"])
-                            btn_right = gr.Button("▶", elem_classes=["ctrl-btn"])
-                        
-                        # Row 3: Spin Left, Down, Spin Right
-                        with gr.Row():
-                            btn_spin_l = gr.Button("↺", elem_classes=["ctrl-btn"])
-                            btn_back = gr.Button("▼", elem_classes=["ctrl-btn"])
-                            btn_spin_r = gr.Button("↻", elem_classes=["ctrl-btn"])
-
-                    # Right side: STOP button (perfect circle)
-                    with gr.Column(scale=1, min_width=0):
-                        gr.HTML('<div style="height:45px"></div>')
-                        stop_btn = gr.Button("STOP", elem_id="stop-btn")
-                        gr.HTML('<div style="color:#ff0066;font-size:0.6em;letter-spacing:0.12em;text-align:center;margin-top:6px;font-family:\'Courier New\',monospace;text-shadow:0 0 10px #ff006666">E-HALT</div>')
-
-                motor_status = gr.Textbox(
-                    label="", show_label=False,
-                    interactive=False, max_lines=1,
-                    value="STOPPED",
-                    placeholder="Motor status"
-                )
-
-                gr.HTML('<div class="panel-head">◈ DRIVE SYSTEM</div>')
-                motor_display = gr.HTML(value=_motor_telemetry_html("stopped", 0.0, 0.0))
 
 # ─── Build UI ─────────────────────────────────────────────────────────────────
 
@@ -856,20 +898,17 @@ def build_ui():
             with gr.Column(scale=2, min_width=180):
 
                 gr.HTML('<div class="cam-label">◉ PAN-TILT FEED</div>')
-                pantilt_img = gr.Image(streaming=True, height=140, label="", show_label=False)
+                pantilt_img = gr.Image(streaming=True, height=175, label="", show_label=False)
 
                 gr.HTML('<div class="cam-label">◉ WEBCAM FEED</div>')
-                webcam_img = gr.Image(streaming=True, height=110, label="", show_label=False)
+                webcam_img = gr.Image(streaming=True, height=145, label="", show_label=False)
 
-                gr.HTML('<div class="panel-head" style="margin-top:4px">◈ MODULE STATUS</div>')
+                gr.HTML('<div class="panel-head" style="margin-top:2px">◈ MODULE STATUS</div>')
                 module_status = gr.HTML(value=get_module_status_html())
 
-                gr.HTML('<div class="panel-head">◈ SENSORS</div>')
-                lidar_display = gr.HTML(value=get_lidar_html())
-                oakd_display  = gr.HTML(value=get_oakd_html())
-
-                gr.HTML('<div class="panel-head">◈ POWER</div>')
-                battery_display = gr.HTML(value=get_battery_html())
+                with gr.Row(equal_height=True):
+                    lidar_display = gr.HTML(value=get_lidar_html())
+                    oakd_display  = gr.HTML(value=get_oakd_html())
 
             # ═══════════════════════════════════════════════════════════════
             # CENTRE COLUMN — mission + comms
@@ -908,7 +947,7 @@ def build_ui():
                 )
 
                 gr.HTML('<div class="panel-head">◈ CHARACTER COMMS</div>')
-                gr.HTML('<span style="color:#ff00ff88;font-size:0.65em;font-family:\'Courier New\',monospace;letter-spacing:0.05em">WHEN ERIC STOPS — TYPE AS CHARACTER</span>')
+                gr.HTML('<div style="color:#ff44ff;font-size:0.88em;font-family:\'Share Tech Mono\',monospace;letter-spacing:0.06em;font-weight:bold;text-shadow:0 0 10px #ff00ffaa;margin-bottom:4px;padding:2px 0;border-left:3px solid #ff00ff;padding-left:8px">⟶ WHEN ERIC STOPS — TYPE AS CHARACTER</div>')
                 with gr.Row():
                     char_name = gr.Textbox(placeholder="Name...",    label="", show_label=False, scale=1)
                     char_says = gr.Textbox(placeholder="Message...", label="", show_label=False, scale=3)
@@ -924,25 +963,49 @@ def build_ui():
                 gr.HTML('<div class="panel-head" style="margin-top:0">◈ MANUAL OVERRIDE</div>')
                 speed_slider = gr.Slider(minimum=0.05, maximum=0.50, value=0.20, step=0.05, label="SPEED m/s")
 
-                with gr.Row(equal_height=True):
-                    with gr.Column(scale=3, min_width=0):
-                        with gr.Row():
-                            gr.HTML('<div style="flex:1"></div>')
-                            btn_fwd = gr.Button("▲", elem_classes=["ctrl-btn"])
-                            gr.HTML('<div style="flex:1"></div>')
-                        with gr.Row():
-                            btn_left  = gr.Button("◀", elem_classes=["ctrl-btn"])
-                            btn_halt  = gr.Button("■", elem_classes=["ctrl-btn", "ctrl-stop"])
-                            btn_right = gr.Button("▶", elem_classes=["ctrl-btn"])
-                        with gr.Row():
-                            btn_spin_l = gr.Button("↺", elem_classes=["ctrl-btn"])
-                            btn_back   = gr.Button("▼", elem_classes=["ctrl-btn"])
-                            btn_spin_r = gr.Button("↻", elem_classes=["ctrl-btn"])
+                # ── D-pad: pure HTML cross + hidden Gradio triggers ──────
+                # Visual d-pad rendered in HTML/CSS so buttons stay square.
+                # Hidden off-screen Gradio buttons receive JS click events.
+                gr.HTML("""
+<div id="dpad-container">
 
-                    with gr.Column(scale=1, min_width=0):
-                        gr.HTML('<div style="height:45px"></div>')
-                        stop_btn = gr.Button("STOP", elem_id="stop-btn")
-                        gr.HTML('<div style="color:#ff0066;font-size:0.6em;letter-spacing:0.12em;text-align:center;margin-top:6px;font-family:\'Courier New\',monospace;text-shadow:0 0 10px #ff006666">E-HALT</div>')
+  <!-- LEFT: 3x3 cross grid -->
+  <div id="dpad-cross">
+    <div class="dpad-row">
+      <div class="dpad-cell"></div>
+      <button class="dpad-key" onclick="document.getElementById('gr-btn-fwd').click()">▲</button>
+      <div class="dpad-cell"></div>
+    </div>
+    <div class="dpad-row">
+      <button class="dpad-key" onclick="document.getElementById('gr-btn-left').click()">◀</button>
+      <button class="dpad-key dpad-key-stop" onclick="document.getElementById('gr-btn-halt').click()">■</button>
+      <button class="dpad-key" onclick="document.getElementById('gr-btn-right').click()">▶</button>
+    </div>
+    <div class="dpad-row">
+      <button class="dpad-key dpad-key-spin" onclick="document.getElementById('gr-btn-spinl').click()">↺</button>
+      <button class="dpad-key" onclick="document.getElementById('gr-btn-back').click()">▼</button>
+      <button class="dpad-key dpad-key-spin" onclick="document.getElementById('gr-btn-spinr').click()">↻</button>
+    </div>
+  </div>
+
+  <!-- RIGHT: EMERGENCY label + STOP circle, full height of d-pad -->
+  <div id="dpad-emergency">
+    <div id="emergency-label">EMERGENCY</div>
+    <button class="stop-circle" onclick="document.getElementById('gr-btn-stop').click()">STOP</button>
+  </div>
+
+</div>
+""")
+                # Hidden Gradio buttons — in DOM but invisible, receive JS clicks
+                with gr.Row(elem_classes=["hidden-offscreen"]):
+                    btn_fwd    = gr.Button("fwd",   elem_id="gr-btn-fwd")
+                    btn_back   = gr.Button("back",  elem_id="gr-btn-back")
+                    btn_left   = gr.Button("left",  elem_id="gr-btn-left")
+                    btn_right  = gr.Button("right", elem_id="gr-btn-right")
+                    btn_halt   = gr.Button("halt",  elem_id="gr-btn-halt")
+                    btn_spin_l = gr.Button("spinl", elem_id="gr-btn-spinl")
+                    btn_spin_r = gr.Button("spinr", elem_id="gr-btn-spinr")
+                    stop_btn   = gr.Button("stop",  elem_id="gr-btn-stop")
 
                 motor_status = gr.Textbox(
                     label="", show_label=False,
@@ -970,13 +1033,13 @@ def build_ui():
 
         char_btn.click(action_char_reply, inputs=[char_name, char_says], outputs=[motor_status, char_reply])
 
-        btn_fwd.click(   lambda s: (motors.forward(s),             f"▲ FWD {s:.2f}")[1], inputs=speed_slider, outputs=motor_status)
-        btn_back.click(  lambda s: (motors.backward(s),            f"▼ BWD {s:.2f}")[1], inputs=speed_slider, outputs=motor_status)
-        btn_left.click(  lambda s: (motors.left(s),                f"◀ L {s:.2f}")[1],   inputs=speed_slider, outputs=motor_status)
-        btn_right.click( lambda s: (motors.right(s),               f"▶ R {s:.2f}")[1],   inputs=speed_slider, outputs=motor_status)
-        btn_halt.click(  lambda:   (motors.stop(),                  "■ STOP")[1],                              outputs=motor_status)
-        btn_spin_l.click(lambda s: (motors._send(-s, s),           f"↺ SPIN {s:.2f}")[1], inputs=speed_slider, outputs=motor_status)
-        btn_spin_r.click(lambda s: (motors._send(s, -s),           f"↻ SPIN {s:.2f}")[1], inputs=speed_slider, outputs=motor_status)
+        btn_fwd.click(   lambda s: (motors.forward(s),             f"▲ FWD {s:.2f}")[1], inputs=[speed_slider], outputs=[motor_status])
+        btn_back.click(  lambda s: (motors.backward(s),            f"▼ BWD {s:.2f}")[1], inputs=[speed_slider], outputs=[motor_status])
+        btn_left.click(  lambda s: (motors.left(s),                f"◀ L {s:.2f}")[1],   inputs=[speed_slider], outputs=[motor_status])
+        btn_right.click( lambda s: (motors.right(s),               f"▶ R {s:.2f}")[1],   inputs=[speed_slider], outputs=[motor_status])
+        btn_halt.click(  lambda:   (motors.stop(),                  "■ STOP")[1],                               outputs=[motor_status])
+        btn_spin_l.click(lambda s: (motors._send(-s, s),           f"↺ SPIN {s:.2f}")[1], inputs=[speed_slider], outputs=[motor_status])
+        btn_spin_r.click(lambda s: (motors._send(s, -s),           f"↻ SPIN {s:.2f}")[1], inputs=[speed_slider], outputs=[motor_status])
 
         # Live polling
         gr.Timer(1.0).tick(get_webcam,            outputs=webcam_img)
@@ -986,8 +1049,7 @@ def build_ui():
         gr.Timer(0.5).tick(get_motor_telemetry,  outputs=motor_display)
         gr.Timer(1.0).tick(get_lidar_html,       outputs=lidar_display)
         gr.Timer(1.0).tick(get_oakd_html,        outputs=oakd_display)
-        gr.Timer(2.0).tick(get_module_status_html, outputs=module_status)
-        gr.Timer(5.0).tick(get_battery_html,     outputs=battery_display)
+        gr.Timer(3.0).tick(get_module_status_html, outputs=module_status)
 
     return demo
 

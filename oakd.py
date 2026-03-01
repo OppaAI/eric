@@ -113,6 +113,7 @@ _safety_active    = True
 _last_floor_check = 0.0
 _warmup_frames    = 0          # frames received since last (re)connect
 WARMUP_FRAMES     = 15         # skip void check for first N frames after connect
+_cached_front_depth: float | None = None   # last valid reading — safe for GUI to poll
 
 # ── Layer 2 YOLO constants ────────────────────────────────────────────────────
 YOLO_BLOB_PATH      = Path("models/yolov8n_openvino_2022.1_4shave.blob")
@@ -358,7 +359,7 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
     # setVideoSize to crop/scale the ISP output to exactly 960×540, which is
     # within the OAK-D Lite SIPP memory budget and what the pipeline expects.
     cam_rgb.setResolution(
-        dai.ColorCameraProperties.SensorResolution.THE_800_P)
+        dai.ColorCameraProperties.SensorResolution.THE_1080_P)
     # setVideoSize and setIspScale removed — native 2104x1560 is fine, preview handles YOLO input
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
@@ -859,11 +860,18 @@ def _get_front_depth_3patch() -> dict:
 def get_front_depth() -> float | None:
     """
     Return minimum front depth (meters) from 3-patch sampling.
-    Returns None only if all three patches are invalid (no depth data at all).
+    Caches last valid reading so GUI pollers always get a value even if
+    called between frames or during warmup.
+    Returns None only if no valid reading has ever been obtained.
     """
+    global _cached_front_depth
     result = _get_front_depth_3patch()
     m = result["min_m"]
-    return m if m < 999.0 else None
+    if m < 999.0:
+        _cached_front_depth = m
+        return m
+    # No fresh reading — return last known good (stays current enough for display)
+    return _cached_front_depth
 
 
 def get_depth_map() -> dict | None:
