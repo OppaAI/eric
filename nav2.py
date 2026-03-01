@@ -143,7 +143,7 @@ def init_nav2() -> bool:
 
         # ── Wait for Nav2 action server ────────────────────────────────────────
         log.info("⏳ Waiting for Nav2 action server...")
-        if _nav_client.wait_for_server(timeout_sec=10.0):
+        if _nav_client.wait_for_server(timeout_sec=40.0):
             _nav2_ok = True
             log.info("✅ Nav2 connected — autonomous navigation enabled")
         else:
