@@ -42,8 +42,8 @@ import time
 log = logging.getLogger("eric.lidar")
 
 # ── Safety distances (meters) ──────────────────────────────────────────────────
-STOP_DIST        = 0.30
-SLOW_DIST        = 0.60
+STOP_DIST        = 0.40
+SLOW_DIST        = 0.70
 FRONT_ARC_DEG    = 60
 CHASSIS_BLIND_M  = 0.12   # ignore returns closer than this — antenna / chassis self-detection
 

@@ -44,18 +44,18 @@ from motors import motors
 log = logging.getLogger("eric.avoidance")
 
 # ─── Industrial Tuning ────────────────────────────────────────────────────────
-BACKUP_DURATION_BASE  = 1.1     # seconds — wall/large obstacle
+BACKUP_DURATION_BASE  = 1.5     # seconds — wall/large obstacle
 BACKUP_DURATION_SMALL = 0.7     # seconds — small obstacle step-around
 BACKUP_SPEED          = MOTOR_SPEED_SLOW
-TURN_BASE_SEC         = 1.35
+TURN_BASE_SEC         = 1.8
 TURN_INCREMENT        = 0.35
 TURN_MAX_SEC          = 3.2
 MAX_AVOID_ATTEMPTS    = 4
 COSMOS_TIMEOUT        = 16.0    # max total wait for Cosmos decision
 
 # Anti-chatter protections
-AVOIDANCE_COOLDOWN_S  = 9.0     # minimum time between avoidance sequences
-DEBOUNCE_FRAMES       = 3       # obstacle must persist N checks before acting
+AVOIDANCE_COOLDOWN_S  = 4.0     # minimum time between avoidance sequences
+DEBOUNCE_FRAMES       = 2       # obstacle must persist N checks before acting
 RECOVERY_CLEAR_FRAMES = 4       # must be clear N checks before resuming normal motion
 
 # Arc angle definitions
