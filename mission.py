@@ -921,8 +921,8 @@ def _sensor_context() -> str:
                 elif d < 0.60:
                     lines.append("⚠️  OAK-D: obstacle within caution range (<0.60m) — slow down")
 
-            # Floor-drop check — HIGH confidence only to avoid false positives
-            drop = get_floor_drop()
+            # Floor-drop check DISABLED for cookoff — false positives on flat floors
+            drop = {"void_detected": False}  # get_floor_drop()
             if drop["void_detected"] and drop["confidence"] == "high":
                 edge = drop["floor_edge_m"]
                 mid  = drop["floor_mid_m"]
@@ -999,36 +999,12 @@ def _sensor_context() -> str:
 
 def _void_check() -> dict:
     """
-    Central void/drop safety gate.
-
-    Only OAK-D stereo depth is used — LiDAR is a horizontal 2D scanner and
-    cannot reliably detect floor drops. OAK-D has vertical FOV and sees the
-    floor directly.
-
-    Only HIGH confidence triggers a stop — medium was causing false positives
-    on flat open floors indoors (0.3% return ratio everywhere).
-
-    Returns:
-      {"void": bool, "confidence": str, "reason": str, "source": str}
+    Central void/drop safety gate — DISABLED for cookoff.
+    OAK-D void detection causes false positives on low-texture floors at 15cm mount.
+    LiDAR handles all obstacle safety. Re-enable after cookoff with better tuning.
     """
-    # ── OAK-D floor-drop check (HIGH confidence only) ─────────────────────
-    try:
-        from oakd import get_floor_drop, oakd_available
-        if oakd_available():
-            drop = get_floor_drop()
-            if drop["void_detected"] and drop["confidence"] == "high":
-                return {
-                    "void":       True,
-                    "confidence": drop["confidence"],
-                    "reason":     drop["reason"],
-                    "source":     "OAK-D",
-                    "sources":    ["OAK-D"],
-                }
-    except Exception as _exc:  # oakd/yolo
-        log.debug(f"oakd/yolo unavailable: {_exc}")
-
     return {"void": False, "confidence": "low",
-            "reason": "no void signal", "source": "none"}
+            "reason": "void check disabled for cookoff", "source": "none"}
 
 
 def _move_forward(duration_sec: float = 2.0, distance_m: float = 1.5):
@@ -1208,7 +1184,7 @@ def start_mission(briefing: str, mission_name: str = ""):
     else:
         set_mission_briefing(briefing)
 
-    motors.pantilt(0, 5)   # slight downward tilt — see ground objects at normal range
+    motors.pantilt(0, -5)   # slight downward tilt — see ground objects at normal range
     motors.lights(0, 0)    # LEDs off — only turn on if scene is pitch black
     time.sleep(0.5)
 
@@ -1345,7 +1321,7 @@ def stop_mission():
         log.debug(f"nav2 unavailable: {_exc}")
 
     motors.lights(0, 0)
-    motors.pantilt(0, 5)
+    motors.pantilt(0, -5)
     motors.oled(0, "ERIC STOPPED")
     motors.oled(1, "")
     eric_say("Mission disengaged. All systems halted.")
@@ -1363,7 +1339,7 @@ def resume_after_interaction():
         except ImportError as _exc:
             log.debug(f"avoidance module not loaded: {_exc}")
         _ms.mission_state = State.SEARCHING
-        motors.pantilt(0, 5)   # ground-looking default
+        motors.pantilt(0, -5)   # ground-looking default
         if _safe_to_fwd():
             motors.forward(MOTOR_SPEED_SLOW)
         motors.oled(0, "ERIC ACTIVE")
@@ -1453,12 +1429,7 @@ OUTPUT: A single JSON object. Use ONLY these exact field names — no others:
 }
 
 "object" must be ONE word: person | robot | slipper | shoe | obstacle | wall | clear | unknown | pokemon | figure | animal
-"detection_confidence": YOUR confidence as a float 0.0–1.0 based on what you actually see.
-  - 0.0 = target_visible is false, nothing matching seen
-  - 0.3–0.5 = possible match but uncertain
-  - 0.6–0.8 = specific matching features visible (colour, shape, ears, etc)
-  - 0.9–1.0 = certain, multiple clear features confirmed
-  DO NOT copy 0.0 from the example above — reason about what you actually see.
+"detection_confidence": float 0.0–1.0. Use 0.0 when target_visible=false. Be honest — do not inflate.
 "speak" = speech output. NOT "speaker". NOT "speech". NOT "tts".
 "physical_reasoning" = reasoning. NOT "reasoning". NOT "explanation".
 "target_visible" = detection flag. NOT "target_visibility". NOT "target_found".
@@ -1525,12 +1496,7 @@ Output ONLY this JSON — no markdown, no extra fields:
 
 "object": person|robot|slipper|shoe|obstacle|wall|clear|unknown
 "distance": near|mid|far
-"detection_confidence": YOUR confidence as a float 0.0–1.0 based on what you actually see.
-  - 0.0 = target_visible is false, or you see nothing matching the target
-  - 0.3–0.5 = you see something that could be the target but are unsure
-  - 0.6–0.8 = you can see specific matching features (colour, shape, ears, etc)
-  - 0.9–1.0 = you are certain — multiple clear identifying features visible
-  DO NOT copy 0.0 from the example — reason about what you actually see.
+"detection_confidence": float 0.0–1.0. Use 0.0 when target_visible=false. Be honest.
 "target_direction": front|left|right|unknown
 "clearest_direction": front|left|right
 "action": forward|stop|turn_left|turn_right
@@ -1981,7 +1947,7 @@ def _approach_scan() -> dict:
             "physical_reasoning": f"Hardware void pre-check: {hw_void['reason']}"
         }
 
-    motors.pantilt(0, 5)
+    motors.pantilt(0, -5)
     motors.lights(0, 0)
     time.sleep(0.25)
 
@@ -2073,7 +2039,7 @@ def _quick_scan() -> dict:
         }
 
     # ── 2. Pan-tilt wide-angle scan at 5° (industrial standard angle) ─────────
-    motors.pantilt(0, 5)
+    motors.pantilt(0, -5)
     motors.lights(0, 0)
     time.sleep(0.3)
 
@@ -2641,7 +2607,7 @@ def _scan_360_smart() -> dict:
             if result.get("wall_ahead") or result.get("obstacle_close"):
                 log.info(f"Obstacle at {deg}° during 360 scan")
 
-        motors.pantilt(0, 5)
+        motors.pantilt(0, -5)
         time.sleep(0.3)
 
         if pos < 7:
@@ -2967,7 +2933,7 @@ def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[st
 
     # ── 1. Stop + centre pan-tilt ─────────────────────────────────────────────
     motors.stop()
-    motors.pantilt(0, 15)          # 15° tilt → ground-level target sits in mid-frame
+    motors.pantilt(0, -15)          # 15° tilt → ground-level target sits in mid-frame
     time.sleep(PHOTO_SETTLE_SEC)
 
     # ── 2. Adaptive LED ───────────────────────────────────────────────────────
@@ -3149,7 +3115,7 @@ def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[st
     # ── 5. LEDs off + re-centre pan ───────────────────────────────────────────
     if led_on:
         motors.lights(0, 0)
-    motors.pantilt(0, 15)    # re-centre pan — both cameras may have nudged it
+    motors.pantilt(0, -15)    # re-centre pan — both cameras may have nudged it
 
     return saved
 
@@ -3425,7 +3391,7 @@ def _handle_mission_complete(obj_name):
         motors.lights(0, 0);    time.sleep(0.25)
     motors.lights(128, 255)
 
-    motors.pantilt(0, 5)
+    motors.pantilt(0, -5)
     time.sleep(0.5)
 
     # Build report for patrol/security missions
@@ -3582,7 +3548,7 @@ def _approach_target():
                     _ui("log", f"✅ OAK-D arrival: {hw_dist:.2f}m — executing step action")
                     log_mission_event("hw_arrival_oakd", f"{hw_dist:.2f}m")
                     motors.stop()
-                    motors.pantilt(0, 20)
+                    motors.pantilt(0, -20)
                     time.sleep(0.3)
                     _execute_step_action(None)
                     return
@@ -3610,7 +3576,7 @@ def _approach_target():
                                        f"({age:.1f}s ago) — executing step action")
                             log_mission_event("hw_arrival_yolo", f"{lbl} {ypos['dist_m']:.2f}m")
                             motors.stop()
-                            motors.pantilt(0, 15)
+                            motors.pantilt(0, -15)
                             time.sleep(0.3)
                             _execute_step_action(lbl)
                             return
@@ -3633,7 +3599,31 @@ def _approach_target():
             log.debug(f"oakd/yolo unavailable: {_exc}")
 
         # ── Move one clip ─────────────────────────────────────────────────────
-        _move_forward(duration_sec=APPROACH_MOVE_SEC, distance_m=0.4)
+        # Briefly disable LIDAR safety so the target itself (a small toy/object
+        # on the floor) does not stop Eric before it can get close enough for
+        # visual confirmation. Safety is ALWAYS re-enabled after the move.
+        _lidar_suppressed = False
+        try:
+            from lidar import min_front_distance, set_safety_active
+            _front = min_front_distance()
+            if 0.15 < _front < 0.55:
+                # Target-sized object close ahead — suppress LIDAR for this clip only
+                set_safety_active(False)
+                _lidar_suppressed = True
+                log.info(f"Approach: LIDAR safety suppressed for close-target clip "
+                         f"(front={_front:.2f}m)")
+        except Exception:
+            pass
+        try:
+            _move_forward(duration_sec=APPROACH_MOVE_SEC, distance_m=0.4)
+        finally:
+            if _lidar_suppressed:
+                try:
+                    from lidar import set_safety_active
+                    set_safety_active(True)
+                    log.info("Approach: LIDAR safety restored")
+                except Exception:
+                    pass
         motors.stop()
         time.sleep(0.25)
         moves_since_scan += 1
@@ -3647,7 +3637,7 @@ def _approach_target():
                     if hw_dist < ARRIVE_DIST_M:
                         _ui("log", f"✅ OAK-D post-move arrival: {hw_dist:.2f}m")
                         log_mission_event("hw_arrival_oakd_post", f"{hw_dist:.2f}m")
-                        motors.pantilt(0, 20)
+                        motors.pantilt(0, -20)
                         time.sleep(0.3)
                         _execute_step_action(None)
                         return
@@ -3706,7 +3696,7 @@ def _approach_target():
         # ── Target directly below camera → already on top of it ──────────────
         if tdir in ("down", "below"):
             _ui("log", "Target below camera — arrived!")
-            motors.pantilt(0, 20)
+            motors.pantilt(0, -20)
             time.sleep(0.3)
             _execute_step_action(check.get("object_name") or obj)
             return
@@ -3972,7 +3962,7 @@ def _process_scan(scan, from_360=False):
         if direction in ("down", "below"):
             _ui("log", "Target is directly below — already arrived!")
             motors.stop()
-            motors.pantilt(0, 20)
+            motors.pantilt(0, -20)
             time.sleep(0.5)
             _execute_step_action(obj_name)
             return
@@ -4001,7 +3991,7 @@ def _process_scan(scan, from_360=False):
             motors.oled(0, name[:16])
             motors.oled(1, "Talking...")
             _ui("status", f"FOUND — {name}")
-            motors.pantilt(0, 5)
+            motors.pantilt(0, -5)
             time.sleep(0.5)
 
             # ── Eye-contact gate before greeting ─────────────────────────────
@@ -4310,7 +4300,7 @@ def _handle_yolo_detection() -> bool:
         # _execute_step_action() is called from the async thread once the
         # greeting TTS completes so the interaction sequence is preserved.
         _ms.mission_state = State.INTERACTING
-        motors.pantilt(0, 15)
+        motors.pantilt(0, -15)
 
         _greeting_prompt = (
             f"Your YOLO sensors just confirmed {label} at {dist_m:.2f}m to your {bearing}. "

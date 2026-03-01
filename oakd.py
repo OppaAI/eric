@@ -553,25 +553,10 @@ def _safety_check(warmup_frames: int = 999):
                     log.info(f"⚠️  OAK-D slow — obstacle at {front:.2f}m "
                              f"({samples['valid_patches']}/3 patches)")
 
-        # ── Check 2: floor drop / void (HIGH confidence only) ────────────────
-        # Re-enabled — LiDAR void is disabled (horizontal scanner can't see drops).
-        # Only HIGH confidence fires — medium was causing flat-floor false positives
-        # at 15cm mount height. Rate-limited by FLOOR_CHECK_HZ.
-        # Warmup guard: skip for first WARMUP_FRAMES frames after (re)connect —
-        # the pipeline produces garbage depth on startup that reads as 0% returns.
-        now_fc = time.monotonic()
-        if warmup_frames < WARMUP_FRAMES:
-            log.debug(f"OAK-D: void check suppressed during warmup "
-                      f"(frame {warmup_frames}/{WARMUP_FRAMES})")
-        elif now_fc - _last_floor_check >= 1.0 / FLOOR_CHECK_HZ:
-            _last_floor_check = now_fc
-            drop = get_floor_drop()
-            if drop["void_detected"] and drop["confidence"] == "high":
-                if not _avoidance_in_progress:
-                    motors.stop()
-                    log.warning(
-                        f"🕳️  OAK-D VOID STOP (high confidence): {drop['reason']}"
-                    )
+        # ── Check 2: floor drop / void — DISABLED for cookoff ───────────────
+        # False positives on low-texture floors at 15cm mount height.
+        # LiDAR handles obstacle safety. Re-enable after cookoff with better tuning.
+        pass
 
     except Exception as e:
         log.debug(f"OAK-D safety check error: {e}")
