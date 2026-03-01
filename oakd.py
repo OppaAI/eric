@@ -765,7 +765,7 @@ def _maybe_publish_depth(frame):
         from ros_core import get_node as _get_ros_node
         msg              = Image()
         msg.header.stamp = _get_ros_node().get_clock().now().to_msg()
-        msg.header.frame_id = "oakd_frame"
+        msg.header.frame_id = "oakd_link"
         msg.height       = frame.shape[0]
         msg.width        = frame.shape[1]
         msg.encoding     = "16UC1"   # 16-bit unsigned, millimeters
