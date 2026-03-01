@@ -1453,7 +1453,12 @@ OUTPUT: A single JSON object. Use ONLY these exact field names — no others:
 }
 
 "object" must be ONE word: person | robot | slipper | shoe | obstacle | wall | clear | unknown | pokemon | figure | animal
-"detection_confidence": float 0.0–1.0. Use 0.0 when target_visible=false. Be honest — do not inflate.
+"detection_confidence": YOUR confidence as a float 0.0–1.0 based on what you actually see.
+  - 0.0 = target_visible is false, nothing matching seen
+  - 0.3–0.5 = possible match but uncertain
+  - 0.6–0.8 = specific matching features visible (colour, shape, ears, etc)
+  - 0.9–1.0 = certain, multiple clear features confirmed
+  DO NOT copy 0.0 from the example above — reason about what you actually see.
 "speak" = speech output. NOT "speaker". NOT "speech". NOT "tts".
 "physical_reasoning" = reasoning. NOT "reasoning". NOT "explanation".
 "target_visible" = detection flag. NOT "target_visibility". NOT "target_found".
@@ -1520,7 +1525,12 @@ Output ONLY this JSON — no markdown, no extra fields:
 
 "object": person|robot|slipper|shoe|obstacle|wall|clear|unknown
 "distance": near|mid|far
-"detection_confidence": float 0.0–1.0. Use 0.0 when target_visible=false. Be honest.
+"detection_confidence": YOUR confidence as a float 0.0–1.0 based on what you actually see.
+  - 0.0 = target_visible is false, or you see nothing matching the target
+  - 0.3–0.5 = you see something that could be the target but are unsure
+  - 0.6–0.8 = you can see specific matching features (colour, shape, ears, etc)
+  - 0.9–1.0 = you are certain — multiple clear identifying features visible
+  DO NOT copy 0.0 from the example — reason about what you actually see.
 "target_direction": front|left|right|unknown
 "clearest_direction": front|left|right
 "action": forward|stop|turn_left|turn_right

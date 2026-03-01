@@ -42,6 +42,16 @@ target_objects:
   - yellow pokemon
   - pokemon
 
+# Visual description injected into every scan prompt — gives Cosmos specific
+# features to match rather than just a bare name
+target_description: >
+  Small round bright yellow figure, roughly 20-30cm tall.
+  Pointy black-tipped ears sticking up. Two small round red circles on cheeks.
+  Small black dot eyes. Lightning bolt shaped tail.
+  May be partially hidden or in a plastic bag causing reflections.
+  Look at floor level near and behind objects.
+  Reject anything boxy, mechanical, or not yellow.
+
 photo_on_find:     true
 announce_location: true
 stay_with_target:  true
