@@ -1640,7 +1640,7 @@ No markdown. No explanation. No extra fields.
         result = _parse_json(response, dict(_NAV_FALLBACK), label="NAV CHECK")
 
         # ── Physical reasoning text gate: catch wall detections Cosmos missed in JSON ──
-        reasoning_text = result.get("physical_reasoning", "").lower()
+        reasoning_text = (result.get("physical_reasoning") or "").lower()
         wall_keywords = ["blocks my way", "cannot proceed", "no clear path",
                          "path is blocked", "blocking my path", "wall blocks",
                          "wall ahead", "directly blocking"]
@@ -2036,8 +2036,10 @@ def _quick_scan() -> dict:
             "physical_reasoning": f"Hardware void pre-check: {hw_void['reason']}"
         }
 
-    # ── 2. Pan-tilt wide-angle scan at 5° (industrial standard angle) ─────────
-    motors.pantilt(0, -5)
+    # ── 2. Pan-tilt wide-angle scan at 10° (upward tilt to see standing people) ─
+    # -5° looks at floor ~1m ahead at 40cm robot height — misses faces at 2m.
+    # +10° looks at torso/face height for a standing person at 1.5-3m range.
+    motors.pantilt(0, 10)
     motors.lights(0, 0)
     time.sleep(0.3)
 
@@ -2106,7 +2108,7 @@ def _quick_scan() -> dict:
                     # Keep original result if confirmation call fails
 
         # ── 4. Physical reasoning text gate (quick_scan) ────────────────────
-        qs_reasoning = result.get("physical_reasoning", "").lower()
+        qs_reasoning = (result.get("physical_reasoning") or "").lower()
         # Strip backtick noise before keyword check — model wraps garbage in backticks
         qs_reasoning = qs_reasoning.replace("`", "").strip()
         qs_wall_keywords = ["blocks my way", "cannot proceed", "no clear path",
@@ -2293,7 +2295,8 @@ def _scan_360_pantilt() -> dict:
 
     # ── Constants ─────────────────────────────────────────────────────────────
     PAN_STEPS    = [-90, -60, -30, 0, 30, 60, 90]
-    TILT_GROUND  = -15  # fixed ground-level tilt throughout sweep — no tilt changes
+    TILT_GROUND  = -15  # used for chassis turn alignment only
+    TILT_SEARCH  = 10   # face/torso height for standing person at 1.5-3m
     PAN_SETTLE   = 0.40 # seconds after pantilt() before capture — raised from 0.25 for servo + frame settle
 
     # Webcam is zip-tied to the pan-tilt head, offset slightly to the LEFT.
@@ -2323,7 +2326,7 @@ def _scan_360_pantilt() -> dict:
         # Webcam is zip-tied to pan-tilt head but offset left — pan right by
         # WEBCAM_PAN_OFFSET degrees so webcam centers on the candidate.
         webcam_pan = max(-90, min(90, pan + WEBCAM_PAN_OFFSET))
-        motors.pantilt(webcam_pan, TILT_GROUND, speed=80)
+        motors.pantilt(webcam_pan, TILT_SEARCH, speed=80)
         time.sleep(PAN_SETTLE + 0.1)
 
         wc_frame = capture_frame(CAMERA_WEBCAM, 640, 480)
@@ -2394,7 +2397,7 @@ def _scan_360_pantilt() -> dict:
             time.sleep(_pan_to_chassis_turn_sec(pan))
             motors.stop()
 
-        motors.pantilt(0, TILT_GROUND)
+        motors.pantilt(0, TILT_SEARCH)
         time.sleep(0.2)
 
         return {
@@ -2433,8 +2436,8 @@ def _scan_360_pantilt() -> dict:
             _ui("log", f"{phase_label}: pan {pan:+d}°")
             motors.oled(1, f"Pan {pan:+d}d")
 
-            # Move pan-tilt to position (fixed tilt — no tilt change)
-            motors.pantilt(pan, TILT_GROUND, speed=70)
+            # Move pan-tilt to position — use TILT_SEARCH to see standing people
+            motors.pantilt(pan, TILT_SEARCH, speed=70)
             time.sleep(PAN_SETTLE)
 
             # Single sharp frame — no video clip
@@ -2515,7 +2518,7 @@ def _scan_360_pantilt() -> dict:
     # ── Phase 2: Chassis 180° turn ────────────────────────────────────────────
     _ui("log", "Turning 180° for rear sweep...")
     motors.oled(1, "Turning 180...")
-    motors.pantilt(0, TILT_GROUND)
+    motors.pantilt(0, TILT_SEARCH)
     time.sleep(0.2)
     motors.right(MOTOR_SPEED_SLOW)
     time.sleep(TURN_90_SEC * 2.0)
@@ -2529,7 +2532,7 @@ def _scan_360_pantilt() -> dict:
         return found
 
     # ── No target found ───────────────────────────────────────────────────────
-    motors.pantilt(0, TILT_GROUND)
+    motors.pantilt(0, TILT_SEARCH)
     _ui("log", "360 scan complete — no target found")
     motors.oled(1, "No target")
     log_mission_event("scan_360_complete", "no target found")
@@ -4711,6 +4714,22 @@ def _mission_loop():
                         yolo_broke = True
                         break
 
+                    # ── Poll LiDAR directly inside move loop ──────────────────
+                    # The LiDAR thread already calls motors.stop() but we also
+                    # need to break out of THIS loop and flush the stale async
+                    # nav result that says "action: forward" — otherwise the
+                    # next _nav_check_async() call returns the old cached result
+                    # and immediately re-starts forward motion into the wall.
+                    try:
+                        from lidar import obstacle_close as _lidar_close_poll
+                        if _lidar_close_poll():
+                            motors.stop()
+                            _ms.last_nav_result = {}  # flush stale "forward" result
+                            yolo_broke = True
+                            break
+                    except Exception:
+                        pass
+
                     # GAP 2 FIX: fire async Cosmos nav check while moving.
                     # _nav_check_async() returns instantly (fire-and-forget +
                     # last_nav_result). Hardware gates (LiDAR/OAK-D) always run
@@ -4749,8 +4768,9 @@ def _mission_loop():
                             _ms.scans_since_360 = SCANS_BEFORE_360
                             _ms.nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS
                         else:
-                            if _safe_to_fwd():
-                                motors.forward(MOTOR_SPEED_SLOW)
+                            # Force a quick scan before resuming — don't blindly forward
+                            # after avoidance when the path ahead may still be unclear
+                            _ms.nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS
                 except Exception as _exc:  # lidar
                     log.debug(f"lidar unavailable: {_exc}")
                 continue
