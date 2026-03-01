@@ -3760,6 +3760,8 @@ def _approach_target():
 
     invisible_count   = 0
     moves_since_scan  = 0
+    nav2_fail_count   = 0   # consecutive Nav2 failures — disable after 3
+    NAV2_FAIL_LIMIT   = 3
 
     # ── Seed flip-flop counter so the first bad frame doesn't abort us ────────
     # We enter _approach_target because _process_scan just confirmed the target.
@@ -3847,7 +3849,24 @@ def _approach_target():
         except Exception:
             pass
         try:
-            _move_forward(duration_sec=APPROACH_MOVE_SEC, distance_m=0.4)
+            from config import USE_NAV2
+            if USE_NAV2 and nav2_fail_count >= NAV2_FAIL_LIMIT:
+                # Nav2 keeps failing (person blocking costmap) — direct motors
+                if _safe_to_fwd():
+                    motors.forward(MOTOR_SPEED_SLOW)
+                time.sleep(APPROACH_MOVE_SEC)
+                motors.stop()
+            else:
+                _move_forward(duration_sec=APPROACH_MOVE_SEC, distance_m=0.4)
+                # If Nav2 finished almost instantly it likely failed (status 6)
+                # Normal navigation takes >1s; <0.5s = instant rejection
+                try:
+                    from nav2 import nav2_available, is_navigating
+                    if USE_NAV2 and nav2_available() and not is_navigating():
+                        nav2_fail_count += 1
+                        log.debug(f"Nav2 fail count: {nav2_fail_count}/{NAV2_FAIL_LIMIT}")
+                except Exception:
+                    pass
         finally:
             if _lidar_suppressed:
                 try:
@@ -4189,7 +4208,10 @@ def _process_scan(scan, from_360=False):
         # For hazard patrol / nature, alarm when it matches target_objects list.
         _should_alarm = False
         _alarm_severity = "WARNING"
-        if _ms.mission_alarm_type in (AlarmType.SIREN, AlarmType.SUSPICIOUS):
+        # AlarmType.NONE = narrative/find mission — never trigger alarm
+        if _ms.mission_alarm_type == AlarmType.NONE:
+            _should_alarm = False
+        elif _ms.mission_alarm_type in (AlarmType.SIREN, AlarmType.SUSPICIOUS):
             t_lower = str(obj_name or obj).lower()
             _should_alarm = any(kw.lower() in t_lower
                                 for kw in (_ms.mission_target_objects or [obj]))
