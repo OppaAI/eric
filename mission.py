@@ -1525,7 +1525,7 @@ _NAV_FALLBACK = {
 # Nav clip settings — tune these
 NAV_CLIP_DURATION = 10.0  # seconds of video per nav check
 NAV_CLIP_FPS      = 2     # frames per second (10s x 2fps = 20 frames to Cosmos)
-NAV_IMAGE_INTERVAL = 4.0  # seconds between nav image checks while moving
+NAV_IMAGE_INTERVAL = 6.0  # seconds between nav image checks while moving
 
 def _nav_check() -> dict:
     """
@@ -4105,8 +4105,8 @@ def _process_scan(scan, from_360=False):
 # Stopped scans (_quick_scan, _best_360_scan) happen on a timer.
 
 # ── Mission loop constants (immutable) ───────────────────────────────────────
-NAV_CLIPS_BETWEEN_SCANS = 3   # stopped scan every 3 movement intervals
-NAV_MOVE_INTERVAL       = 4.0  # seconds per movement clip
+NAV_CLIPS_BETWEEN_SCANS = 5   # stopped scan every 5 movement intervals
+NAV_MOVE_INTERVAL       = 6.0  # seconds per movement clip
 # YOLO detection state and _yolo_lock are in _ms / module scope above
 
 
@@ -4373,111 +4373,20 @@ def _mission_loop():
     # ── Register YOLO Layer 2 callback ────────────────────────────────────────
     _register_yolo_callback()
 
-    # ── Initial situational awareness sweep ──────────────────────────────────
-    # Chassis turns 60° × 3 steps to cover a 180° forward arc, pan-tilt fixed
-    # at level (0°, 0°) — wide-angle captures the full scene at each stop.
-    # Returns chassis to original heading before proceeding.
-    # Consistent with the main 360 scan which also uses chassis turns.
-    _ui("log", "🔍 Initial situational awareness sweep...")
-    _ui("status", "INITIAL SWEEP")
+    # ── Initial sweep SKIPPED — start moving immediately for cookoff demo ────
+    # Was: 180° chassis sweep + full 360 scan before moving (~60s total).
+    # Now: single quick scan then move — much faster startup.
+    _ui("log", "🔍 Quick initial scan...")
+    _ui("status", "SCANNING")
     motors.oled(0, "ERIC ACTIVE")
-    motors.oled(1, "Initial sweep...")
+    motors.oled(1, "Quick scan...")
     motors.stop()
-
-    sweep_frames: list[str] = []
-    sweep_found = False
-
-    TURN_60_SEC = TURN_90_SEC * (60 / 90)
-
-    motors.pantilt(0, 0, speed=60)   # level — wide-angle covers the full scene
+    motors.pantilt(0, -5)
     time.sleep(0.3)
 
-    # Capture centre frame first (heading 0°)
-    f = _capture_sharp(CAMERA_PANTILT)
-    if f:
-        sweep_frames.append(f)
-    _ui("log", "Sweep 0° (centre)")
+    quick = _quick_scan()
+    _process_scan(quick, from_360=False)
 
-    # Turn left 60°, capture, turn right 120° (past centre), capture, return left 60°
-    # Net result: chassis returns exactly to starting heading (0°)
-    for direction, deg in [("left", 60), ("right", 120), ("left", 60)]:
-        if not _ms.mission_active:
-            break
-        turn_sec = TURN_90_SEC * (deg / 90)
-        if direction == "left":
-            motors.left(MOTOR_SPEED_SLOW)
-        else:
-            motors.right(MOTOR_SPEED_SLOW)
-        time.sleep(turn_sec)
-        motors.stop()
-        time.sleep(0.3)
-        f = _capture_sharp(CAMERA_PANTILT)
-        if f:
-            sweep_frames.append(f)
-        _ui("log", f"Sweep {direction} {deg}°")
-
-    motors.pantilt(0, 0)
-
-    if sweep_frames and _ms.mission_active:
-        sensor_ctx  = _sensor_context()
-        mission_ov  = _get_mission_scan_overlay()
-        step        = _current_step()
-        step_target = step.target if step else "target"
-
-        sweep_prompt = (
-            mission_ov + sensor_ctx +
-            f"INITIAL AWARENESS SWEEP — {len(sweep_frames)} frames from a ±60° pan sweep.\n"
-            f"You are completely stationary. You just activated. Your mission target is: {step_target}.\n\n"
-            "Carefully study ALL frames. Report:\n"
-            "1. Is the mission target visible in ANY frame? (target_visible)\n"
-            "2. Which direction has the clearest path for exploration? (clearest_direction)\n"
-            "3. Any immediate hazards — voids, stairs, obstacles? (void_ahead, wall_ahead)\n"
-            "4. What do you observe overall? (physical_reasoning — be descriptive for the judges)\n\n"
-            "This is your first look at the world. Make it count.\n\n"
-            + QUICK_SCAN_PROMPT
-        )
-        try:
-            _ui("log", f"🧠 Cosmos initial sweep analysis ({len(sweep_frames)} frames)...")
-            resp  = _cosmos_frames(sweep_frames, sweep_prompt, max_tokens=300, temp=0.2)
-            sweep_result = _parse_json(resp, dict(_SCAN_FALLBACK), label="INITIAL SWEEP")
-
-            # Narrate what Eric sees to the judges — this is a showcase moment
-            reasoning = sweep_result.get("physical_reasoning", "")
-            if reasoning:
-                _ui("log", f"👁️  Eric observes: {reasoning}")
-
-            if sweep_result.get("target_visible"):
-                sweep_found = True
-                _ui("log", "🎯 TARGET SPOTTED in initial sweep — approaching immediately!")
-                motors.oled(1, "TARGET IN SIGHT!")
-                _process_scan(sweep_result, from_360=True)
-                if _ms.mission_active and _ms.mission_state == State.SEARCHING:
-                    if _safe_to_fwd():
-                        motors.forward(MOTOR_SPEED_SLOW)
-                _ms.nav_clips_since_scan = 0
-            elif sweep_result.get("void_ahead") or sweep_result.get("wall_ahead"):
-                _ui("log", "⚠️  Obstacle/void in initial sweep — scanning 360°")
-                # Fall through to full 360 scan below
-            else:
-                # Announce what was seen and which direction looks best
-                clear_dir = sweep_result.get("clearest_direction", "front")
-                ack = ask_cosmos(
-                    f"You just completed your initial awareness sweep of the environment. "
-                    f"You observed: {reasoning or 'the area around you'}. "
-                    f"The clearest path is to your {clear_dir}. "
-                    f"Your target is: {step_target}. "
-                    "In 2 sentences: describe what you see and announce your first move.",
-                    max_tokens=100
-                )
-                eric_say(ack)
-        except Exception as e:
-            log_exception("initial_sweep_cosmos", e)
-
-    # ── Full 360 scan if target not spotted in initial sweep ──────────────────
-    if _ms.mission_active and not sweep_found:
-        _ui("log", "🔄 Full 360° scan...")
-        scan = _best_360_scan()
-        _process_scan(scan, from_360=True)
 
     if _ms.mission_active and _ms.mission_state == State.SEARCHING:
         if _safe_to_fwd():
