@@ -360,16 +360,39 @@ def eric_say(text):
 def _cosmos_frames(frames, prompt, max_tokens=250, temp=0.3):
     """Synchronous Cosmos call with logging. Used directly or via async wrapper."""
     from cosmos import _system_prompt as sys_prompt
-    content = [
+
+    # ── Token budget guard — model max_model_len=2048 ─────────────────────────
+    # Each image costs ~256 tokens. System prompt + mission briefing can be large.
+    # Estimate: 4 chars ~ 1 token. Reserve max_tokens for output.
+    # Budget: 2048 - max_tokens - (num_frames * 256) - 50 (safety margin)
+    _IMAGE_TOKENS   = 256  # vLLM vision token cost per image
+    _CHAR_PER_TOKEN = 4
+    _token_budget   = 2048 - max_tokens - (len(frames) * _IMAGE_TOKENS) - 50
+    _char_budget    = max(_token_budget, 200) * _CHAR_PER_TOKEN
+
+    # Truncate system prompt (keep tail — mission briefing is appended at end)
+    _sys = sys_prompt or ""
+    _sys_char_limit = int(_char_budget * 0.4)
+    if len(_sys) > _sys_char_limit:
+        _sys = _sys[-_sys_char_limit:]
+        log.debug(f"_cosmos_frames: system prompt truncated to {_sys_char_limit} chars")
+
+    # Remaining budget for user prompt
+    _prompt_char_limit = max(_char_budget - len(_sys), 200)
+    _prompt = prompt if len(prompt) <= _prompt_char_limit else prompt[-_prompt_char_limit:]
+    if _prompt != prompt:
+        log.debug(f"_cosmos_frames: user prompt truncated to {_prompt_char_limit} chars")
+
+    img_content = [
         {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}}
         for f in frames
     ]
-    content.append({"type": "text", "text": prompt})
+    img_content.append({"type": "text", "text": _prompt})
     payload = {
         "model": COSMOS_MODEL,
         "messages": [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user",   "content": content}
+            {"role": "system", "content": _sys},
+            {"role": "user",   "content": img_content}
         ],
         "max_tokens": max_tokens,
         "temperature": temp,
