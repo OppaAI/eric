@@ -1615,6 +1615,15 @@ No markdown. No explanation. No extra fields.
         log_ai(NAV_IMAGE_PROMPT[-200:], response, label="NAV_CHECK")
         result = _parse_json(response, dict(_NAV_FALLBACK), label="NAV CHECK")
 
+        # ── Physical reasoning text gate: catch wall detections Cosmos missed in JSON ──
+        reasoning_text = result.get("physical_reasoning", "").lower()
+        wall_keywords = ["wall", "blocked", "obstacle", "barrier", "blocks my way",
+                         "cannot proceed", "no clear path", "filling", "straight ahead"]
+        if any(kw in reasoning_text for kw in wall_keywords) and not result.get("wall_ahead"):
+            log.warning(f"⚠️  NAV_CHECK: Cosmos text says wall but JSON says False — overriding: {reasoning_text[:80]}")
+            result["wall_ahead"] = True
+            result["action"] = "stop"
+
         # ── Void gate: Cosmos sees a drop — stop immediately ──────────────
         if result.get("void_ahead"):
             motors.stop()
@@ -2071,7 +2080,16 @@ def _quick_scan() -> dict:
                     log_exception("quick_scan_confirm", e)
                     # Keep original result if confirmation call fails
 
-        # ── 4. Sensor hard-gates ─────────────────────────────────────────────
+        # ── 4. Physical reasoning text gate (quick_scan) ────────────────────
+        qs_reasoning = result.get("physical_reasoning", "").lower()
+        qs_wall_keywords = ["wall", "blocked", "obstacle", "barrier", "blocks my way",
+                            "cannot proceed", "no clear path", "filling", "straight ahead"]
+        if any(kw in qs_reasoning for kw in qs_wall_keywords) and not result.get("wall_ahead"):
+            log.warning(f"⚠️  QUICK_SCAN: Cosmos text says wall but JSON says False — overriding: {qs_reasoning[:80]}")
+            result["wall_ahead"] = True
+            result["action"] = "stop"
+
+        # ── 5. Sensor hard-gates ─────────────────────────────────────────────
         try:
             from lidar import obstacle_close as lidar_close
             if lidar_close():
