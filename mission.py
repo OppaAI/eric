@@ -830,13 +830,13 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
     # ── Consistency fix: if object IS the target, target_visible must be True ──
     # Only applies when detection_confidence is at or above threshold — don't
     # auto-correct a low-confidence object match into a confirmed detection.
-    _TARGET_OBJECTS = {"slipper", "shoe", "person", "robot"}
-    _auto_conf = float(result.get("detection_confidence", 0.0))
-    if (result.get("object") in _TARGET_OBJECTS
-            and not result.get("target_visible")
-            and _auto_conf >= DETECTION_CONFIDENCE_MIN):
-        log.info(f"Auto-correcting target_visible=True (object={result['object']} conf={_auto_conf:.2f})")
-        result["target_visible"] = True
+    #_TARGET_OBJECTS = {"slipper", "shoe", "person", "robot"}
+    #_auto_conf = float(result.get("detection_confidence", 0.0))
+    #if (result.get("object") in _TARGET_OBJECTS
+    #        and not result.get("target_visible")
+    #        and _auto_conf >= DETECTION_CONFIDENCE_MIN):
+    #    log.info(f"Auto-correcting target_visible=True (object={result['object']} conf={_auto_conf:.2f})")
+    #    result["target_visible"] = True
 
     # ── Note: stop→forward auto-correction removed.
     # Cosmos saying stop with no explicit obstacle flag is valid —
@@ -865,9 +865,9 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
         if k == "small_obstacle"   and v:                              icon = "  ⚠️ "
         if k == "target_visible"   and v:                              icon = "  🎯 "
         if k == "detection_confidence":  # hidden from display
-        continue
-    if False and isinstance(v, float):
-            icon = f"  {'✅' if v >= DETECTION_CONFIDENCE_MIN else '❌ LOW'}"
+            continue
+    #if False and isinstance(v, float):
+     #       icon = f"  {'✅' if v >= DETECTION_CONFIDENCE_MIN else '❌ LOW'}"
         if k == "mission_complete" and v:                              icon = "  🏆 "
         if k == "speak"            and v:                              icon = "  🔊 "
         print(f"  {k:25s}: {v}{icon}")
