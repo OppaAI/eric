@@ -1212,6 +1212,27 @@ def start_mission(briefing: str, mission_name: str = ""):
     motors.lights(0, 0)    # LEDs off — only turn on if scene is pitch black
     time.sleep(0.5)
 
+    # GAP 3 FIX: KV cache warm-up — force vLLM to prefill and cache the full
+    # system prompt (including mission briefing) before the real ack call.
+    # Cost: one tiny request (~1s). Benefit: every subsequent Cosmos call this
+    # mission pays only the delta (scene snapshot), not the full system prompt.
+    # Cuts TTFT on Orin Nano W4A16 2B from ~1.5s to ~300ms per call.
+    try:
+        from cosmos import _system_prompt as _sys_p
+        _warmup_payload = {
+            "model": COSMOS_MODEL,
+            "messages": [
+                {"role": "system", "content": _sys_p},
+                {"role": "user",   "content": [{"type": "text", "text": "ready"}]},
+            ],
+            "max_tokens": 1,
+            "temperature": 0.0,
+        }
+        requests.post(VLLM_URL, json=_warmup_payload, timeout=15)
+        log.info("\u2705 vLLM KV cache warmed for this mission's system prompt")
+    except Exception as _wu_exc:
+        log.debug(f"KV cache warm-up skipped ({_wu_exc}) — non-fatal")
+
     step_info = f"I have {len(_ms.mission_steps)} step{'s' if len(_ms.mission_steps) > 1 else ''}: {', '.join(step_summaries)}." if len(_ms.mission_steps) > 1 else ""
     ack = ask_cosmos_plain(
         f"Mission briefing:\n\"{briefing}\"\n\n"
@@ -2469,7 +2490,24 @@ def _scan_360_pantilt() -> dict:
                 continue
 
             # Candidate — confirm with webcam
+            # _confirm_candidate() blocks for up to ~10s (two Cosmos calls).
+            # GAP 4 FIX: check YOLO flag immediately after it returns.
+            # If Layer 2 detected something during the confirmation window,
+            # surface it now — it is fresher and more reliable than continuing
+            # to collect potentially stale sweep results.
             confirmed = _confirm_candidate(pan, frame, sensor_ctx, mission_ov)
+
+            with _yolo_lock:
+                yolo_fired = _ms.yolo_person_detected
+            if yolo_fired:
+                _ui("log", "⚡ YOLO fired during 360 confirmation — "
+                           "handing off to YOLO handler immediately")
+                log_mission_event("yolo_preempts_360", f"post confirm pan={pan}")
+                # Return a sentinel so _best_360_scan / _process_scan skips
+                # further sweep processing — the mission loop will call
+                # _handle_yolo_detection() on the very next iteration.
+                return None   # YOLO flag set, mission loop handles it
+
             if confirmed:
                 return confirmed
             # False positive — continue collecting remaining results
@@ -4242,26 +4280,41 @@ def _handle_yolo_detection() -> bool:
                    f"at {dist_m:.2f}m — executing step action directly")
         log_mission_event("yolo_step_complete",
                           f"{label} at {dist_m:.2f}m matches step target={step.target}")
-        # Greet briefly before executing (1 sentence — non-blocking feel)
-        greeting = ask_cosmos(
+
+        # GAP 1 FIX: greeting submitted async — mission_state = INTERACTING
+        # immediately so the main loop gates on it while Cosmos thinks.
+        # _execute_step_action() is called from the async thread once the
+        # greeting TTS completes so the interaction sequence is preserved.
+        _ms.mission_state = State.INTERACTING
+        motors.pantilt(0, 15)
+
+        _greeting_prompt = (
             f"Your YOLO sensors just confirmed {label} at {dist_m:.2f}m to your {bearing}. "
             f"{step_info} "
-            "Greet them warmly in ONE sentence.",
-            max_tokens=60
+            "Greet them warmly in ONE sentence."
         )
-        eric_say(greeting)
-        motors.pantilt(0, 15)
-        time.sleep(0.3)
-        _ms.mission_state = State.INTERACTING
-        _execute_step_action(label)
+        _step_label = label   # capture for closure
+
+        def _greet_and_execute():
+            try:
+                greeting = ask_cosmos(_greeting_prompt, max_tokens=60)
+                eric_say(greeting)
+            except Exception as _ge:
+                log.warning(f"YOLO greeting failed ({_ge}) — skipping greeting")
+            time.sleep(0.3)
+            _execute_step_action(_step_label)
+
+        _cosmos_executor.submit(_greet_and_execute)
         return True
 
     # ── Not a step-target match — normal greeting / observation ───────────────
+    # GAP 1 FIX: set INTERACTING first so the main loop parks immediately,
+    # then submit greeting to the executor — never blocks the hot path.
     _ms.mission_state = State.INTERACTING
 
     if approach:
-        _ui("log", f"YOLO: {label} confirmed at {dist_m:.1f}m — handing to Cosmos")
-        greeting = ask_cosmos(
+        _ui("log", f"YOLO: {label} confirmed at {dist_m:.1f}m — greeting async")
+        _greet_prompt = (
             f"{sensor_ctx}"
             f"HARDWARE DETECTION — Layer 2 YOLO (OAK-D Myriad X VPU) has confirmed:\n"
             f"  Target: {label}\n"
@@ -4270,20 +4323,34 @@ def _handle_yolo_detection() -> bool:
             f"  {step_info}\n\n"
             "You have stopped and turned to face them. "
             "Greet them naturally, mention that your sensors detected them, "
-            "and ask if they can help with your mission. 1-2 sentences.",
-            max_tokens=100
+            "and ask if they can help with your mission. 1-2 sentences."
         )
-        eric_say(greeting)
+
+        def _greet_approach():
+            try:
+                greeting = ask_cosmos(_greet_prompt, max_tokens=100)
+                eric_say(greeting)
+            except Exception as _ge:
+                log.warning(f"YOLO approach greeting failed ({_ge})")
+
+        _cosmos_executor.submit(_greet_approach)
     else:
-        _ui("log", f"YOLO: {label} at {dist_m:.1f}m — observing (approach_on_detect=false)")
-        report = ask_cosmos(
+        _ui("log", f"YOLO: {label} at {dist_m:.1f}m — reporting async (approach_on_detect=false)")
+        _report_prompt = (
             f"{sensor_ctx}"
             f"HARDWARE DETECTION — Layer 2 YOLO confirmed {label} at {dist_m:.2f}m "
             f"to your {bearing} ({bearing_deg:+.0f}°). {step_info} "
-            "Report what you observe. Stay in position. 1-2 sentences.",
-            max_tokens=80
+            "Report what you observe. Stay in position. 1-2 sentences."
         )
-        eric_say(report)
+
+        def _report_observe():
+            try:
+                report = ask_cosmos(_report_prompt, max_tokens=80)
+                eric_say(report)
+            except Exception as _re:
+                log.warning(f"YOLO observe report failed ({_re})")
+
+        _cosmos_executor.submit(_report_observe)
 
     return True
 
@@ -4426,8 +4493,9 @@ def _mission_loop():
                 if _safe_to_fwd():
                     motors.forward(MOTOR_SPEED_SLOW)
 
-                move_deadline = time.monotonic() + NAV_MOVE_INTERVAL
-                yolo_broke    = False
+                move_deadline       = time.monotonic() + NAV_MOVE_INTERVAL
+                yolo_broke          = False
+                _last_async_nav_t   = 0.0   # GAP 2: track last async nav fire time
                 while time.monotonic() < move_deadline and _ms.mission_active:
                     time.sleep(0.1)  # 100ms poll — faster stop response
 
@@ -4449,6 +4517,25 @@ def _mission_loop():
                         motors.stop()
                         yolo_broke = True
                         break
+
+                    # GAP 2 FIX: fire async Cosmos nav check while moving.
+                    # _nav_check_async() returns instantly (fire-and-forget +
+                    # last_nav_result). Hardware gates (LiDAR/OAK-D) always run
+                    # first inside it — Cosmos vision runs in parallel.
+                    # Only acts on result if Cosmos signals a hard stop.
+                    now_nav = time.monotonic()
+                    if now_nav - _last_async_nav_t >= NAV_IMAGE_INTERVAL:
+                        _last_async_nav_t = now_nav
+                        try:
+                            nav_r = _nav_check_async()
+                            if nav_r.get("action") == "stop" or nav_r.get("wall_ahead"):
+                                motors.stop()
+                                _ui("log", f"🛑 Async nav check: stop — "
+                                           f"{nav_r.get('physical_reasoning', '')[:60]}")
+                                yolo_broke = True   # reuse flag — skip post-move LiDAR check
+                                break
+                        except Exception as _nav_exc:
+                            log.debug(f"async nav check error: {_nav_exc}")
 
                 if not _ms.mission_active:
                     motors.stop()
