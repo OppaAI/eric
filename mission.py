@@ -2235,7 +2235,7 @@ def _scan_360_pantilt() -> dict:
     360° pan-tilt sweep — async inference pipeline.
 
     Design:
-      - Fixed tilt TILT_GROUND (15°) throughout — ground-level focus, no tilt changes
+      - Fixed tilt TILT_GROUND (-15°) throughout — ground-level focus, no tilt changes
         during sweep. Tilt only moves for webcam confirmation after a candidate found.
       - One sharp 320×240 frame per pan position — no video clips, no waiting for
         a clip to finish recording.
@@ -2265,7 +2265,7 @@ def _scan_360_pantilt() -> dict:
 
     # ── Constants ─────────────────────────────────────────────────────────────
     PAN_STEPS    = [-90, -60, -30, 0, 30, 60, 90]
-    TILT_GROUND  = 15   # fixed ground-level tilt throughout sweep — no tilt changes
+    TILT_GROUND  = -15  # fixed ground-level tilt throughout sweep — no tilt changes
     PAN_SETTLE   = 0.40 # seconds after pantilt() before capture — raised from 0.25 for servo + frame settle
 
     # Webcam is zip-tied to the pan-tilt head, offset slightly to the LEFT.
@@ -2635,7 +2635,7 @@ def _scan_360_video_sweep() -> dict:
     log.info("Starting observation 360° video sweep — continuous rotation")
     log_mission_event("scan_360_video_start", "continuous chassis rotation + video")
 
-    TILT_LEVEL = 10   # slight downward tilt — ground-level focus
+    TILT_LEVEL = -10   # slight downward tilt — ground-level focus
     motors.pantilt(0, TILT_LEVEL)
     time.sleep(0.3)
 
