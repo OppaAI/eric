@@ -94,10 +94,15 @@ def get_arc_distances() -> dict:
         arc_rad  = math.radians(ARC_HALF)
         side_rad = math.radians(SIDE_HALF)
 
+        from lidar import CHASSIS_BLIND_M
         for i, r in enumerate(msg.ranges):
-            if not (msg.range_min < r < msg.range_max):
+            if not (CHASSIS_BLIND_M < r < msg.range_max):
                 continue
-            angle = (msg.angle_min + i * msg.angle_increment + math.pi) % (2 * math.pi) - math.pi
+            # Normalise to [-π, +π] WITHOUT the erroneous +pi offset
+            # that was swapping left and right arc assignments
+            angle = (msg.angle_min + i * msg.angle_increment) % (2 * math.pi)
+            if angle > math.pi:
+                angle -= 2 * math.pi
 
             if -arc_rad <= angle <= arc_rad:
                 arcs["front"] = min(arcs["front"], r)
