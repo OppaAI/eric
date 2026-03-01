@@ -229,13 +229,13 @@ local_costmap:
       height: 3
       resolution: 0.05
       footprint: "[[0.115, 0.10], [0.115, -0.10], [-0.115, -0.10], [-0.115, 0.10]]"
-      plugins: ["voxel_layer", "inflation_layer"]
+      plugins: ["obstacle_layer", "inflation_layer"]
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
         inflation_radius: 0.35
-      voxel_layer:
-        plugin: "nav2_costmap_2d::VoxelLayer"
+      obstacle_layer:
+        plugin: "nav2_costmap_2d/ObstacleLayer"
         enabled: True
         publish_voxel_map: True
         origin_z: 0.0
@@ -271,7 +271,7 @@ global_costmap:
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
-        plugin: "nav2_costmap_2d::ObstacleLayer"
+        plugin: "nav2_costmap_2d/ObstacleLayer"
         enabled: True
         observation_sources: scan
         scan:
