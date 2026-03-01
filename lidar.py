@@ -42,9 +42,10 @@ import time
 log = logging.getLogger("eric.lidar")
 
 # ── Safety distances (meters) ──────────────────────────────────────────────────
-STOP_DIST     = 0.30
-SLOW_DIST     = 0.60
-FRONT_ARC_DEG = 60
+STOP_DIST        = 0.30
+SLOW_DIST        = 0.60
+FRONT_ARC_DEG    = 60
+CHASSIS_BLIND_M  = 0.12   # ignore returns closer than this — antenna / chassis self-detection
 
 # ── Motor heartbeat watchdog ───────────────────────────────────────────────────
 MOTOR_HB_INTERVAL_S = 2.0
@@ -226,7 +227,7 @@ def get_front_depth_lidar() -> float | None:
         arc_ranges = [
             r for i, r in enumerate(msg.ranges)
             if abs((angle_min + i * angle_inc) - centre_rad) <= half_width
-            and msg.range_min < r < msg.range_max
+            and CHASSIS_BLIND_M < r < msg.range_max
         ]
         if arc_ranges:
             samples.append(min(arc_ranges))
@@ -340,10 +341,11 @@ def _scan_callback(msg):
             _last_scan_time = now
 
         # Front-arc obstacle detection
+        # CHASSIS_BLIND_M filters self-returns from antenna / chassis body
         front_distances = [
             r for i, r in enumerate(msg.ranges)
             if -arc_rad <= (angle_min + i * angle_inc) <= arc_rad
-            and msg.range_min < r < msg.range_max
+            and CHASSIS_BLIND_M < r < msg.range_max
         ]
 
         if not front_distances:
