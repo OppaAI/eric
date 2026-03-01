@@ -216,7 +216,7 @@ EMPTY_SCAN_LIMIT        = 5    # trigger 360 after 5 consecutive empty scans
 SCANS_BEFORE_360        = 10   # periodic 360 every 10 quick scans
 MAX_AVOID_ATTEMPTS      = 3    # force 360 after this many avoid failures
 TARGET_CONFIRM_NEEDED   = 1    # only needs 1 positive scan to approach
-DETECTION_CONFIDENCE_MIN = 0.55  # minimum Cosmos detection_confidence to accept target_visible=True
+DETECTION_CONFIDENCE_MIN = 0.0   # DISABLED for cookoff — was 0.55, always 0.0 from Cosmos
                                   # below this, sweep detections are treated as hallucinations and skipped
 
 
@@ -864,7 +864,9 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
         if k == "obstacle_close"   and v:                              icon = "  🚧 "
         if k == "small_obstacle"   and v:                              icon = "  ⚠️ "
         if k == "target_visible"   and v:                              icon = "  🎯 "
-        if k == "detection_confidence" and isinstance(v, float):
+        if k == "detection_confidence":  # hidden from display
+        continue
+    if False and isinstance(v, float):
             icon = f"  {'✅' if v >= DETECTION_CONFIDENCE_MIN else '❌ LOW'}"
         if k == "mission_complete" and v:                              icon = "  🏆 "
         if k == "speak"            and v:                              icon = "  🔊 "
@@ -1402,7 +1404,6 @@ STEP 2 — OBSTACLE SAFETY: Which direction has the most open space?
 STEP 3 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts.
 Set target_visible=true if 50%+ confident you can see a specific distinguishing feature
 in this frame (not general knowledge about what the target looks like).
-Set detection_confidence to a float 0.0–1.0 reflecting how certain you are.
 The robot will do a hardware+webcam confirmation pass anyway — do NOT hold back a detection.
 
 STEP 4 — SPEAK: One excited sentence if target found, otherwise null.
@@ -1419,7 +1420,6 @@ OUTPUT: A single JSON object. Use ONLY these exact field names — no others:
   "small_obstacle": false,
   "void_ahead": false,
   "target_visible": false,
-  "detection_confidence": 0.0,
   "target_direction": "unknown",
   "clearest_direction": "front",
   "action": "forward",
@@ -1429,7 +1429,6 @@ OUTPUT: A single JSON object. Use ONLY these exact field names — no others:
 }
 
 "object" must be ONE word: person | robot | slipper | shoe | obstacle | wall | clear | unknown | pokemon | figure | animal
-"detection_confidence": float 0.0–1.0. Use 0.0 when target_visible=false. Be honest — do not inflate.
 "speak" = speech output. NOT "speaker". NOT "speech". NOT "tts".
 "physical_reasoning" = reasoning. NOT "reasoning". NOT "explanation".
 "target_visible" = detection flag. NOT "target_visibility". NOT "target_found".
@@ -1483,7 +1482,7 @@ RULES (in priority order):
 1. VOID/DROP — stair edge, hole, floor ending → void_ahead=true, action=stop
 2. OBSTACLE — object <60cm ahead OR filling lower frame → obstacle_close=true, action=stop
 3. TARGET — slipper/shoe/person/robot visible ANYWHERE, even partially, even at an angle,
-   even at the edge of frame → target_visible=true. Set detection_confidence to how certain
+   even at the edge of frame → target_visible=true.
    you are based on specific visual features you can actually see in this frame (0.0–1.0).
    Do NOT base confidence on general knowledge of what the target looks like.
 4. Otherwise → action=forward
@@ -1492,11 +1491,10 @@ RULES (in priority order):
 "physical_reasoning": one plain sentence describing what you see. No backticks.
 
 Output ONLY this JSON — no markdown, no extra fields:
-{"object":"clear","object_name":null,"terrain":"tiles","distance":"far","in_my_path":false,"wall_ahead":false,"obstacle_close":false,"small_obstacle":false,"void_ahead":false,"target_visible":false,"detection_confidence":0.0,"target_direction":"unknown","clearest_direction":"front","action":"forward","speak":null,"physical_reasoning":"Path clear.","mission_complete":false}
+{"object":"clear","object_name":null,"terrain":"tiles","distance":"far","in_my_path":false,"wall_ahead":false,"obstacle_close":false,"small_obstacle":false,"void_ahead":false,"target_visible":false,"target_direction":"unknown","clearest_direction":"front","action":"forward","speak":null,"physical_reasoning":"Path clear.","mission_complete":false}
 
 "object": person|robot|slipper|shoe|obstacle|wall|clear|unknown
 "distance": near|mid|far
-"detection_confidence": float 0.0–1.0. Use 0.0 when target_visible=false. Be honest.
 "target_direction": front|left|right|unknown
 "clearest_direction": front|left|right
 "action": forward|stop|turn_left|turn_right
@@ -1507,8 +1505,7 @@ _SCAN_FALLBACK = {
     "object": "unknown", "object_name": None, "terrain": "clear",
     "distance": "far", "in_my_path": False, "wall_ahead": False,
     "small_obstacle": False, "void_ahead": False, "target_visible": False,
-    "detection_confidence": 0.0,          # 0.0–1.0 — Cosmos self-reported certainty
-    "target_direction": "unknown", "clearest_direction": "front",
+        "target_direction": "unknown", "clearest_direction": "front",
     "action": "stop", "speak": None,   # SAFE default — never forward on failure
     "physical_reasoning": "", "mission_complete": False
 }
@@ -2348,7 +2345,6 @@ def _scan_360_pantilt() -> dict:
             "in one than the other. "
             "Set target_visible=true ONLY if you can identify a specific visual feature "
             "you actually see in the frame (shape, colour, marking) — not general knowledge. "
-            "Set detection_confidence to a float 0.0–1.0 reflecting certainty based only "
             "on what is visible. Do not inflate — a score above 0.55 must be justified "
             "by observable evidence in the frame. "
             "Be conservative — a false positive wastes mission time.\n\n"
