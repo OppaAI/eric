@@ -212,8 +212,8 @@ def get_conversation_history() -> list:
     return _ms.conversation_history
 
 # ── Tuning constants (never mutated at runtime) ──────────────────────────────
-EMPTY_SCAN_LIMIT        = 3    # trigger 360 after 3 consecutive empty scans
-SCANS_BEFORE_360        = 6    # periodic 360 every 6 quick scans
+EMPTY_SCAN_LIMIT        = 5    # trigger 360 after 5 consecutive empty scans
+SCANS_BEFORE_360        = 10   # periodic 360 every 10 quick scans
 MAX_AVOID_ATTEMPTS      = 3    # force 360 after this many avoid failures
 TARGET_CONFIRM_NEEDED   = 1    # only needs 1 positive scan to approach
 DETECTION_CONFIDENCE_MIN = 0.55  # minimum Cosmos detection_confidence to accept target_visible=True
