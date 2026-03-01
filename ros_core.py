@@ -75,9 +75,9 @@ bt_navigator:
     default_nav_through_poses_bt_xml: "/opt/ros/humble/share/nav2_bt_navigator/behavior_trees/navigate_through_poses_w_replanning_and_recovery.xml"
     navigators: ["navigate_to_pose", "navigate_through_poses"]
     navigate_to_pose:
-      plugin: "nav2_bt_navigator::NavigateToPoseNavigator"
+      plugin: "nav2_bt_navigator/NavigateToPoseNavigator"
     navigate_through_poses:
-      plugin: "nav2_bt_navigator::NavigateThroughPosesNavigator"
+      plugin: "nav2_bt_navigator/NavigateThroughPosesNavigator"
 
 controller_server:
   ros__parameters:
@@ -90,16 +90,16 @@ controller_server:
     goal_checker_plugins: ["general_goal_checker"]
     controller_plugins: ["FollowPath"]
     progress_checker:
-      plugin: "nav2_controller::SimpleProgressChecker"
+      plugin: "nav2_controller/SimpleProgressChecker"
       required_movement_radius: 0.5
       movement_time_allowance: 10.0
     general_goal_checker:
       stateful: True
-      plugin: "nav2_controller::SimpleGoalChecker"
+      plugin: "nav2_controller/SimpleGoalChecker"
       xy_goal_tolerance: 0.25
       yaw_goal_tolerance: 0.25
     FollowPath:
-      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      plugin: "nav2_regulated_pure_pursuit_controller/RegulatedPurePursuitController"
       desired_linear_vel: 0.3
       lookahead_dist: 0.6
       min_lookahead_dist: 0.3
@@ -128,7 +128,7 @@ planner_server:
     expected_planner_frequency: 20.0
     planner_plugins: ["GridBased"]
     GridBased:
-      plugin: "nav2_navfn_planner::NavfnPlanner"
+      plugin: "nav2_navfn_planner/NavfnPlanner"
       tolerance: 0.5
       use_astar: false
       allow_unknown: true
@@ -137,7 +137,7 @@ smoother_server:
   ros__parameters:
     smoother_plugins: ["simple_smoother"]
     simple_smoother:
-      plugin: "nav2_smoother::SimpleSmoother"
+      plugin: "nav2_smoother/SimpleSmoother"
       tolerance: 1.0e-10
       max_its: 1000
       do_refinement: True
@@ -149,15 +149,15 @@ behavior_server:
     cycle_frequency: 10.0
     behavior_plugins: ["spin", "backup", "drive_on_heading", "assisted_teleop", "wait"]
     spin:
-      plugin: "nav2_behaviors::Spin"
+      plugin: "nav2_behaviors/Spin"
     backup:
-      plugin: "nav2_behaviors::BackUp"
+      plugin: "nav2_behaviors/BackUp"
     drive_on_heading:
-      plugin: "nav2_behaviors::DriveOnHeading"
+      plugin: "nav2_behaviors/DriveOnHeading"
     wait:
-      plugin: "nav2_behaviors::Wait"
+      plugin: "nav2_behaviors/Wait"
     assisted_teleop:
-      plugin: "nav2_behaviors::AssistedTeleop"
+      plugin: "nav2_behaviors/AssistedTeleop"
     global_frame: odom
     robot_base_frame: base_link
     transform_tolerance: 0.1
@@ -173,7 +173,7 @@ waypoint_follower:
     action_server_result_timeout: 900.0
     waypoint_task_executor_plugin: "wait_at_waypoint"
     wait_at_waypoint:
-      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
+      plugin: "nav2_waypoint_follower/WaitAtWaypoint"
       enabled: True
       waypoint_pause_duration: 200
 
@@ -231,11 +231,11 @@ local_costmap:
       footprint: "[[0.115, 0.10], [0.115, -0.10], [-0.115, -0.10], [-0.115, 0.10]]"
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
-        plugin: "nav2_costmap_2d::InflationLayer"
+        plugin: "nav2_costmap_2d/InflationLayer"
         cost_scaling_factor: 3.0
         inflation_radius: 0.35
       voxel_layer:
-        plugin: "nav2_costmap_2d::VoxelLayer"
+        plugin: "nav2_costmap_2d/VoxelLayer"
         enabled: True
         publish_voxel_map: True
         origin_z: 0.0
@@ -255,7 +255,7 @@ local_costmap:
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
       static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
+        plugin: "nav2_costmap_2d/StaticLayer"
         map_subscribe_transient_local: True
       always_send_full_costmap: True
 
@@ -271,7 +271,7 @@ global_costmap:
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
-        plugin: "nav2_costmap_2d::ObstacleLayer"
+        plugin: "nav2_costmap_2d/ObstacleLayer"
         enabled: True
         observation_sources: scan
         scan:
@@ -285,11 +285,11 @@ global_costmap:
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
       static_layer:
-        plugin: "nav2_costmap_2d::StaticLayer"
+        plugin: "nav2_costmap_2d/StaticLayer"
         map_topic: /map
         map_subscribe_transient_local: True
       inflation_layer:
-        plugin: "nav2_costmap_2d::InflationLayer"
+        plugin: "nav2_costmap_2d/InflationLayer"
         cost_scaling_factor: 3.0
         inflation_radius: 0.35
       always_send_full_costmap: True
