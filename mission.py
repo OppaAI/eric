@@ -2107,6 +2107,8 @@ def _quick_scan() -> dict:
 
         # ── 4. Physical reasoning text gate (quick_scan) ────────────────────
         qs_reasoning = result.get("physical_reasoning", "").lower()
+        # Strip backtick noise before keyword check — model wraps garbage in backticks
+        qs_reasoning = qs_reasoning.replace("`", "").strip()
         qs_wall_keywords = ["blocks my way", "cannot proceed", "no clear path",
                              "path is blocked", "blocking my path", "wall blocks",
                              "wall ahead", "directly blocking"]
@@ -3318,10 +3320,27 @@ def _get_mission_scan_overlay() -> str:
     elif alarm == AlarmType.NONE:
         # Narrative/story missions — guide Cosmos to find story characters
         target_list = ", ".join(targets) if targets else "mission targets"
+        # Pull owner/creator description from character hints if available
+        chars = _ms.mission_flags.get("characters", [])
+        owner_desc = ""
+        for ch in (chars if isinstance(chars, list) else []):
+            if isinstance(ch, dict) and any(
+                kw in ch.get("name", "").lower() for kw in ["owner", "creator"]
+            ):
+                owner_desc = ch.get("hint", "").split("\n")[0].strip()
+                break
+        desc_line = (
+            f"You are specifically looking for: {owner_desc}\n"
+            if owner_desc else
+            f"You are looking for: {target_list}\n"
+        )
         base = (
-            f"NARRATIVE MISSION MODE: You are looking for {target_list}.\n"
-            "When you see the target, set target_visible=true and approach normally.\n"
-            "No alarm will sound — this is a story/roleplay mission.\n\n"
+            f"NARRATIVE MISSION MODE: {desc_line}"
+            "When you see the target person — set target_visible=true, "
+            "set object='person', set object_name='creator'.\n"
+            "If you see a person who does NOT match: set target_visible=false, "
+            "set object='person', set object_name=null.\n"
+            "No alarm will sound — this is a find-and-greet mission.\n\n"
         )
 
     else:
@@ -3533,10 +3552,39 @@ def _confirm_and_photograph_target():
             log_exception("target_confirm", e)
 
     if not description_confirmed:
-        _ui("log", "⚠️  Description mismatch — resuming search")
+        _ui("log", "⚠️  Description mismatch — asking stranger for help")
+        motors.oled(1, "Asking...")
+
+        # Lift tilt to face level to talk to them naturally
+        motors.pantilt(0, 15, 50)
+        time.sleep(0.5)
+
+        ask = ask_cosmos(
+            "You have stopped in front of someone who does not match your owner's description. "
+            "Ask them warmly and naturally if they have seen your owner. "
+            "Say something like: 'Excuse me, have you seen my owner? He is an Asian man, "
+            "not very tall, wearing glasses. I have been looking for him.' "
+            "Keep it to 2 sentences. Plain spoken words only — no JSON.",
+            max_tokens=80
+        )
+        eric_say(ask)
+        log_mission_event("asked_stranger", ask[:100])
+
+        # Wait briefly for a response (TTS plays, person might reply)
+        time.sleep(4.0)
+
+        # Thank them and move on
+        thanks = ask_cosmos(
+            "Thank the person briefly and let them know you will keep searching. "
+            "One sentence. Plain spoken words only — no JSON.",
+            max_tokens=40
+        )
+        eric_say(thanks)
+
+        # Resume search
+        motors.pantilt(0, -5, 60)
         _ms.mission_state = State.SEARCHING
         _ms.target_spotted_count = 0
-        motors.pantilt(0, -5, 60)
         if _safe_to_fwd():
             motors.forward(MOTOR_SPEED_SLOW)
         return
@@ -3843,6 +3891,16 @@ def _approach_target():
         tdir    = str(check.get("target_direction", "front")).lower().strip()
         in_path = check.get("in_my_path", False)
 
+        # ── Same target keyword override as _process_scan ───────────────────
+        if not check.get("target_visible"):
+            _tgt_kws = ["creator", "owner"] + [t.lower() for t in (_ms.mission_target_objects or [])]
+            _rsn = str(check.get("physical_reasoning", "")).lower()
+            _onm = str(check.get("object_name") or "").lower()
+            if any(kw in _onm or kw in _rsn for kw in _tgt_kws):
+                log.info("Approach scan: target keyword in reasoning — forcing target_visible=True")
+                check["target_visible"] = True
+                check["object_name"] = check.get("object_name") or "creator"
+
         # ── Obstacle → avoid ─────────────────────────────────────────────────
         if check.get("wall_ahead") or check.get("obstacle_close"):
             _ui("log", f"Obstacle during approach — avoiding (obj={obj})")
@@ -3866,9 +3924,10 @@ def _approach_target():
 
         # ── Cosmos distance confirmation — back up the hardware gate ──────────
         if check.get("target_visible") and obj in _TARGET_OBJECTS and dist in _NEAR_DISTANCES:
-            _ui("log", f"Cosmos: target close ({dist}) — executing step action")
+            _ui("log", f"Cosmos: target close ({dist}) — confirming and photographing")
             log_mission_event("cosmos_arrival", f"obj={obj} dist={dist}")
-            _execute_step_action(check.get("object_name") or obj)
+            motors.stop()
+            _confirm_and_photograph_target()
             return
 
         if dist in _NEAR_DISTANCES or in_path:
@@ -3997,15 +4056,20 @@ def _process_scan(scan, from_360=False):
     target_dir     = scan.get("target_direction", "front")
     clear_dir      = scan.get("clearest_direction", "front")
 
-    # ── object_name override: if Cosmos named the target, trust it ──────────
-    # Cosmos sometimes returns object_name="creator"/"owner" but target_visible=False.
-    # If the name matches a mission target keyword, force target_visible=True.
-    if not target_visible and obj_name:
-        target_keywords = ["creator", "owner", "target"] + [
+    # ── object_name / reasoning override: if Cosmos identified the target, trust it ──
+    # Cosmos often puts "Creator stands facing away..." in physical_reasoning
+    # but leaves object_name=None and target_visible=False. Check both.
+    if not target_visible:
+        target_keywords = ["creator", "owner"] + [
             t.lower() for t in (_ms.mission_target_objects or [])
         ]
-        if any(kw in str(obj_name).lower() for kw in target_keywords):
+        reason_lower = str(reason).lower()
+        obj_name_lower = str(obj_name or "").lower()
+        if any(kw in obj_name_lower for kw in target_keywords):
             log.info(f"_process_scan: object_name='{obj_name}' matches target — forcing target_visible=True")
+            target_visible = True
+        elif any(kw in reason_lower for kw in target_keywords):
+            log.info(f"_process_scan: reasoning mentions target keyword — forcing target_visible=True")
             target_visible = True
 
     # ── Confidence gate — disabled (always 0.0 from Cosmos) ──────────────
