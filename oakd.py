@@ -358,7 +358,7 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
     # setVideoSize to crop/scale the ISP output to exactly 960×540, which is
     # within the OAK-D Lite SIPP memory budget and what the pipeline expects.
     cam_rgb.setResolution(
-        dai.ColorCameraProperties.SensorResolution.THE_1080_P)
+        dai.ColorCameraProperties.SensorResolution.THE_800_P)
     # setVideoSize and setIspScale removed — native 2104x1560 is fine, preview handles YOLO input
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
