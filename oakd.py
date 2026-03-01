@@ -959,7 +959,7 @@ def get_floor_drop(
     total_edge_pixels = edge_strip.size
     return_ratio      = valid_count / max(total_edge_pixels, 1)
 
-    if return_ratio < 0.005 and total_edge_pixels > 100:   # < 0.5% — truly open air only
+    if return_ratio < 0.001 and total_edge_pixels > 500:   # < 0.1% AND large sample — truly open air only
         void_detected = True
         confidence    = "high"
         reason        = (f"floor edge returns sparse ({return_ratio:.1%}) "
@@ -979,11 +979,9 @@ def get_floor_drop(
                              f"({floor_mid_m:.1f}m→{floor_edge_m:.1f}m) "
                              "— step or slope")
 
-    elif floor_edge_m is None and floor_mid_m is not None and floor_mid_m < 2.0:
-        void_detected = True
-        confidence    = "medium"
-        reason        = (f"no floor returns at edge, mid={floor_mid_m:.1f}m "
-                         "— possible drop")
+    # Disabled: "no edge returns" at 15cm mount height is normal on low-texture floors
+    # elif floor_edge_m is None and floor_mid_m is not None and floor_mid_m < 2.0:
+    #     void_detected = True
 
     return {
         "void_detected": void_detected,

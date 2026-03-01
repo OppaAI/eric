@@ -312,15 +312,9 @@ def _path_is_clear(min_clearance: float = 0.55) -> bool:
     except Exception:
         pass
 
-    try:
-        from mission import _quick_scan
-        res = _quick_scan()
-        if res.get("wall_ahead") or res.get("obstacle_close"):
-            log.info("Cosmos quick scan: still blocked visually")
-            return False
-    except Exception:
-        pass
-
+    # _quick_scan removed from path_is_clear — false void detections from OAK-D
+    # at 15cm mount height were always returning "blocked" even on clear paths.
+    # LiDAR + OAK-D front depth above are sufficient for path clear check.
     return True
 
 
