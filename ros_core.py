@@ -231,11 +231,11 @@ local_costmap:
       footprint: "[[0.115, 0.10], [0.115, -0.10], [-0.115, -0.10], [-0.115, 0.10]]"
       plugins: ["voxel_layer", "inflation_layer"]
       inflation_layer:
-        plugin: "nav2_costmap_2d/InflationLayer"
+        plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
         inflation_radius: 0.35
       voxel_layer:
-        plugin: "nav2_costmap_2d/VoxelLayer"
+        plugin: "nav2_costmap_2d::VoxelLayer"
         enabled: True
         publish_voxel_map: True
         origin_z: 0.0
@@ -255,7 +255,7 @@ local_costmap:
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
       static_layer:
-        plugin: "nav2_costmap_2d/StaticLayer"
+        plugin: "nav2_costmap_2d::StaticLayer"
         map_subscribe_transient_local: True
       always_send_full_costmap: True
 
@@ -271,7 +271,7 @@ global_costmap:
       track_unknown_space: true
       plugins: ["static_layer", "obstacle_layer", "inflation_layer"]
       obstacle_layer:
-        plugin: "nav2_costmap_2d/ObstacleLayer"
+        plugin: "nav2_costmap_2d::ObstacleLayer"
         enabled: True
         observation_sources: scan
         scan:
@@ -285,11 +285,11 @@ global_costmap:
           obstacle_max_range: 2.5
           obstacle_min_range: 0.0
       static_layer:
-        plugin: "nav2_costmap_2d/StaticLayer"
+        plugin: "nav2_costmap_2d::StaticLayer"
         map_topic: /map
         map_subscribe_transient_local: True
       inflation_layer:
-        plugin: "nav2_costmap_2d/InflationLayer"
+        plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 3.0
         inflation_radius: 0.35
       always_send_full_costmap: True
