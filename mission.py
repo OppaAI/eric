@@ -1261,6 +1261,9 @@ def stop_mission():
     Cleanly stop the current mission and fully reset all runtime state.
 
     Fixes applied here:
+      0. _ms.reset_for_new_mission() + YAML field clear — wipes conversation
+         history, step engine, YOLO state, counters, and all YAML-loaded fields
+         so nothing bleeds into the next mission.
       1. Cancel pending_nav future — prevents stale nav result bleeding into
          the next mission's first loop iteration.
       2. stop_alarm() — ensures siren/alert from a find doesn't carry into
@@ -1280,6 +1283,17 @@ def stop_mission():
     _ms.mission_active = False
     _ms.mission_state  = State.IDLE
     motors.stop()
+
+    # 0. Full _ms wipe — clears conversation_history, step engine, YOLO state,
+    #    counters, and YAML-loaded fields so nothing bleeds into the next mission.
+    #    reset_for_new_mission() handles most fields; YAML fields need explicit clear.
+    _ms.reset_for_new_mission()
+    _ms.mission_steps          = []
+    _ms.current_step_idx       = 0
+    _ms.mission_target_objects = []
+    _ms.mission_flags          = {}
+    _ms.mission_alarm_type     = AlarmType.HAZARD
+    log.info("stop_mission: _ms fully reset — no state bleeds into next mission")
 
     # 1. Cancel pending nav future
     if _ms.pending_nav is not None:
