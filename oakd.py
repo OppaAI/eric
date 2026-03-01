@@ -102,7 +102,7 @@ _last_depth_pub  = 0.0     # timestamp of last depth publish
 _reconnect_thread    = None
 _reconnect_lock      = threading.Lock()   # FIX 3: replaces bare boolean flag
 _reconnect_started   = False
-RECONNECT_INTERVAL_S = 10.0
+RECONNECT_INTERVAL_S = 15.0
 
 # ── Layer 1 Safety constants ──────────────────────────────────────────────────
 OAKD_STOP_DIST   = 0.30    # meters — stop if obstacle closer than this
@@ -263,11 +263,11 @@ def init_oakd() -> bool:
         mono_left.setResolution(
             dai.MonoCameraProperties.SensorResolution.THE_400_P)
         mono_left.setBoardSocket(dai.CameraBoardSocket.LEFT)
-        mono_left.setFps(15)
+        mono_left.setFps(8)
         mono_right.setResolution(
             dai.MonoCameraProperties.SensorResolution.THE_400_P)
         mono_right.setBoardSocket(dai.CameraBoardSocket.RIGHT)
-        mono_right.setFps(15)
+        mono_right.setFps(8)
 
         stereo.setLeftRightCheck(True)
         stereo.setExtendedDisparity(False)
@@ -351,7 +351,7 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
     import depthai as dai
 
     cam_rgb = pipeline.create(dai.node.ColorCamera)
-    cam_rgb.setPreviewSize(416, 416)       # YOLOv8n input size
+    cam_rgb.setPreviewSize(320, 320)       # Reduced from 416 to ease Myriad X memory
     # IMX378/214 only supports 1080_P, 4_K, or 12_MP — other resolutions fall
     # back to 1080_P which outputs native 2104×1560. setIspScale ratios on this
     # sensor do not land cleanly on standard sizes. Instead: set 1080_P and use
@@ -360,9 +360,10 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
     cam_rgb.setResolution(
         dai.ColorCameraProperties.SensorResolution.THE_1080_P)
     cam_rgb.setVideoSize(960, 540)         # explicit output size — avoids ISP scale ambiguity
+    cam_rgb.setIspScale(1, 1)              # FIX: disable ISP scaling — prevents 2104x1560 mismatch crash
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
-    cam_rgb.setFps(5)                      # FIX 5: 10 FPS caused SIPP OOM on Lite
+    cam_rgb.setFps(3)                      # FIX: reduced to 3fps to prevent Myriad X heap corruption
 
     nn = pipeline.create(dai.node.SpatialDetectionNetwork)
     nn.setBlobPath(str(YOLO_BLOB_PATH))
@@ -390,7 +391,7 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
     cam_rgb.preview.link(nn.input)
 
     global _yolo_spatial_queue
-    _yolo_spatial_queue = nn.out.createOutputQueue(maxSize=4, blocking=False)
+    _yolo_spatial_queue = nn.out.createOutputQueue(maxSize=2, blocking=False)
     return True
 
 

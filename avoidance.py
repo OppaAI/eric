@@ -500,6 +500,21 @@ def _run_avoidance_internal(wall_ahead: bool, small_obstacle: bool) -> bool:
             return False
 
         if action == "stop":
+            # Don't trust Cosmos stop if arc data shows a clear escape route
+            best_arc = max(arcs["left"], arcs["right"], arcs["rear"])
+            if best_arc > 0.55:
+                log.warning(f"Cosmos says stop but arc data shows clearance ({best_arc:.2f}m) — using arc fallback")
+                turn_dir = arc_direction
+                turn_sec = min(TURN_BASE_SEC + (attempt * TURN_INCREMENT), TURN_MAX_SEC)
+                motors.oled(1, f"Turn {turn_dir}...")
+                _execute_turn(turn_dir, turn_sec)
+                motors.stop()
+                time.sleep(0.4)
+                if _path_is_clear():
+                    _avoid_attempts   = 0
+                    _recovery_counter = 0
+                    return False
+                return _run_avoidance_internal(wall_ahead=True, small_obstacle=False)
             log.warning("Cosmos says stop (boxed in) — forcing 360 scan")
             _avoid_attempts   = 0
             _recovery_counter = 0

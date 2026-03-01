@@ -141,15 +141,22 @@ def init_nav2() -> bool:
             log.warning("⚠️  SLAM did not become available within "
                         f"{SLAM_WAIT_TIMEOUT}s — continuing Nav2 init anyway")
 
-        # ── Wait for Nav2 action server ────────────────────────────────────────
+        # ── Wait for Nav2 action server (retry loop) ──────────────────────────
+        # Nav2 lifecycle activation on Jetson takes 45-70s.
+        # Retry every 5s for up to 90s instead of one blocking wait.
         log.info("⏳ Waiting for Nav2 action server...")
-        if _nav_client.wait_for_server(timeout_sec=40.0):
-            _nav2_ok = True
-            log.info("✅ Nav2 connected — autonomous navigation enabled")
-        else:
+        nav2_deadline = time.monotonic() + 90.0
+        _nav2_ok = False
+        while time.monotonic() < nav2_deadline:
+            if _nav_client.wait_for_server(timeout_sec=5.0):
+                _nav2_ok = True
+                log.info("✅ Nav2 connected — autonomous navigation enabled")
+                break
+            elapsed = int(time.monotonic() - (nav2_deadline - 90.0))
+            log.info(f"⏳ Nav2 not ready yet — retrying... ({elapsed}s elapsed)")
+        if not _nav2_ok:
             log.warning("⚠️  Nav2 action server not found — "
                         "falling back to direct motor control")
-            _nav2_ok = False
 
         return _nav2_ok
 
