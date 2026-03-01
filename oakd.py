@@ -359,8 +359,7 @@ def _add_yolo_pipeline(pipeline, stereo) -> bool:
     # within the OAK-D Lite SIPP memory budget and what the pipeline expects.
     cam_rgb.setResolution(
         dai.ColorCameraProperties.SensorResolution.THE_1080_P)
-    cam_rgb.setVideoSize(960, 540)         # explicit output size — avoids ISP scale ambiguity
-    cam_rgb.setIspScale(1, 1)              # FIX: disable ISP scaling — prevents 2104x1560 mismatch crash
+    # setVideoSize and setIspScale removed — native 2104x1560 is fine, preview handles YOLO input
     cam_rgb.setInterleaved(False)
     cam_rgb.setColorOrder(dai.ColorCameraProperties.ColorOrder.BGR)
     cam_rgb.setFps(3)                      # FIX: reduced to 3fps to prevent Myriad X heap corruption
