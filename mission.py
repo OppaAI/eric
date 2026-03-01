@@ -212,10 +212,12 @@ def get_conversation_history() -> list:
     return _ms.conversation_history
 
 # ── Tuning constants (never mutated at runtime) ──────────────────────────────
-EMPTY_SCAN_LIMIT      = 3   # trigger 360 after 3 consecutive empty scans
-SCANS_BEFORE_360      = 6   # periodic 360 every 6 quick scans
-MAX_AVOID_ATTEMPTS    = 3   # force 360 after this many avoid failures
-TARGET_CONFIRM_NEEDED = 1   # only needs 1 positive scan to approach
+EMPTY_SCAN_LIMIT        = 3    # trigger 360 after 3 consecutive empty scans
+SCANS_BEFORE_360        = 6    # periodic 360 every 6 quick scans
+MAX_AVOID_ATTEMPTS      = 3    # force 360 after this many avoid failures
+TARGET_CONFIRM_NEEDED   = 1    # only needs 1 positive scan to approach
+DETECTION_CONFIDENCE_MIN = 0.55  # minimum Cosmos detection_confidence to accept target_visible=True
+                                  # below this, sweep detections are treated as hallucinations and skipped
 
 
 # ─── Terrain Speed Map ────────────────────────────────────────────────────────
@@ -514,28 +516,6 @@ def _execute_step_action(obj_name: str):
     log.info(f"Executing step {step.step_num}: {step.action} for {step.target}")
 
     if step.action == "find_and_approach":
-        # Capture final photos from both cameras before marking step complete.
-        # _capture_final_photo() handles blur-retry, Cosmos centre-check, LED,
-        # and saves <alarm>_<n>_<obj>_<ts>_pantilt.jpg + _webcam.jpg to disk.
-        # Previously this branch called _advance_step() immediately — no photos
-        # were ever taken for find_and_approach missions.
-        ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        alarm_type = _ms.mission_alarm_type
-        _ui("log", f"📸 Taking final confirmation photos of {obj_name or step.target}...")
-        motors.oled(0, "Taking photo")
-        motors.oled(1, (obj_name or step.target)[:16])
-        try:
-            saved = _capture_final_photo(
-                obj_name   = obj_name or step.target,
-                ts_str     = ts_str,
-                alarm_type = alarm_type,
-            )
-            if saved:
-                _ui("log", f"📸 Final photos saved: {', '.join(saved)}")
-            else:
-                _ui("log", "⚠️  Final photos: capture failed — continuing anyway")
-        except Exception as _phe:
-            log_exception("find_and_approach_photo", _phe)
         _advance_step()
 
     elif step.action == "deliver_message":
@@ -848,9 +828,14 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
         result["action"] = normalized
 
     # ── Consistency fix: if object IS the target, target_visible must be True ──
+    # Only applies when detection_confidence is at or above threshold — don't
+    # auto-correct a low-confidence object match into a confirmed detection.
     _TARGET_OBJECTS = {"slipper", "shoe", "person", "robot"}
-    if result.get("object") in _TARGET_OBJECTS and not result.get("target_visible"):
-        log.info(f"Auto-correcting target_visible=True (object={result['object']})")
+    _auto_conf = float(result.get("detection_confidence", 0.0))
+    if (result.get("object") in _TARGET_OBJECTS
+            and not result.get("target_visible")
+            and _auto_conf >= DETECTION_CONFIDENCE_MIN):
+        log.info(f"Auto-correcting target_visible=True (object={result['object']} conf={_auto_conf:.2f})")
         result["target_visible"] = True
 
     # ── Note: stop→forward auto-correction removed.
@@ -879,6 +864,8 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
         if k == "obstacle_close"   and v:                              icon = "  🚧 "
         if k == "small_obstacle"   and v:                              icon = "  ⚠️ "
         if k == "target_visible"   and v:                              icon = "  🎯 "
+        if k == "detection_confidence" and isinstance(v, float):
+            icon = f"  {'✅' if v >= DETECTION_CONFIDENCE_MIN else '❌ LOW'}"
         if k == "mission_complete" and v:                              icon = "  🏆 "
         if k == "speak"            and v:                              icon = "  🔊 "
         print(f"  {k:25s}: {v}{icon}")
@@ -1402,7 +1389,9 @@ STEP 1 — VOID/DROP CHECK (HIGHEST PRIORITY):
 STEP 2 — OBSTACLE SAFETY: Which direction has the most open space?
 
 STEP 3 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts.
-Set target_visible=true if 20%+ confident (anything plausible). Set target_direction to where you see it.
+Set target_visible=true if 50%+ confident you can see a specific distinguishing feature
+in this frame (not general knowledge about what the target looks like).
+Set detection_confidence to a float 0.0–1.0 reflecting how certain you are.
 The robot will do a hardware+webcam confirmation pass anyway — do NOT hold back a detection.
 
 STEP 4 — SPEAK: One excited sentence if target found, otherwise null.
@@ -1419,6 +1408,7 @@ OUTPUT: A single JSON object. Use ONLY these exact field names — no others:
   "small_obstacle": false,
   "void_ahead": false,
   "target_visible": false,
+  "detection_confidence": 0.0,
   "target_direction": "unknown",
   "clearest_direction": "front",
   "action": "forward",
@@ -1428,10 +1418,10 @@ OUTPUT: A single JSON object. Use ONLY these exact field names — no others:
 }
 
 "object" must be ONE word: person | robot | slipper | shoe | obstacle | wall | clear | unknown | pokemon | figure | animal
+"detection_confidence": float 0.0–1.0. Use 0.0 when target_visible=false. Be honest — do not inflate.
 "speak" = speech output. NOT "speaker". NOT "speech". NOT "tts".
 "physical_reasoning" = reasoning. NOT "reasoning". NOT "explanation".
 "target_visible" = detection flag. NOT "target_visibility". NOT "target_found".
-Do NOT add "location", "type", "confidence", "target_confidence", or any unlisted field.
 No markdown. No explanation. Output ONLY the JSON object.
 """
 
@@ -1482,17 +1472,20 @@ RULES (in priority order):
 1. VOID/DROP — stair edge, hole, floor ending → void_ahead=true, action=stop
 2. OBSTACLE — object <60cm ahead OR filling lower frame → obstacle_close=true, action=stop
 3. TARGET — slipper/shoe/person/robot visible ANYWHERE, even partially, even at an angle,
-   even at the edge of frame → target_visible=true. Err on the side of detection.
+   even at the edge of frame → target_visible=true. Set detection_confidence to how certain
+   you are based on specific visual features you can actually see in this frame (0.0–1.0).
+   Do NOT base confidence on general knowledge of what the target looks like.
 4. Otherwise → action=forward
 
 "speak": one SHORT plain sentence if target found, otherwise null. No backticks. No lists.
 "physical_reasoning": one plain sentence describing what you see. No backticks.
 
 Output ONLY this JSON — no markdown, no extra fields:
-{"object":"clear","object_name":null,"terrain":"tiles","distance":"far","in_my_path":false,"wall_ahead":false,"obstacle_close":false,"small_obstacle":false,"void_ahead":false,"target_visible":false,"target_direction":"unknown","clearest_direction":"front","action":"forward","speak":null,"physical_reasoning":"Path clear.","mission_complete":false}
+{"object":"clear","object_name":null,"terrain":"tiles","distance":"far","in_my_path":false,"wall_ahead":false,"obstacle_close":false,"small_obstacle":false,"void_ahead":false,"target_visible":false,"detection_confidence":0.0,"target_direction":"unknown","clearest_direction":"front","action":"forward","speak":null,"physical_reasoning":"Path clear.","mission_complete":false}
 
 "object": person|robot|slipper|shoe|obstacle|wall|clear|unknown
 "distance": near|mid|far
+"detection_confidence": float 0.0–1.0. Use 0.0 when target_visible=false. Be honest.
 "target_direction": front|left|right|unknown
 "clearest_direction": front|left|right
 "action": forward|stop|turn_left|turn_right
@@ -1503,6 +1496,7 @@ _SCAN_FALLBACK = {
     "object": "unknown", "object_name": None, "terrain": "clear",
     "distance": "far", "in_my_path": False, "wall_ahead": False,
     "small_obstacle": False, "void_ahead": False, "target_visible": False,
+    "detection_confidence": 0.0,          # 0.0–1.0 — Cosmos self-reported certainty
     "target_direction": "unknown", "clearest_direction": "front",
     "action": "stop", "speak": None,   # SAFE default — never forward on failure
     "physical_reasoning": "", "mission_complete": False
@@ -2144,7 +2138,7 @@ def _quick_scan() -> dict:
 
 TURN_90_SEC      = 2.2   # seconds to turn 90° at MOTOR_SPEED_SLOW — tune if needed
 BLUR_THRESHOLD   = 80.0  # Laplacian variance below this = blurry, retry
-MAX_BLUR_RETRIES = 5     # raised from 3 — chassis vibration after LiDAR stop needs more settle time
+MAX_BLUR_RETRIES = 3
 
 # Video scan settings — used during 360° scan positions (Eric is stopped)
 VIDEO_SCAN_DURATION = 3.0   # seconds per position — short enough to keep 360 moving
@@ -2181,7 +2175,7 @@ def _capture_sharp(device: int, retries: int = MAX_BLUR_RETRIES) -> str | None:
             return f   # sharp enough
         log.info(f"Blurry frame on cam {device} (attempt {attempt+1}) — waiting and retrying...")
         best = f       # keep as fallback
-        time.sleep(1.0)  # raised from 0.8 — allow chassis vibration to fully damp after LiDAR stop
+        time.sleep(0.8)  # raised from 0.5 — allow chassis vibration to fully damp
     return best  # return best we got even if still blurry
 
 
@@ -2288,7 +2282,7 @@ def _scan_360_pantilt() -> dict:
     # ── Constants ─────────────────────────────────────────────────────────────
     PAN_STEPS    = [-90, -60, -30, 0, 30, 60, 90]
     TILT_GROUND  = -15  # fixed ground-level tilt throughout sweep — no tilt changes
-    PAN_SETTLE   = 0.80 # raised from 0.40 — LiDAR stop causes chassis jolt; need full damping before capture
+    PAN_SETTLE   = 0.40 # seconds after pantilt() before capture — raised from 0.25 for servo + frame settle
 
     # Webcam is zip-tied to the pan-tilt head, offset slightly to the LEFT.
     # When pan-tilt is at angle X, webcam center is at X + WEBCAM_PAN_OFFSET.
@@ -2341,7 +2335,11 @@ def _scan_360_pantilt() -> dict:
             "webcam frame due to the physical offset. "
             "Use BOTH images together to confirm or deny — the target may be clearer "
             "in one than the other. "
-            "Set target_visible=true ONLY if 60%+ confident across both images. "
+            "Set target_visible=true ONLY if you can identify a specific visual feature "
+            "you actually see in the frame (shape, colour, marking) — not general knowledge. "
+            "Set detection_confidence to a float 0.0–1.0 reflecting certainty based only "
+            "on what is visible. Do not inflate — a score above 0.55 must be justified "
+            "by observable evidence in the frame. "
             "Be conservative — a false positive wastes mission time.\n\n"
         ) + (sensor_ctx + SCAN_360_PROMPT if sensor_ctx else SCAN_360_PROMPT)
 
@@ -2357,6 +2355,15 @@ def _scan_360_pantilt() -> dict:
         if not result.get("target_visible"):
             _ui("log", f"❌ False positive at pan {pan:+d}° — continuing")
             log_mission_event("false_positive", f"pan={pan}")
+            return None
+
+        # ── Confidence gate on confirmation result ────────────────────────
+        conf = float(result.get("detection_confidence", 0.0))
+        if conf < DETECTION_CONFIDENCE_MIN:
+            _ui("log",
+                f"❌ Confirmation rejected at pan {pan:+d}° — "
+                f"detection_confidence {conf:.2f} < {DETECTION_CONFIDENCE_MIN}")
+            log_mission_event("false_positive", f"pan={pan} conf={conf:.2f}")
             return None
 
         # Confirmed — turn chassis to face target
@@ -3755,6 +3762,20 @@ def _process_scan(scan, from_360=False):
     target_visible = scan.get("target_visible", False)
     target_dir     = scan.get("target_direction", "front")
     clear_dir      = scan.get("clearest_direction", "front")
+
+    # ── Confidence gate — suppress low-confidence detections ─────────────
+    # Cosmos returns detection_confidence 0.0–1.0 for target_visible claims.
+    # Below DETECTION_CONFIDENCE_MIN we treat the detection as a hallucination
+    # and clear the flag rather than trigger a confirmation pass.
+    det_conf = float(scan.get("detection_confidence", 0.0))
+    if target_visible and det_conf < DETECTION_CONFIDENCE_MIN:
+        log.info(
+            f"_process_scan: target_visible suppressed — "
+            f"detection_confidence {det_conf:.2f} < {DETECTION_CONFIDENCE_MIN} "
+            f"(obj={obj} obj_name={obj_name}) — likely hallucination"
+        )
+        target_visible = False
+        speak_tx = None   # don't announce a suppressed detection
 
     if reason:
         log.info(f"Cosmos: {reason}")
