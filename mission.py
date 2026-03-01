@@ -1404,6 +1404,9 @@ STEP 2 — OBSTACLE SAFETY: Which direction has the most open space?
 STEP 3 — MISSION TARGET: People, robots, slippers, shoes — even partially visible counts.
 Set target_visible=true if 50%+ confident you can see a specific distinguishing feature
 in this frame (not general knowledge about what the target looks like).
+CRITICAL: If the mission overlay says you are looking for a person and you can see ANY
+person in the frame — set target_visible=true and object='person'. Do not suppress a
+visible person just because you cannot verify every appearance detail from this distance.
 The robot will do a hardware+webcam confirmation pass anyway — do NOT hold back a detection.
 
 STEP 4 — SPEAK: One excited sentence if target found, otherwise null.
@@ -1483,8 +1486,9 @@ RULES (in priority order):
 2. OBSTACLE — object <60cm ahead OR filling lower frame → obstacle_close=true, action=stop
 3. TARGET — slipper/shoe/person/robot visible ANYWHERE, even partially, even at an angle,
    even at the edge of frame → target_visible=true.
-   you are based on specific visual features you can actually see in this frame (0.0–1.0).
-   Do NOT base confidence on general knowledge of what the target looks like.
+   CRITICAL: If the mission overlay above says you are looking for a specific person and you
+   can see ANY person in the frame — set target_visible=true and object='person'.
+   Do NOT set target_visible=false when you can clearly see a person standing in the room.
 4. Otherwise → action=forward
 
 "speak": one SHORT plain sentence if target found, otherwise null. No backticks. No lists.
@@ -2068,9 +2072,36 @@ def _quick_scan() -> dict:
                            if sensor_ctx else QUICK_SCAN_PROMPT)
 
     try:
-        print(f"\n📷 QUICK SCAN — {len(clip_frames)} frames (pan-tilt 5°)...")
+        print(f"\n📷 QUICK SCAN — {len(clip_frames)} frames (pan-tilt 10°)...")
         response = _cosmos_frames(clip_frames, prompt, max_tokens=300, temp=0.3)
         result = _parse_json(response, dict(_SCAN_FALLBACK), label="QUICK SCAN")
+
+        # ── 3a. Person seen but not flagged as target — cross-check with LiDAR ──
+        # The 2B model frequently outputs object='person', target_visible=False
+        # because it copies the default JSON example rather than following the
+        # mission overlay instructions. If:
+        #   • Cosmos says object='person' (it does see someone), AND
+        #   • This is a find-and-greet mission (AlarmType.NONE), AND
+        #   • LiDAR confirms something is physically present at <2m
+        # → treat the person as the target. The visual description confirmation
+        # in _confirm_and_photograph_target() will still gate the final greeting.
+        if (not result.get("target_visible")
+                and result.get("object") == "person"
+                and _ms.mission_alarm_type == AlarmType.NONE):
+            try:
+                from lidar import get_status as _lidar_s, lidar_available
+                if lidar_available():
+                    _ls = _lidar_s()
+                    _front_m = _ls.get("front_arc_min_m", 999)
+                    if _front_m < 2.0:
+                        log.info(
+                            f"QUICK_SCAN: object=person + LiDAR={_front_m:.2f}m "
+                            f"→ promoting target_visible=True (2B model failed overlay)"
+                        )
+                        result["target_visible"] = True
+                        result["object_name"]    = result.get("object_name") or "person"
+            except Exception as _lxc:
+                log.debug(f"lidar cross-check: {_lxc}")
 
         # ── 3. Candidate found — webcam confirmation ───────────────────────────
         # Wide angle detected something → zoom in with webcam to confirm.
@@ -4256,6 +4287,21 @@ def _process_scan(scan, from_360=False):
     _NEAR_DISTANCES = {"close", "near", "nearby", "very_close", "very close", "right there"}
     if obj in ["person", "robot"] and not target_visible:
         dist_str = str(distance).lower()
+
+        # ── For find-and-greet missions (AlarmType.NONE): approach ANY visible person.
+        # _confirm_and_photograph_target() will check the description (glasses, purple
+        # sweater, etc.) and either greet or ask for directions if they don't match.
+        # This bypasses the "near only" gate that causes Eric to keep walking past you.
+        if _ms.mission_alarm_type == AlarmType.NONE:
+            _ms.empty_scans = 0
+            _ui("log", f"Find-and-greet mission: person visible — approaching to confirm identity")
+            log_mission_event("person_approach_narrative", f"dist={dist_str} obj={obj}")
+            _ms.target_spotted_count = max(_ms.target_spotted_count, 1)
+            if direction not in ("front", "ahead", "unknown", ""):
+                _face_direction(direction)
+            _approach_target()
+            return
+
         if dist_str in _NEAR_DISTANCES or in_path:
             _ms.empty_scans = 0
             motors.stop()
