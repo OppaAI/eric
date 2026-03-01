@@ -312,8 +312,18 @@ def _path_is_clear(min_clearance: float = 0.55) -> bool:
         if oakd_available():
             d = get_front_depth()
             if d is not None and d < min_clearance:
-                log.info(f"OAK-D: still blocked at {d:.2f}m")
-                return False
+                # Skip OAK-D block if mission target (person) is visible ahead
+                # — don't treat the target as an obstacle to avoid
+                try:
+                    from mission import _ms
+                    if _ms.target_spotted_count > 0:
+                        log.info(f"OAK-D: {d:.2f}m but target spotted — not blocking")
+                    else:
+                        log.info(f"OAK-D: still blocked at {d:.2f}m")
+                        return False
+                except Exception:
+                    log.info(f"OAK-D: still blocked at {d:.2f}m")
+                    return False
     except Exception:
         pass
 

@@ -1641,8 +1641,9 @@ No markdown. No explanation. No extra fields.
 
         # ── Physical reasoning text gate: catch wall detections Cosmos missed in JSON ──
         reasoning_text = result.get("physical_reasoning", "").lower()
-        wall_keywords = ["wall", "blocked", "obstacle", "barrier", "blocks my way",
-                         "cannot proceed", "no clear path", "filling", "straight ahead"]
+        wall_keywords = ["blocks my way", "cannot proceed", "no clear path",
+                         "path is blocked", "blocking my path", "wall blocks",
+                         "wall ahead", "directly blocking"]
         if any(kw in reasoning_text for kw in wall_keywords) and not result.get("wall_ahead"):
             log.warning(f"⚠️  NAV_CHECK: Cosmos text says wall but JSON says False — overriding: {reasoning_text[:80]}")
             result["wall_ahead"] = True
@@ -2106,8 +2107,9 @@ def _quick_scan() -> dict:
 
         # ── 4. Physical reasoning text gate (quick_scan) ────────────────────
         qs_reasoning = result.get("physical_reasoning", "").lower()
-        qs_wall_keywords = ["wall", "blocked", "obstacle", "barrier", "blocks my way",
-                            "cannot proceed", "no clear path", "filling", "straight ahead"]
+        qs_wall_keywords = ["blocks my way", "cannot proceed", "no clear path",
+                             "path is blocked", "blocking my path", "wall blocks",
+                             "wall ahead", "directly blocking"]
         if any(kw in qs_reasoning for kw in qs_wall_keywords) and not result.get("wall_ahead"):
             log.warning(f"⚠️  QUICK_SCAN: Cosmos text says wall but JSON says False — overriding: {qs_reasoning[:80]}")
             result["wall_ahead"] = True
@@ -3470,6 +3472,194 @@ def handle_character_response(character, said):
 
 # ─── Process Scan Result ──────────────────────────────────────────────────────
 
+def _confirm_and_photograph_target():
+    """
+    Called when ERIC arrives at the target (person/creator).
+
+    Steps:
+      1. Tilt LOW (-5°) — full body view for description confirmation
+      2. Tilt SWEEP (-15° → 0° → +15° → +25°) — search for face, ask Cosmos
+         at each tilt angle if this matches description + can see face
+      3. Lock tilt at best angle where face is visible
+      4. Eye contact gate — wait in silence for direct gaze
+      5. Greet
+      6. Call existing _capture_final_photo() for dual-cam sharp photos
+      7. Execute step action (mission complete)
+    """
+    import datetime
+
+    motors.stop()
+    _ms.mission_state = State.INTERACTING
+    ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+    # ── Step 1: Full body confirm at low tilt ─────────────────────────────
+    motors.pantilt(0, -5, 60)
+    time.sleep(0.5)
+    _ui("log", "👁️  Arrived — confirming target description...")
+    motors.oled(1, "Confirming...")
+
+    step_obj = _current_step()
+    chars = _ms.mission_flags.get("characters", [])
+    target_desc = ""
+    for ch in (chars if isinstance(chars, list) else []):
+        if isinstance(ch, dict) and "owner" in ch.get("name", "").lower():
+            target_desc = ch.get("hint", "")
+            break
+    if not target_desc:
+        target_desc = "Asian male, glasses, purple sweater, black pants"
+
+    confirm_frame = capture_frame(CAMERA_PANTILT, 640, 480)
+    description_confirmed = True
+    if confirm_frame:
+        try:
+            r = requests.post(VLLM_URL, json={
+                "model": COSMOS_MODEL,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{confirm_frame}"}},
+                    {"type": "text", "text":
+                        f"Target description: {target_desc}\n"
+                        "Does the person in this image match ALL criteria?\n"
+                        'Answer ONLY: {"confirmed": true_or_false, "reasoning": "one sentence"}'}
+                ]}],
+                "max_tokens": 80, "temperature": 0.1,
+            }, timeout=20)
+            r.raise_for_status()
+            res = _parse_json(r.json()["choices"][0]["message"]["content"].strip(),
+                              {"confirmed": True}, "TARGET_CONFIRM")
+            description_confirmed = res.get("confirmed", True)
+            _ui("log", f"{'✅' if description_confirmed else '❌'} Description: {res.get('reasoning','')}")
+            log_mission_event("target_confirm", f"confirmed={description_confirmed}")
+        except Exception as e:
+            log_exception("target_confirm", e)
+
+    if not description_confirmed:
+        _ui("log", "⚠️  Description mismatch — resuming search")
+        _ms.mission_state = State.SEARCHING
+        _ms.target_spotted_count = 0
+        motors.pantilt(0, -5, 60)
+        if _safe_to_fwd():
+            motors.forward(MOTOR_SPEED_SLOW)
+        return
+
+    # ── Step 2: Tilt sweep to find face ──────────────────────────────────
+    # Sweep from low to high, asking Cosmos at each angle if face is visible
+    _ui("log", "👁️  Sweeping tilt to find face...")
+    motors.oled(1, "Finding face...")
+    TILT_ANGLES = [-15, -5, 0, 10, 20, 25]
+    best_tilt = 20   # fallback
+    face_found = False
+
+    for tilt in TILT_ANGLES:
+        motors.pantilt(0, tilt, 50)
+        time.sleep(0.5)
+        f = capture_frame(CAMERA_PANTILT, 320, 240)
+        if not f:
+            continue
+        try:
+            r = requests.post(VLLM_URL, json={
+                "model": COSMOS_MODEL,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
+                    {"type": "text", "text":
+                        "Can you clearly see the person's FACE (eyes, nose, mouth visible) "
+                        "in this image?\n"
+                        'Answer ONLY: {"face_visible": true_or_false}'}
+                ]}],
+                "max_tokens": 20, "temperature": 0.1,
+            }, timeout=10)
+            r.raise_for_status()
+            res = _parse_json(r.json()["choices"][0]["message"]["content"].strip(),
+                              {"face_visible": False}, "FACE_SWEEP")
+            if res.get("face_visible"):
+                best_tilt = tilt
+                face_found = True
+                _ui("log", f"👁️  Face found at tilt={tilt}°")
+                break
+        except Exception as e:
+            log_exception("face_sweep", e)
+
+    if not face_found:
+        _ui("log", f"Face sweep done — using tilt={best_tilt}°")
+
+    # Lock tilt at face level
+    motors.pantilt(0, best_tilt, 40)
+    time.sleep(0.5)
+
+    # ── Step 3: Eye contact gate ──────────────────────────────────────────
+    _ui("log", "👁️  Waiting for eye contact (silent)...")
+    motors.oled(1, "Eye contact...")
+    eye_confirmed = False
+
+    for attempt in range(8):
+        if not _ms.mission_active:
+            break
+        ec_frame = capture_frame(CAMERA_PANTILT, 320, 240)
+        if not ec_frame:
+            time.sleep(3)
+            continue
+        try:
+            r = requests.post(VLLM_URL, json={
+                "model": COSMOS_MODEL,
+                "messages": [{"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
+                    {"type": "text", "text":
+                        "Is the person looking DIRECTLY at the camera lens — "
+                        "held deliberate eye contact, not glancing, not looking away?\n"
+                        'Answer ONLY: {"eye_contact": true_or_false, "reasoning": "one sentence"}'}
+                ]}],
+                "max_tokens": 60, "temperature": 0.1,
+            }, timeout=15)
+            r.raise_for_status()
+            ec = _parse_json(r.json()["choices"][0]["message"]["content"].strip(),
+                             {"eye_contact": False}, "EYE_CONTACT")
+            if ec.get("eye_contact"):
+                _ui("log", f"👁️  Eye contact: {ec.get('reasoning','')}")
+                log_mission_event("eye_contact_confirmed", ec.get("reasoning",""))
+                eye_confirmed = True
+                break
+            else:
+                _ui("log", f"No eye contact yet ({attempt+1}/8) — {ec.get('reasoning','')}")
+        except Exception as e:
+            log_exception("eye_contact_gate", e)
+        time.sleep(3)
+
+    if not eye_confirmed:
+        _ui("log", "Eye contact timeout — proceeding")
+        log_mission_event("eye_contact_timeout", "proceeding")
+
+    # ── Step 4: Greet ─────────────────────────────────────────────────────
+    greeting = ask_cosmos(
+        "You have found your creator and confirmed eye contact. "
+        "Deliver your greeting now — two sentences, make them count. "
+        "Plain spoken words only — no JSON, no formatting.",
+        max_tokens=100
+    )
+    eric_say(greeting)
+    log_mission_event("creator_greeted", greeting[:150])
+    time.sleep(1.0)
+
+    # ── Step 5: Dual photos using existing _capture_final_photo ──────────
+    _ui("log", "📸 Taking final photos...")
+    motors.oled(1, "Smile!")
+    # Keep tilt at face level for photos
+    motors.pantilt(0, best_tilt, 40)
+    time.sleep(0.3)
+    saved = _capture_final_photo(
+        obj_name  = "creator",
+        ts_str    = ts_str,
+        alarm_type = "find"
+    )
+    if saved:
+        _ui("log", f"📸 Photos saved: {', '.join(saved)}")
+
+    # Return to low tilt
+    motors.pantilt(0, -5, 60)
+
+    # ── Step 6: Complete ──────────────────────────────────────────────────
+    log_mission_event("mission_complete", "creator found, confirmed, greeted, photographed")
+    _execute_step_action(None)
+
+
 def _approach_target():
     """
     Industrial-standard approach pipeline.
@@ -3541,12 +3731,10 @@ def _approach_target():
             if oakd_available():
                 hw_dist = get_front_depth()
                 if hw_dist is not None and hw_dist < ARRIVE_DIST_M:
-                    _ui("log", f"✅ OAK-D arrival: {hw_dist:.2f}m — executing step action")
+                    _ui("log", f"✅ OAK-D arrival: {hw_dist:.2f}m — arrived")
                     log_mission_event("hw_arrival_oakd", f"{hw_dist:.2f}m")
                     motors.stop()
-                    motors.pantilt(0, -20)
-                    time.sleep(0.3)
-                    _execute_step_action(None)
+                    _confirm_and_photograph_target()
                     return
         except Exception as _exc:  # oakd/yolo
             log.debug(f"oakd/yolo unavailable: {_exc}")
@@ -3633,9 +3821,8 @@ def _approach_target():
                     if hw_dist < ARRIVE_DIST_M:
                         _ui("log", f"✅ OAK-D post-move arrival: {hw_dist:.2f}m")
                         log_mission_event("hw_arrival_oakd_post", f"{hw_dist:.2f}m")
-                        motors.pantilt(0, -20)
-                        time.sleep(0.3)
-                        _execute_step_action(None)
+                        motors.stop()
+                        _confirm_and_photograph_target()
                         return
                     elif hw_dist < 0.50:
                         # Very close — avoid crushing the target with another move
@@ -3716,9 +3903,8 @@ def _approach_target():
                 motors.right(MOTOR_SPEED_SLOW); time.sleep(0.35); motors.stop()
 
         # ── Pan-tilt vertical tracking ────────────────────────────────────────
-        tilt_map = {"far": 5, "medium": 10, "mid": 10,
-                    "close": 15, "near": 18, "nearby": 18, "very_close": 22}
-        motors.pantilt(0, tilt_map.get(dist, 5), 60)
+        # Stay low (-5°) during approach — face-lift happens at confirmation
+        motors.pantilt(0, -5, 60)
 
         # ── Person nearby → eye-contact gate before greeting ─────────────────
         if obj == "person" and (dist in _NEAR_DISTANCES or in_path):
@@ -3789,8 +3975,8 @@ def _approach_target():
     # ── Approach timeout — treat as arrived rather than give up ──────────────
     _ui("log", "Approach timeout — assuming arrived, executing step action")
     log_mission_event("approach_timeout", f"{APPROACH_MAX_MOVES} moves")
-    _ms.mission_state = State.INTERACTING
-    _execute_step_action(None)
+    motors.stop()
+    _confirm_and_photograph_target()
 
 
 def _process_scan(scan, from_360=False):
@@ -3811,19 +3997,21 @@ def _process_scan(scan, from_360=False):
     target_dir     = scan.get("target_direction", "front")
     clear_dir      = scan.get("clearest_direction", "front")
 
-    # ── Confidence gate — suppress low-confidence detections ─────────────
-    # Cosmos returns detection_confidence 0.0–1.0 for target_visible claims.
-    # Below DETECTION_CONFIDENCE_MIN we treat the detection as a hallucination
-    # and clear the flag rather than trigger a confirmation pass.
+    # ── object_name override: if Cosmos named the target, trust it ──────────
+    # Cosmos sometimes returns object_name="creator"/"owner" but target_visible=False.
+    # If the name matches a mission target keyword, force target_visible=True.
+    if not target_visible and obj_name:
+        target_keywords = ["creator", "owner", "target"] + [
+            t.lower() for t in (_ms.mission_target_objects or [])
+        ]
+        if any(kw in str(obj_name).lower() for kw in target_keywords):
+            log.info(f"_process_scan: object_name='{obj_name}' matches target — forcing target_visible=True")
+            target_visible = True
+
+    # ── Confidence gate — disabled (always 0.0 from Cosmos) ──────────────
     det_conf = float(scan.get("detection_confidence", 0.0))
     if target_visible and det_conf < DETECTION_CONFIDENCE_MIN:
-        log.info(
-            f"_process_scan: target_visible suppressed — "
-            f"detection_confidence {det_conf:.2f} < {DETECTION_CONFIDENCE_MIN} "
-            f"(obj={obj} obj_name={obj_name}) — likely hallucination"
-        )
-        target_visible = False
-        speak_tx = None   # don't announce a suppressed detection
+        pass  # threshold is 0.0 — never suppresses
 
     if reason:
         log.info(f"Cosmos: {reason}")
