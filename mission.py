@@ -514,6 +514,28 @@ def _execute_step_action(obj_name: str):
     log.info(f"Executing step {step.step_num}: {step.action} for {step.target}")
 
     if step.action == "find_and_approach":
+        # Capture final photos from both cameras before marking step complete.
+        # _capture_final_photo() handles blur-retry, Cosmos centre-check, LED,
+        # and saves <alarm>_<n>_<obj>_<ts>_pantilt.jpg + _webcam.jpg to disk.
+        # Previously this branch called _advance_step() immediately — no photos
+        # were ever taken for find_and_approach missions.
+        ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        alarm_type = _ms.mission_alarm_type
+        _ui("log", f"📸 Taking final confirmation photos of {obj_name or step.target}...")
+        motors.oled(0, "Taking photo")
+        motors.oled(1, (obj_name or step.target)[:16])
+        try:
+            saved = _capture_final_photo(
+                obj_name   = obj_name or step.target,
+                ts_str     = ts_str,
+                alarm_type = alarm_type,
+            )
+            if saved:
+                _ui("log", f"📸 Final photos saved: {', '.join(saved)}")
+            else:
+                _ui("log", "⚠️  Final photos: capture failed — continuing anyway")
+        except Exception as _phe:
+            log_exception("find_and_approach_photo", _phe)
         _advance_step()
 
     elif step.action == "deliver_message":
@@ -2122,7 +2144,7 @@ def _quick_scan() -> dict:
 
 TURN_90_SEC      = 2.2   # seconds to turn 90° at MOTOR_SPEED_SLOW — tune if needed
 BLUR_THRESHOLD   = 80.0  # Laplacian variance below this = blurry, retry
-MAX_BLUR_RETRIES = 3
+MAX_BLUR_RETRIES = 5     # raised from 3 — chassis vibration after LiDAR stop needs more settle time
 
 # Video scan settings — used during 360° scan positions (Eric is stopped)
 VIDEO_SCAN_DURATION = 3.0   # seconds per position — short enough to keep 360 moving
@@ -2159,7 +2181,7 @@ def _capture_sharp(device: int, retries: int = MAX_BLUR_RETRIES) -> str | None:
             return f   # sharp enough
         log.info(f"Blurry frame on cam {device} (attempt {attempt+1}) — waiting and retrying...")
         best = f       # keep as fallback
-        time.sleep(0.8)  # raised from 0.5 — allow chassis vibration to fully damp
+        time.sleep(1.0)  # raised from 0.8 — allow chassis vibration to fully damp after LiDAR stop
     return best  # return best we got even if still blurry
 
 
@@ -2266,7 +2288,7 @@ def _scan_360_pantilt() -> dict:
     # ── Constants ─────────────────────────────────────────────────────────────
     PAN_STEPS    = [-90, -60, -30, 0, 30, 60, 90]
     TILT_GROUND  = -15  # fixed ground-level tilt throughout sweep — no tilt changes
-    PAN_SETTLE   = 0.40 # seconds after pantilt() before capture — raised from 0.25 for servo + frame settle
+    PAN_SETTLE   = 0.80 # raised from 0.40 — LiDAR stop causes chassis jolt; need full damping before capture
 
     # Webcam is zip-tied to the pan-tilt head, offset slightly to the LEFT.
     # When pan-tilt is at angle X, webcam center is at X + WEBCAM_PAN_OFFSET.
