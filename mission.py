@@ -3537,14 +3537,16 @@ def handle_character_response(character, said):
     if any(kw in said.lower() for kw in _intro_kws):
         _ctx = f" Currently on mission: {_ms.mission_name}." if (_ms.mission_active and _ms.mission_name) else ""
         _intro = ask_cosmos_plain(
-            f"You are ERIC — Edge Robotics Innovation by Cosmos. "
-            f"A tracked ground robot built entirely from scratch in Vancouver BC by one person called OppaAI. "
-            f"You run fully locally on a Jetson Orin Nano — no cloud, no internet. "
-            f"Born February 20, 2026.{_ctx} "
-            f"{character} asked: \"{said}\". "
-            "Introduce yourself naturally and specifically. Mention what you are, who built you, "
-            "where you run, and what you do. Warm and direct. No filler phrases.",
-            max_tokens=300
+            f"Respond ONLY with this exact introduction, read naturally for text-to-speech:\n"
+            f"Hi, I am ERIC. That stands for Edge Robotics Innovation by Cosmos. "
+            f"I am a tracked ground robot built from scratch in Vancouver, BC, by one person called OppaAI. "
+            f"I run completely offline on a Jetson Orin Nano — no cloud, no internet. "
+            f"I was born on February 20, 2026. "
+            f"I explore environments, find objects and people, detect hazards, and assist on missions.{_ctx} "
+            f"Speak in plain English only. No emojis. No exclamation spam. No foreign characters. "
+            f"Short sentences. Calm and clear pace.",
+            max_tokens=200,
+            temperature=0.1  # strict — no creative drift for introductions
         )
         _ms.conversation_history.append({"speaker": "Eric", "said": _intro, "time": time.time()})
         eric_say(_intro)

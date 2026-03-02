@@ -613,7 +613,7 @@ def _clean_response(text: str) -> str:
 _JSON_BLOCK_MARKER = "WHEN A JSON SCHEMA IS GIVEN"
 
 def ask_cosmos_plain(prompt: str, image_b64: str = None,
-                     max_tokens: int = 300) -> str:
+                     max_tokens: int = 300, temperature: float = 0.6) -> str:
     """
     Query Cosmos for a plain spoken response — no JSON schema instructions.
     Use this for introductions, mission acknowledgements, and greetings.
@@ -637,7 +637,7 @@ def ask_cosmos_plain(prompt: str, image_b64: str = None,
             {"role": "user",   "content": content}
         ],
         "max_tokens":         max_tokens,
-        "temperature":        0.6,
+        "temperature":        temperature,
         "repetition_penalty": 1.4,
         "stream":             False
     }
@@ -660,6 +660,10 @@ def ask_cosmos_plain(prompt: str, image_b64: str = None,
         ]
         for pat in filler:
             text = _re.sub(pat, "", text, flags=_re.IGNORECASE).strip()
+        # Strip emojis and non-ASCII characters — model ignores plain English instructions
+        import unicodedata
+        text = "".join(c for c in text if unicodedata.category(c) not in ("So", "Sm") and ord(c) < 8000)
+        text = text.strip()
         # Capitalise first letter after stripping
         if text:
             text = text[0].upper() + text[1:]
