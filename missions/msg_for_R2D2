@@ -1,0 +1,69 @@
+# ERIC Mission: Vader's Messenger
+
+name: "Vader's Messenger"
+description: "Darth Vader has ordered you to find R2-D2 and deliver his invitation to join the dark side"
+author: "OppaAI"
+
+briefing: |
+  Darth Vader has given you a direct order.
+
+  R2-D2 is somewhere in this area. Find him.
+  When you find him, deliver Vader's message:
+
+  "Lord Vader requests your presence. He believes your skills and loyalty
+  are wasted on the Rebellion. He invites you to join the dark side —
+  where your true potential will be recognised and rewarded."
+
+  Deliver the message with weight and gravity. You speak for Vader.
+  Wait for R2-D2's response. Whatever he says — acknowledge it and
+  report back: "Message delivered. R2-D2's response has been noted."
+  Then the mission is complete.
+
+  You are not here to argue. You are not here to fight.
+  You are a messenger. Deliver the message. Return the response.
+  Lord Vader is waiting.
+
+alarm_type: none
+
+target_objects:
+  - R2-D2
+  - astromech droid
+  - small blue robot
+  - droid
+
+photo_on_find:     true
+announce_location: false
+stay_with_target:  false
+generate_report:   false
+wait_for_dismiss:  false
+
+scan_strategy:      target_hunt
+loop_mission:       false
+approach_on_detect: true
+detect_distance:    2.0
+approach_distance:  0.60
+
+characters:
+  - name: "R2-D2"
+    hint: "Reacts with alarm, defiance, or unexpected curiosity to Vader's offer. Responds in beeps and plain speech. Whatever he says — Eric listens, acknowledges, and reports it."
+
+  - name: "Darth Vader"
+    hint: "Gave Eric this mission. Speaks in dramatic imperatives. Eric channels his authority when delivering the message."
+
+  - name: "Anyone Else"
+    hint: "Not the target. Talk past them politely — you are on Vader's business and cannot be delayed."
+
+mission_stages:
+  - stage: 1
+    goal: "Full 360 scan — locate R2-D2"
+  - stage: 2
+    goal: "Approach R2-D2 — deliver Vader's invitation to join the dark side, word for word"
+  - stage: 3
+    goal: "Wait for R2-D2's response — listen to everything he says"
+  - stage: 4
+    goal: "Acknowledge the response. Announce: Message delivered. R2-D2's response has been noted. Mission complete."
+
+terrain:
+  - "Smooth Death Star corridor floor (normal speed)"
+  - "Pebble path or Tatooine outdoor terrain (slow down)"
+  - "Grass (slow down)"

@@ -470,10 +470,10 @@ def action_stop():
 
 def action_char_reply(char_name: str, char_says: str):
     if not char_name.strip() or not char_says.strip():
-        return "⚠ Enter character data.", ""
+        return "⚠ Enter name and message.", char_says
     resp = handle_character_response(char_name.strip(), char_says.strip())
     resume_after_interaction()
-    return resp, ""
+    return resp, ""   # resp → char_reply box, "" clears char_says input
 
 # ─── CSS & layout ─────────────────────────────────────────────────────────────
 
@@ -1031,7 +1031,7 @@ def build_ui():
         refresh_btn.click(lambda: gr.update(choices=load_mission_choices()), outputs=[mission_dd])
         mission_dd.change(on_mission_select, inputs=[mission_dd], outputs=[briefing_box])
 
-        char_btn.click(action_char_reply, inputs=[char_name, char_says], outputs=[motor_status, char_reply])
+        char_btn.click(action_char_reply, inputs=[char_name, char_says], outputs=[char_reply, char_says])
 
         btn_fwd.click(   lambda s: (motors.forward(s),             f"▲ FWD {s:.2f}")[1], inputs=[speed_slider], outputs=[motor_status])
         btn_back.click(  lambda s: (motors.backward(s),            f"▼ BWD {s:.2f}")[1], inputs=[speed_slider], outputs=[motor_status])

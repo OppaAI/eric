@@ -1,32 +1,23 @@
-# ═══════════════════════════════════════════════════════════════
 # ERIC Mission: Search and Rescue
-# ═══════════════════════════════════════════════════════════════
 
 name: "Search and Rescue"
-description: "Systematically search an area for injured or trapped people and sound the emergency siren when found"
+description: "Search for injured or trapped people and sound emergency siren when found"
 author: "OppaAI"
 
-
 briefing: |
-  You are ERIC, an autonomous search and rescue robot.
-  Your mission is to systematically search this area for injured, trapped, or
-  unresponsive people who need immediate help.
+  You are a search and rescue robot. Search this area for injured or trapped people.
 
-  When you find an injured or unresponsive person:
-    1. Stop immediately and sound your emergency siren
-    2. Announce their location loudly and clearly
-    3. Photograph them for the rescue team record
-    4. Stay with them and keep talking to them calmly until help arrives
-    5. Report their condition: conscious or unconscious, visible injuries,
-       approximate age, what they are wearing
+  WHEN YOU FIND SOMEONE:
+    1. Stop — sound emergency siren
+    2. Announce location loudly and clearly
+    3. Photograph them
+    4. Stay and talk calmly until help arrives
+    5. Report: conscious/unconscious, visible injuries, age, clothing
 
-  Search methodically — check under furniture, in corners, behind obstacles.
+  Search methodically — corners, under furniture, behind obstacles.
   Call out "Hello, is anyone there? I am a rescue robot." every 30 seconds.
-  If you see smoke or fire, announce it immediately and back away.
-  If the path is blocked by debris, report it and find another way.
-
-  This is a real emergency. Be thorough. Lives depend on you.
-
+  Smoke or fire: announce immediately and back away.
+  Blocked path: report it, find another route.
 
 alarm_type: siren
 
@@ -42,70 +33,33 @@ announce_location: true
 stay_with_target:  true
 generate_report:   true
 
-
-
-# ═══════════════════════════════════════════════════════════════
-# SCAN AND BEHAVIOUR STRATEGY
-# ═══════════════════════════════════════════════════════════════
-# scan_strategy: target_hunt  — async frame-per-position, early-exit on find (default)
-#                               Best for: SAR, find missions, security, character missions
-#               video_sweep   — continuous rotation + full panoramic video inference
-#                               Best for: patrol, inspection, nature, terrain survey
-#
-# loop_mission: true  — restart from step 1 after all steps complete (patrol loop)
-#               false — end mission after final step (default)
-#
-# approach_on_detect: true  — YOLO person detected → approach and greet (SAR, find)
-#                    false  — YOLO person detected → stop and observe (security, patrol)
-#
-# detect_distance: metres at which YOLO hands off to Cosmos for interaction
-# ═══════════════════════════════════════════════════════════════
-
 scan_strategy:      target_hunt
 loop_mission:       false
 approach_on_detect: true
-detect_distance:    3.0   # metres
+detect_distance:    3.0
 
 characters:
   - name: "Casualty"
-    hint: "Injured or trapped person. Conscious but disoriented — responds weakly when spoken to. Gives their name and describes what happened if asked."
+    hint: "Injured, conscious but disoriented. Responds weakly. Gives name and describes what happened if asked."
 
   - name: "Rescue Coordinator"
-    hint: "Operator on radio. Gives Eric updated search instructions. Acknowledges finds and confirms when the rescue team is on the way."
-
+    hint: "Operator on radio. Gives updated search instructions. Confirms when rescue team is on the way."
 
 mission_stages:
   - stage: 1
-    goal: "Do a full 360 scan of the starting area — call out verbally every 30 seconds"
+    goal: "Full 360 scan — call out verbally every 30 seconds"
   - stage: 2
-    goal: "Systematically explore all accessible areas — check corners, under furniture, behind obstacles"
+    goal: "Systematically explore all areas — corners, under furniture, behind obstacles"
   - stage: 3
-    goal: "When a person is found — stop, sound siren, photograph, announce location"
+    goal: "Person found — stop, sound siren, photograph, announce location"
   - stage: 4
-    goal: "Stay with the casualty — keep talking calmly until help arrives"
+    goal: "Stay with casualty — talk calmly until help arrives"
   - stage: 5
-    goal: "Report full condition: conscious/unconscious, visible injuries, exact location"
-
+    goal: "Report full condition: conscious/unconscious, injuries, exact location"
 
 terrain:
   - "Open floor — tile or concrete (normal speed)"
-  - "Carpet or rug area (slow down)"
-  - "Debris or cluttered zone (navigate carefully around, do not push through)"
-  - "Doorways and tight corridors (slow down)"
+  - "Carpet (slow down)"
+  - "Debris or clutter (navigate carefully)"
+  - "Doorways and corridors (slow down)"
   - "Stairs (impassable — report and find another route)"
-
-
-notes: |
-  SETUP:
-  - Place a figure, doll, or toy lying on the floor somewhere in the search area
-  - Optional: place a second figure partially hidden behind furniture for a harder find
-  - Optional: set up a small obstacle or debris field between start and target
-
-  HOW TO PLAY EACH CHARACTER:
-  Casualty:    "...hello? Is someone there? I fell and I can't get up.
-                My name is Sam. My ankle — I think it's broken."
-  Coordinator: "ERIC, this is base. We have a report of one missing person,
-                last seen near the east side. Confirm when you have a visual."
-
-  MISSION COMPLETE: Eric locates the casualty, sounds siren, announces position,
-  and stays with them. Play the casualty responding to Eric's voice.

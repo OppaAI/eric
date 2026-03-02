@@ -1059,12 +1059,21 @@ def _move_forward(duration_sec: float = 2.0, distance_m: float = 1.5):
                 yaw  = pose["yaw"]
                 tx   = pose["x"] + distance_m * math.cos(yaw)
                 ty   = pose["y"] + distance_m * math.sin(yaw)
+                _nav2_start = time.time()
                 send_goal(tx, ty, yaw)
                 # Wait for Nav2 to finish or timeout
                 deadline = time.time() + duration_sec + 8.0
                 while is_navigating() and time.time() < deadline and _ms.mission_active:
                     time.sleep(0.2)
-                return
+                _nav2_elapsed = time.time() - _nav2_start
+                # If Nav2 returned in <0.8s it almost certainly rejected the goal
+                # (status 6 = costmap blocked by person/obstacle). Fall through to
+                # direct motors so Eric actually moves toward the target.
+                if _nav2_elapsed >= 0.8:
+                    return   # Nav2 navigated successfully
+                log.warning(
+                    f"Nav2 instant-return ({_nav2_elapsed:.2f}s) — likely status 6, "                    f"falling back to direct motors"
+                )
         except Exception as e:
             log.warning(f"Nav2 move_forward failed ({e}) — falling back to direct")
 
@@ -2110,7 +2119,10 @@ def _quick_scan() -> dict:
         # in _confirm_and_photograph_target() will still gate the final greeting.
         if (not result.get("target_visible")
                 and result.get("object") == "person"
-                and _ms.mission_alarm_type == AlarmType.NONE):
+                and (
+                    _ms.mission_alarm_type == AlarmType.NONE
+                    or str(_ms.mission_alarm_type).lower() in ("none", "null", "")
+                )):
             try:
                 from lidar import get_status as _lidar_s, lidar_available
                 if lidar_available():
@@ -2990,7 +3002,9 @@ def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[st
 
     # ── 1. Stop + centre pan-tilt ─────────────────────────────────────────────
     motors.stop()
-    motors.pantilt(0, -15)          # 15° tilt → ground-level target sits in mid-frame
+    # Use tilt stored by eye-contact/confirm pass — same angle that just worked.
+    # Falls back to 10 (face height) if not set.
+    _photo_tilt = getattr(_ms, "last_confirm_tilt", 10)
     time.sleep(PHOTO_SETTLE_SEC)
 
     # ── 2. Adaptive LED ───────────────────────────────────────────────────────
@@ -3007,7 +3021,7 @@ def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[st
     pan_angle = 0       # current pan offset from centre, adjusted by nudges
 
     for attempt in range(PHOTO_MAX_BLUR_RETRIES):
-        motors.pantilt(pan_angle, 15)
+        motors.pantilt(pan_angle, _photo_tilt)
         time.sleep(PHOTO_RETRY_SETTLE_SEC if attempt > 0 else 0.0)
 
         f = capture_frame(CAMERA_PANTILT, 640, 480)
@@ -3088,14 +3102,14 @@ def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[st
     # so it may need a small additional correction of its own.
     _ui("log", "📸 Capturing final photo (webcam)...")
     wc_pan_angle = pan_angle   # inherit accepted pan, may shift further below
-    motors.pantilt(wc_pan_angle, 15)
+    motors.pantilt(wc_pan_angle, _photo_tilt)
     time.sleep(0.3)
 
     wc_frame = None
     wc_best  = None
 
     for attempt in range(PHOTO_MAX_BLUR_RETRIES):
-        motors.pantilt(wc_pan_angle, 15)
+        motors.pantilt(wc_pan_angle, -20)  # tilt down — webcam is close to ground, person is above
         time.sleep(PHOTO_RETRY_SETTLE_SEC if attempt > 0 else 0.0)
 
         f = capture_frame(CAMERA_WEBCAM, 640, 480)
@@ -3539,6 +3553,23 @@ def handle_character_response(character, said):
 
     move_on = "[MOVE_ON]" in response
     clean   = response.replace("[MOVE_ON]", "").strip()
+
+    # Strip JSON blobs — Cosmos sometimes returns JSON even when asked for plain text
+    if clean.startswith("{") or clean.startswith("["):
+        import re as _re
+        # Try to extract plain text outside the JSON object
+        plain = _re.sub(r"\{.*?\}", "", clean, flags=_re.DOTALL).strip()
+        if plain:
+            clean = plain
+        else:
+            # Pure JSON — retry with harder plain text constraint
+            clean = ask_cosmos(
+                f"Respond to {character} who said: \"{said}\". "
+                "Plain spoken words only — absolutely no JSON, no curly brackets, "
+                "no formatting. 2 sentences max.",
+                max_tokens=100
+            ).replace("[MOVE_ON]", "").strip()
+
     eric_say(clean)
     _ui("log", f"[{character}]: {said}\n[Eric]: {clean}")
     if move_on:
@@ -3746,7 +3777,8 @@ def _confirm_and_photograph_target():
     # ── Step 5: Dual photos using existing _capture_final_photo ──────────
     _ui("log", "📸 Taking final photos...")
     motors.oled(1, "Smile!")
-    # Keep tilt at face level for photos
+    # Keep tilt at face level for photos — store for _capture_final_photo to use
+    _ms.last_confirm_tilt = best_tilt
     motors.pantilt(0, best_tilt, 40)
     time.sleep(0.3)
     saved = _capture_final_photo(
@@ -3759,6 +3791,20 @@ def _confirm_and_photograph_target():
 
     # Return to low tilt
     motors.pantilt(0, -5, 60)
+
+    # ── Step 6: Wait for operator dismissal ──────────────────────────────
+    # For narrative missions (alarm_type=none) with wait_for_dismiss=true in YAML,
+    # stay in place after greeting until the operator ends the mission manually.
+    # This lets the moment land rather than Eric immediately shutting down.
+    _wait_for_dismiss = _ms.mission_flags.get("wait_for_dismiss", False)
+    if _wait_for_dismiss:
+        _ui("log", "Waiting for operator to end mission (wait_for_dismiss=true)")
+        motors.oled(0, "Mission done")
+        motors.oled(1, "Press STOP")
+        motors.lights(128, 255)
+        while _ms.mission_active:
+            time.sleep(1.0)
+        return
 
     # ── Step 6: Complete ──────────────────────────────────────────────────
     log_mission_event("mission_complete", "creator found, confirmed, greeted, photographed")
@@ -3809,7 +3855,7 @@ def _approach_target():
     _NEAR_DISTANCES     = {"close", "near", "nearby", "very_close", "very close",
                            "right there"}
     _TARGET_OBJECTS     = {"slipper", "shoe", "person", "robot"}
-    ARRIVE_DIST_M       = 0.80   # hardware gate: execute step if within this range
+    ARRIVE_DIST_M       = float(_ms.mission_flags.get("approach_distance", 0.65))  # from YAML or default 65cm
     APPROACH_MOVE_SEC   = 1.5    # shorter clips → more hardware checks per meter
     APPROACH_SCAN_EVERY = 3      # Cosmos scan every N move clips (was every 1)
     APPROACH_MAX_MOVES  = 25     # max total move clips (~37.5 s)
@@ -3817,8 +3863,10 @@ def _approach_target():
 
     invisible_count   = 0
     moves_since_scan  = 0
-    nav2_fail_count   = 0   # consecutive Nav2 failures — disable after 3
-    NAV2_FAIL_LIMIT   = 3
+    nav2_fail_count   = 0   # consecutive Nav2 failures — disable after limit
+    NAV2_FAIL_LIMIT   = 1   # first Nav2 status-6 → immediately use direct motors
+                            # Nav2 status 6 = can't plan path (person on costmap)
+                            # Direct motors handle this correctly
 
     # ── Seed flip-flop counter so the first bad frame doesn't abort us ────────
     # We enter _approach_target because _process_scan just confirmed the target.
@@ -3920,8 +3968,9 @@ def _approach_target():
                 try:
                     from nav2 import nav2_available, is_navigating
                     if USE_NAV2 and nav2_available() and not is_navigating():
+                        # Not navigating right after _move_forward = Nav2 rejected/failed
                         nav2_fail_count += 1
-                        log.debug(f"Nav2 fail count: {nav2_fail_count}/{NAV2_FAIL_LIMIT}")
+                        log.info(f"Nav2 fail count: {nav2_fail_count}/{NAV2_FAIL_LIMIT}")
                 except Exception:
                     pass
         finally:
@@ -4315,7 +4364,11 @@ def _process_scan(scan, from_360=False):
         # _confirm_and_photograph_target() will check the description (glasses, purple
         # sweater, etc.) and either greet or ask for directions if they don't match.
         # This bypasses the "near only" gate that causes Eric to keep walking past you.
-        if _ms.mission_alarm_type == AlarmType.NONE:
+        _is_narrative = (
+            _ms.mission_alarm_type == AlarmType.NONE
+            or str(_ms.mission_alarm_type).lower() in ("none", "null", "")
+        )
+        if _is_narrative:
             _ms.empty_scans = 0
             _ui("log", f"Find-and-greet mission: person visible — approaching to confirm identity")
             log_mission_event("person_approach_narrative", f"dist={dist_str} obj={obj}")
@@ -4369,6 +4422,19 @@ def _process_scan(scan, from_360=False):
                     log_exception("eye_contact_scan", e)
 
             if should_greet:
+                # For narrative missions — don't just greet and freeze,
+                # hand off to approach so _confirm_and_photograph_target()
+                # can do the description check and proper greeting
+                _is_nar = (
+                    _ms.mission_alarm_type == AlarmType.NONE
+                    or str(_ms.mission_alarm_type).lower() in ("none", "null", "")
+                )
+                if _is_nar:
+                    _ui("log", "Narrative mission: handing near person to approach pipeline")
+                    _ms.mission_state = State.SEARCHING
+                    _ms.target_spotted_count = max(_ms.target_spotted_count, 1)
+                    _approach_target()
+                    return
                 greeting = ask_cosmos(
                     f"You see {name} {'ahead' if in_path else 'nearby'} ({dist_str} away). "
                     "Greet them and ask about your mission. 1-2 sentences.",

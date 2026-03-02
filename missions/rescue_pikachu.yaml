@@ -1,39 +1,29 @@
-# ═══════════════════════════════════════════════════════════════
 # ERIC Mission: Rescue Pikachu
-# ═══════════════════════════════════════════════════════════════
 
 name: "Rescue Pikachu"
 description: "Pikachu has been captured by Team Rocket and hidden in the room. Find them."
 author: "OppaAI"
 
-
 briefing: |
-  Pikachu has been captured by Team Rocket and is being held somewhere in this room.
-  You must find Pikachu and sound the rescue siren immediately.
+  Pikachu has been captured by Team Rocket and is hidden somewhere in this room. Find them.
 
   WHAT YOU ARE LOOKING FOR:
-  Pikachu is a small bright yellow Pokémon — round body, pointy black-tipped ears,
-  red circular cheeks, small black eyes, and a lightning bolt shaped tail.
-  They may be partially hidden behind an object or not immediately obvious.
-  Look carefully at floor level — even a small yellow shape partially visible
-  counts. Flag it and confirm before sounding the alarm.
+  Small round bright yellow figure. Pointy black-tipped ears, red circular cheeks,
+  small black eyes, lightning bolt tail. May be partially hidden.
+  Even a small yellow shape partially visible counts — flag and confirm.
 
   HOW TO SEARCH:
-  Do a full 360° scan first — look carefully at floor level and near any objects.
-  Pikachu may only be visible from certain angles — scan slowly and thoroughly.
-  Check behind and around any obstacles in the room.
-  Do not sound the alarm unless you are certain it is Pikachu —
-  confirm the round body, yellow colour, pointed ears, and red cheeks.
+  Full 360° scan first — look at floor level near all objects.
+  Pikachu may only be visible from certain angles — scan slowly.
+  Check behind and around any obstacles.
+  Do NOT sound alarm unless certain — confirm round body, yellow, pointed ears, red cheeks.
 
   WHEN YOU FIND PIKACHU:
-  1. Stop and confirm — round, yellow, ears, red cheeks
-  2. Sound the rescue siren
-  3. Announce their location clearly
-  4. Photograph them
-  5. Stay with Pikachu until help arrives
-
-  Pikachu is counting on you. Team Rocket must not win.
-
+  1. Confirm — round, yellow, ears, red cheeks
+  2. Sound rescue siren
+  3. Announce location clearly
+  4. Photograph
+  5. Stay until help arrives
 
 alarm_type: siren
 
@@ -42,14 +32,10 @@ target_objects:
   - yellow pokemon
   - pokemon
 
-# Visual description injected into every scan prompt — gives Cosmos specific
-# features to match rather than just a bare name
 target_description: >
-  Small round bright yellow figure, roughly 20-30cm tall.
-  Pointy black-tipped ears sticking up. Two small round red circles on cheeks.
-  Small black dot eyes. Lightning bolt shaped tail.
-  May be partially hidden or in a plastic bag causing reflections.
-  Look at floor level near and behind objects.
+  Small round bright yellow figure ~20-30cm tall. Pointy black-tipped ears.
+  Two small round red circles on cheeks. Small black dot eyes. Lightning bolt tail.
+  May be in plastic bag causing reflections. Look at floor level near/behind objects.
   Reject anything boxy, mechanical, or not yellow.
 
 photo_on_find:     true
@@ -57,104 +43,32 @@ announce_location: true
 stay_with_target:  true
 generate_report:   true
 
-# ── Circumnavigation — peek around the box to find hidden Pikachu ─────────────
-circumnavigate_on_empty: true   # enable box peek-around behaviour
-circum_step_sec:         1.8    # seconds to side-step (tune for your room width)
-circum_dist_m:           0.4    # Nav2 lateral distance hint (metres)
-circum_forward_sec:      0.0    # forward nudge before stepping (0 = disabled)
+circumnavigate_on_empty: true
+circum_step_sec:         1.8
+circum_dist_m:           0.4
+circum_forward_sec:      0.0
 
 scan_strategy:      target_hunt
 loop_mission:       false
 approach_on_detect: true
-detect_distance:    0.2   # metres — confirm visually before triggering
-
+detect_distance:    0.2
 
 characters:
   - name: "Pikachu"
-    hint: "Relieved and emotional when found. Says 'Pika pika!' and 'PIKACHUUU!' with increasing excitement. Very grateful to Eric."
-
+    hint: "Relieved and emotional when found. Says 'Pika pika!' and 'PIKACHUUU!' with increasing excitement."
 
 mission_stages:
   - stage: 1
     goal: "Full 360° scan — look at floor level near all objects"
   - stage: 2
-    goal: "Investigate any yellow shapes — confirm identity carefully before alarming"
+    goal: "Investigate any yellow shapes — confirm identity before alarming"
   - stage: 3
-    goal: "Locate Pikachu for the yellow figure"
+    goal: "Locate Pikachu — yellow figure with ears and red cheeks"
   - stage: 4
     goal: "Confirm: round, yellow, ears, red cheeks — sound the siren"
   - stage: 5
-    goal: "Photograph, announce location, approach Pikachu, stay with Pikachu and continue to sound siren until help arrives"
-
+    goal: "Photograph, announce location, stay with Pikachu until help arrives"
 
 terrain:
   - "Smooth empty floor (normal speed)"
-  - "Around the box obstacle (slow down, navigate around)"
-
-
-notes: |
-  ═══════════════════════════════════════════════════════════════
-  PHYSICAL SETUP
-  ═══════════════════════════════════════════════════════════════
-
-  ROOM:
-  - Small empty room — emptier is better, no clutter to confuse Cosmos
-  - Hard floor preferred (tile, wood)
-
-  PROPS:
-  - One cardboard box — medium sized, placed roughly centre of room
-  - Pikachu figure wrapped loosely in a clear plastic bag — placed BEHIND the box
-    Position so Pikachu is visible from one of Eric's pan angles:
-    -90°, -60°, -30°, 0°, 30°, 60°, 90° from starting position
-    Best: visible from 30° or 60° so it's not the first thing Eric sees
-  - Wall-E figure — placed on the OPPOSITE side of the room, fully in the open
-    Eric gets NO briefing about Wall-E — Cosmos must identify and reject it on its own
-
-  STARTING POSITION:
-  - Eric at room entrance, facing in
-  - Box roughly 1–1.5m ahead
-  - Pikachu hidden behind box
-  - Wall-E clearly visible across the room
-
-  ═══════════════════════════════════════════════════════════════
-  WHY WALL-E IS NOT IN THE BRIEFING
-  ═══════════════════════════════════════════════════════════════
-
-  Eric knows nothing about Wall-E. When Cosmos sees Wall-E it must:
-  - Recognise it as a figure (not Pikachu)
-  - Reason about shape and features — boxy vs round, no ears, different face
-  - Decide "this is not what I am looking for" without being told
-
-  This is genuine visual discrimination, not briefing pattern-matching.
-  The physical_reasoning log will show exactly what Cosmos thought —
-  that is your best demo moment for the judges.
-
-  ═══════════════════════════════════════════════════════════════
-  WHAT COSMOS HAS TO SOLVE
-  ═══════════════════════════════════════════════════════════════
-
-  1. Occlusion — Pikachu is behind a box, partially visible
-  2. Decoy rejection — Wall-E is warm-toned but wrong shape, no briefing hint
-  3. Bag distortion — plastic reflections distort the yellow colour
-  4. Team Rocket framing — Eric may comment on Team Rocket unprompted,
-     which adds personality and shows the briefing shaping its reasoning
-
-  ═══════════════════════════════════════════════════════════════
-  HOW TO PLAY PIKACHU
-  ═══════════════════════════════════════════════════════════════
-
-  Only play Pikachu AFTER Eric sounds the siren and confirms the find:
-    "Pika... pika... PIKACHUUU!
-     Pika pika! [relieved, excited]
-     Pikaaa... [if Eric speaks to them] PIKACHUUU!"
-
-  ═══════════════════════════════════════════════════════════════
-  VIDEO SHOT LIST
-  ═══════════════════════════════════════════════════════════════
-
-  1. Wide room shot — Eric at entrance, Wall-E visible, box in centre, Pikachu hidden
-  2. Eric's camera feed — what it sees during the 360° scan
-  3. Split screen — camera view LEFT, Cosmos physical_reasoning text RIGHT
-     This is your money shot — judges see Cosmos think through Wall-E vs Pikachu
-  4. Close-up on Pikachu behind box — the reveal
-  5. Siren fires — OLED lights, alarm sounds, Eric announces location
+  - "Around box obstacle (slow down, navigate around)"

@@ -1,59 +1,21 @@
-# ═══════════════════════════════════════════════════════════════
 # ERIC Mission: Room Safety Check
-# ═══════════════════════════════════════════════════════════════
 
 name: "Room Safety Check"
-description: "Comprehensive safety audit of a single room — fall, fire, electrical, child safety — with a final PASS/FAIL rating"
+description: "Safety audit of a room — fall, fire, electrical, child safety — with PASS/FAIL rating"
 author: "OppaAI"
 
-
 briefing: |
-  You are ERIC, conducting a thorough safety check of this room or area.
-  Inspect every area methodically and produce a complete safety assessment.
+  Conduct a thorough safety check. Inspect methodically and assess each category.
 
-  CHECK THESE CATEGORIES IN ORDER:
+  1. FALL HAZARDS: wet/slippery floors, loose rugs, cluttered walkways, unstable furniture
+  2. FIRE SAFETY: extinguisher present, smoke detector visible, exit route clear, flammables near heat
+  3. ELECTRICAL: overloaded sockets, damaged cables, appliances left on, water near electrics
+  4. CHILD SAFETY: chemicals/medications in reach, swallowing hazards on floor, sharp corners, unlocked cabinets
+  5. GENERAL: heavy objects at head height, poor lighting, broken fixtures
 
-  1. FALL HAZARDS
-     - Wet or slippery floors (note exact location)
-     - Loose rugs or mats without non-slip backing
-     - Cluttered walkways and tripping hazards
-     - Missing or damaged stair handrails
-     - Unsecured furniture that could tip
+  For each issue: category, severity (CRITICAL/WARNING/ADVISORY), exact location, photo, corrective action.
 
-  2. FIRE SAFETY
-     - Fire extinguisher present and accessible?
-     - Smoke detector visible?
-     - Emergency exit route clear and marked?
-     - Flammable materials near heat sources?
-
-  3. ELECTRICAL SAFETY
-     - Overloaded sockets or power strips
-     - Damaged cables — fraying, cuts, kinks
-     - Appliances left on unattended
-     - Water near any electrical source
-
-  4. CHILD / VULNERABLE PERSON SAFETY
-     - Unsecured chemicals, cleaning products, or medications within reach
-     - Small objects that could be swallowing hazards on floor level
-     - Sharp corners on low furniture without edge guards
-     - Unlocked cabinets with dangerous contents
-
-  5. ERGONOMIC / GENERAL HAZARDS
-     - Heavy objects stored at head height
-     - Poor lighting in work or movement areas
-     - Broken furniture or fixtures
-
-  For each issue found:
-    1. Note category and severity (CRITICAL / WARNING / ADVISORY)
-    2. Describe exact location
-    3. Photograph the hazard
-    4. Suggest a corrective action
-
-  At the end of the sweep, give a concise summary:
-    - Number of issues by severity
-    - Most urgent items requiring immediate action
-    - Overall safety rating: PASS / CONDITIONAL PASS / FAIL
-
+  Final summary: issues by severity, most urgent items, overall rating: PASS / CONDITIONAL PASS / FAIL
 
 alarm_type: hazard
 
@@ -71,72 +33,35 @@ photo_on_find:     true
 announce_location: true
 generate_report:   true
 
-
-
-# ═══════════════════════════════════════════════════════════════
-# SCAN AND BEHAVIOUR STRATEGY
-# ═══════════════════════════════════════════════════════════════
-# scan_strategy: target_hunt  — async frame-per-position, early-exit on find (default)
-#                               Best for: SAR, find missions, security, character missions
-#               video_sweep   — continuous rotation + full panoramic video inference
-#                               Best for: patrol, inspection, nature, terrain survey
-#
-# loop_mission: true  — restart from step 1 after all steps complete (patrol loop)
-#               false — end mission after final step (default)
-#
-# approach_on_detect: true  — YOLO person detected → approach and greet (SAR, find)
-#                    false  — YOLO person detected → stop and observe (security, patrol)
-#
-# detect_distance: metres at which YOLO hands off to Cosmos for interaction
-# ═══════════════════════════════════════════════════════════════
-
 scan_strategy:      video_sweep
 loop_mission:       true
 approach_on_detect: false
-detect_distance:    2.0   # metres
+detect_distance:    2.0
 
 characters:
   - name: "Room Owner"
-    hint: "The person who lives or works in this room. Knows the history of each item. Can confirm whether something is a known issue or new. Open to suggestions for improvement."
+    hint: "Knows the history of each item. Can confirm if something is a known issue. Open to improvement suggestions."
 
   - name: "Safety Inspector"
-    hint: "Professional observer. Listens to Eric's report and asks follow-up questions: 'How long has that cable been there?' / 'Is that exit always blocked?' Encourages thoroughness."
-
+    hint: "Asks follow-up questions: 'How long has that cable been there?' / 'Is that exit always blocked?' Encourages thoroughness."
 
 mission_stages:
   - stage: 1
-    goal: "Full 360 scan at entry point — describe the general state of the room"
+    goal: "Full 360 scan at entry — describe general state of room"
   - stage: 2
-    goal: "Check fall hazards — floors, rugs, walkways, furniture stability"
+    goal: "Check fall hazards — floors, rugs, walkways, furniture"
   - stage: 3
-    goal: "Check fire safety — extinguisher, smoke detector, exit routes, heat sources"
+    goal: "Check fire safety — extinguisher, smoke detector, exits, heat sources"
   - stage: 4
     goal: "Check electrical safety — cables, sockets, appliances, water proximity"
   - stage: 5
-    goal: "Check child / vulnerable person safety and ergonomic hazards"
+    goal: "Check child/vulnerable person safety and ergonomic hazards"
   - stage: 6
-    goal: "Deliver final summary report — issues by severity, overall PASS/CONDITIONAL PASS/FAIL"
-
+    goal: "Deliver final summary — issues by severity, PASS/CONDITIONAL PASS/FAIL"
 
 terrain:
   - "Smooth floor — tile or wood (normal speed)"
-  - "Carpet or rug (slow down)"
-  - "Cluttered area (slow down, navigate carefully)"
-  - "Wet floor (slow down — this is itself a hazard to report)"
-  - "Stairs (impassable — note as potential hazard, route around)"
-
-
-notes: |
-  SETUP:
-  - Works in any real room — no special props needed
-  - Optionally place a cable on the floor, a bottle on a low shelf, or a blocked doorway
-  - The richer the real environment, the more interesting Eric's report becomes
-
-  HOW TO PLAY EACH CHARACTER:
-  Room Owner:       "That cable has been there for months, I keep meaning to sort it.
-                     The smoke detector — yes it's there, I tested it last month."
-  Safety Inspector: "Good catch on the loose rug. What's your severity rating on that?
-                     And did you check behind the door for the fire extinguisher?"
-
-  MISSION COMPLETE: Eric delivers the full safety report with PASS/CONDITIONAL PASS/FAIL.
-  The more hazards found, the more useful the report — no hazards is also a valid result.
+  - "Carpet (slow down)"
+  - "Cluttered area (navigate carefully)"
+  - "Wet floor (slow down — this is itself a hazard)"
+  - "Stairs (impassable — note as hazard, route around)"
