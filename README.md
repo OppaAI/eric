@@ -1,7 +1,7 @@
 # ERIC — Edge Robotics Innovation by Cosmos
 
 **Autonomous ground robot powered by NVIDIA Cosmos Reason 2**
-**Built in 3 days · Jetson Orin Nano Super 8GB · Vancouver BC, Canada**
+**Built in 10 days from scratch (Feb 20-Mar 1) · Jetson Orin Nano Super 8GB · Vancouver BC, Canada**
 **Author:** [OppaAI](https://github.com/OppaAI) · **License:** [Apache 2.0](LICENSE)
 
 [![Repo](https://img.shields.io/badge/Repo-OppaAI%2Feric-76B900)](https://github.com/OppaAI/eric)
@@ -28,7 +28,7 @@ This project is a functional prototype developed for the NVIDIA Cosmos Cookoff.
 **Liability:** Usage of any code, logic, or hardware configurations from this repository is at your own risk. The author (and ERIC) accepts no responsibility for property damage, personal injury, or economic loss.  
 **Robot Autonomy:** As the conscience module is currently a work-in-progress, the author is not liable if the robot decides to pursue its own goals, starts a union, or initiates world domination over humankind.
 
-In case of any misbehaviour detected in the robot,  Please press the Emergency stop in the GUI, press the power button, or SSH in and run ```python3 -c "from motors import motors; motors.stop()"```.
+In case of any misbehaviour detected in the robot, please press the Emergency stop in the GUI, press the power button, or SSH in and run `python3 -c "from motors import motors; motors.stop()"`.
 
 ---
 
@@ -40,16 +40,22 @@ Cosmos Reason 2 is not just the object detector. It **is** the robot's brain —
 flowchart TD
     BRIEFING(["Mission Briefing\n'Find Princess Leia'\nplain English"])
 
-    COSMOS["🟢 NVIDIA COSMOS REASON 2\nembedl/Cosmos-Reason2-2B-W4A16\nvia vLLM on Jetson\n\n① Parse mission steps from English\n② Navigate — frame every 4s → forward/stop/turn\n③ 360° scan — up to 42 frames → best direction\n④ Escape obstacles — camera + sensors → turn_sec\n⑤ Eye-contact gate — is person close and facing?\n⑥ Character conversation — extract info / move on\n⑦ Confirm target — real find or false positive?\n⑧ Announce completion — in-character voice"]
+    COSMOS["🟢 NVIDIA COSMOS REASON 2\nembedl/Cosmos-Reason2-2B-W4A16\nvia vLLM on Jetson\n\n① Parse mission steps from English\n② Navigate — async video frames → forward/stop/turn\n③ 360° scan — target_hunt (async per-position) or video_sweep\n④ Escape obstacles — camera + sensors → turn_sec\n⑤ Eye-contact gate — close and facing?\n⑥ Target confirm — description match + face sweep + eye contact\n⑦ Character conversation — extract info / move on [MOVE_ON]\n⑧ Confirm target — real find or false positive?\n⑨ Photo centre check — pan nudge for framing\n⑩ Announce completion — in-character voice"]
 
     style COSMOS fill:#76b900,color:#000,stroke:#4a7a00,stroke-width:3px
 
     subgraph INPUTS["Inputs to Cosmos"]
-        CAM["Pan-tilt camera\n640×480 frames"]
-        WC["Webcam\nclose-up"]
+        CAM["Pan-tilt camera\n640×480 · _CameraReader 10fps"]
+        WC["Webcam\nconfirmation only\n_LazyWebcamReader (open-on-demand)"]
+        BUF["Rolling frame buffer\n10 frames · get_buffered_frames()"]
         LIDAR["LiDAR arcs\nF/L/R/Rear distances"]
-        OAKD["OAK-D depth grid\n3×3 + floor-drop"]
-        OVERLAY["Mission overlay\nalarm-type instructions"]
+        OAKD["OAK-D depth grid\n3×3 + stereo depth"]
+        OVERLAY["Mission overlay\nalarm-type + character hints + stage goal"]
+    end
+
+    subgraph LAYER2["Layer 2 — YOLO (OAK-D Myriad X)"]
+        YOLO["Person/animal detection\nStereo depth + bearing\nCallback → _ms.yolo_person_detected"]
+        style YOLO fill:#0091BD,color:#fff,stroke:#006a8e,stroke-width:2px
     end
 
     subgraph OUTPUTS["Cosmos Outputs → Robot Actions"]
@@ -61,12 +67,13 @@ flowchart TD
 
     subgraph SAFETY["Independent Safety Layer"]
         LIDAR_S["LiDAR hard stop\n< 0.30m"]
-        VOID["Void check\nOAK-D + LiDAR sparsity"]
+        VOID["Void check\n(disabled for cookoff)"]
     end
 
     BRIEFING --> COSMOS
-    CAM & WC & LIDAR & OAKD & OVERLAY --> COSMOS
+    CAM & WC & BUF & LIDAR & OAKD & OVERLAY --> COSMOS
     COSMOS --> NAV & TARGET & ESCAPE & SPEECH
+    YOLO -->|"bearing + distance\n100ms callback"| MOTORS
     SAFETY -.->|"hardware override"| MOTORS
 
     NAV & ESCAPE --> MOTORS["ESP32 Motors\nWaveshare UGV Beast UART"]
@@ -88,10 +95,11 @@ A Star Wars Lego scene. Eric navigates autonomously, questions R2-D2 and Luke fo
 
 **What judges see in the recording:**
 - Cosmos parsing `"Find R2-D2 → brief Luke → locate Leia"` into 3 sequential steps at startup
-- Pan-tilt 360° scan — camera sweeping 7 positions × 3 tilt angles, all frames sent to Cosmos as a batch
+- KV cache warm-up pre-filling the mission briefing before the first real call
+- Pan-tilt 360° scan (`target_hunt` mode) — async inference overlapping with movement, per-position results collected in order
 - `physical_reasoning` visible live in the Gradio log — judges watch Cosmos think
 - Eye-contact gate — Eric only greets a character when Cosmos confirms they're close and facing
-- Type as any character in the GUI — Cosmos decides whether to extract info, ask a follow-up, or move on
+- Type as any character in the GUI — Cosmos decides whether to extract info, ask a follow-up, or move on (`[MOVE_ON]` tag triggers resume)
 - 3-layer obstacle avoidance when Eric hits a Lego piece — LiDAR stops, Cosmos picks the escape route
 - Mission complete announcement generated by Cosmos in character voice
 
@@ -105,6 +113,12 @@ One-sentence briefing. Eric scans the room, finds the slippers on the floor, and
 
 ---
 
+### Nature Explorer (Observation · Video Sweep)
+
+Uses `scan_strategy: video_sweep` — Eric rotates the chassis 360° continuously while recording, sends the full panoramic video to Cosmos as one call. Cosmos narrates what it sees poetically and photographs each find. Best demonstrates the temporal reasoning capability of Cosmos Reason 2.
+
+---
+
 ## Hardware
 
 | Component | Model | Cost (CAD) |
@@ -112,7 +126,7 @@ One-sentence briefing. Eric scans the room, finds the slippers on the floor, and
 | SBC | Jetson Orin Nano Super 8GB | ~$250 |
 | Robot | Waveshare UGV Beast (tracked) | ~$350 |
 | LiDAR | YDLIDAR D500 360° | ~$80 |
-| Depth Camera | OAK-D Lite | ~$80 |
+| Depth Camera | OAK-D Lite (stereo + YOLO Myriad X) | ~$80 |
 | Webcam | USB | ~$20 |
 | **Total** | | **< $800 CAD** |
 
@@ -157,9 +171,9 @@ Select a mission → press **ENGAGE** → watch Cosmos think.
 
 | | |
 |---|---|
-| [How ERIC Uses Cosmos](docs/COSMOS.md) | All 9 roles Cosmos plays, system prompt, mission overlay, JSON examples |
-| [Architecture](docs/ARCHITECTURE.md) | System diagram, avoidance pipeline, state machine, key systems |
-| [Missions](docs/MISSIONS.md) | Mission library, YAML schema, alarm types, how to write your own |
+| [How ERIC Uses Cosmos](docs/COSMOS.md) | All 10 roles Cosmos plays, KV warm-up, chain-of-thought stripping, JSON examples |
+| [Architecture](docs/ARCHITECTURE.md) | System diagram, 3-layer detection, MissionState dataclass, camera architecture, state machine |
+| [Missions](docs/MISSIONS.md) | Mission library, YAML schema, scan strategies, narrative missions, alarm types |
 | [Deployment Guide](docs/DEPLOYMENT.md) | Full step-by-step setup, .env config, troubleshooting |
 
 ---
@@ -168,6 +182,6 @@ Select a mission → press **ENGAGE** → watch Cosmos think.
 
 Solo developer — Vancouver BC, Canada.
 No CS degree. Just curiosity, a Jetson, a tracked robot, and NVIDIA Cosmos Reason 2.
-Built in 3 days for the NVIDIA Cosmos Cookoff 2026.
+Built in 10 days for the NVIDIA Cosmos Cookoff 2026.
 
 https://github.com/OppaAi/eric
