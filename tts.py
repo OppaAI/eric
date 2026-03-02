@@ -65,19 +65,19 @@ def init_tts() -> bool:
     return _piper_available
 
 
-def _play_kwargs():
+def _play_kwargs(long: bool = False):
     """Shared play() parameters that prevent sentence cutoff."""
     return dict(
         fast_sentence_fragment=False,
         fast_sentence_fragment_allsentences=False,
         fast_sentence_fragment_allsentences_multiple=False,
-        buffer_threshold_seconds=1.0,
-        minimum_sentence_length=25,
-        minimum_first_fragment_length=20,
-        force_first_fragment_after_words=25,
-        comma_silence_duration=0.5,
-        sentence_silence_duration=1.0,
-        default_silence_duration=1.0
+        buffer_threshold_seconds=0.3 if long else 1.0,
+        minimum_sentence_length=5,          # low — never drop short sentences
+        minimum_first_fragment_length=5,    # low — start playing quickly
+        force_first_fragment_after_words=8,
+        comma_silence_duration=0.3,
+        sentence_silence_duration=0.6,
+        default_silence_duration=0.6
     )
 
 
@@ -102,7 +102,10 @@ def _worker():
                 _old_stdout = sys.stdout
                 sys.stdout = _devnull
                 try:
-                    _talk_stream.feed(text).play(**_play_kwargs())
+                    # Use long=True for multi-sentence text — lower buffer threshold
+                    # ensures all sentences play without being dropped
+                    _is_long = text.count(".") + text.count("!") + text.count("?") > 1
+                    _talk_stream.feed(text).play(**_play_kwargs(long=_is_long))
                 finally:
                     sys.stdout = _old_stdout
                 # play() is blocking — stream is done when it returns
@@ -114,21 +117,23 @@ def _worker():
             _tts_queue.task_done()
 
 
-def speak(text: str):
+def speak(text: str, replace_queue: bool = True):
     """
     Non-blocking speak — puts text in queue and returns instantly.
-    Only keeps 1 pending item max — drops stale speech immediately.
+    replace_queue=True (default): drops stale queued speech and replaces.
+    replace_queue=False: appends to queue (use for multi-part responses).
     """
     if not text or not text.strip():
         return
-    # If anything already waiting, it's stale — clear it and replace
-    while not _tts_queue.empty():
-        try:
-            _tts_queue.get_nowait()
-            _tts_queue.task_done()
-        except queue.Empty:
-            break
-    _tts_queue.put(text)
+    if replace_queue:
+        # Drop stale items — only the latest speech matters during navigation
+        while not _tts_queue.empty():
+            try:
+                _tts_queue.get_nowait()
+                _tts_queue.task_done()
+            except queue.Empty:
+                break
+    _tts_queue.put(text.strip())
 
 
 def speak_streaming(token_gen) -> str:

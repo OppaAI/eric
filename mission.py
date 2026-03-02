@@ -347,12 +347,7 @@ def eric_say(text):
         return
     _ui("eric_says", text_stripped)
     log_mission_event("eric_say", text_stripped[:120])
-    # Truncate to 2 sentences max — long Cosmos responses block TTS for too long
-    sentences = [s.strip() for s in text_stripped.replace("!", ".").replace("?", ".").split(".") if s.strip()]
-    short = ". ".join(sentences[:2])
-    if short:
-        short += "."
-    speak(short or text_stripped)
+    speak(text_stripped)  # speak full text — TTS handles all sentences
 
 
 # ─── Async Cosmos Wrapper ─────────────────────────────────────────────────────
@@ -3570,7 +3565,7 @@ def handle_character_response(character, said):
                 max_tokens=100
             ).replace("[MOVE_ON]", "").strip()
 
-    eric_say(clean)
+    eric_say(clean)  # character interactions — Eric is stopped, longer reply ok
     _ui("log", f"[{character}]: {said}\n[Eric]: {clean}")
     if move_on:
         resume_after_interaction()
