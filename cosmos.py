@@ -532,6 +532,53 @@ def capture_frame_raw(device: int = CAMERA_WEBCAM):
 
 # ─── Cosmos API ───────────────────────────────────────────────────────────────
 
+def _strip_thinking(text: str) -> str:
+    """
+    Strip chain-of-thought reasoning preamble from plain text responses.
+    Cosmos 2B sometimes outputs internal monologue before the actual answer:
+      "Alright, let's see. User asks... Well, I'm designed for..."
+      "Okay, so the user wants to know... Let me think..."
+    These patterns are recognisable — they refer to "the user" or "let me think"
+    in third person, which Eric would never do in a real spoken response.
+    Strategy: if the response contains a double newline, the first paragraph is
+    often the thinking block — check if it looks like reasoning and skip it.
+    """
+    import re
+    # Hard patterns — definitive thinking leak indicators
+    thinking_patterns = [
+        r"^(Alright|Okay|Well|Let me|Let's see|So,|Right,|Hmm)[,.]",
+        r"\bthe user (asks?|wants?|said|is asking)\b",
+        r"\bUser asks?\b",
+        r"\bI (should|need to|must|will) (respond|reply|say|think|consider)\b",
+        r"\blet me think\b",
+        r"\bmy response\b",
+    ]
+    paragraphs = re.split(r'\n\s*\n', text.strip())
+    if len(paragraphs) > 1:
+        first = paragraphs[0].strip()
+        for pat in thinking_patterns:
+            if re.search(pat, first, re.IGNORECASE):
+                # First paragraph is thinking — skip it, return the rest
+                rest = '\n\n'.join(paragraphs[1:]).strip()
+                if rest:
+                    return rest
+                break
+    # Single paragraph — strip sentence-by-sentence if opening is thinking
+    sentences = re.split(r'(?<=[.!?])\s+', text.strip())
+    cleaned = []
+    skipping = True
+    for s in sentences:
+        if skipping:
+            is_thinking = any(re.search(p, s, re.IGNORECASE) for p in thinking_patterns)
+            if not is_thinking:
+                skipping = False
+                cleaned.append(s)
+        else:
+            cleaned.append(s)
+    result = ' '.join(cleaned).strip()
+    return result if result else text
+
+
 def _clean_response(text: str) -> str:
     """
     Strip markdown fences and chain-of-thought prefix from Cosmos Reason 2 output.
@@ -590,7 +637,7 @@ def ask_cosmos_plain(prompt: str, image_b64: str = None,
             {"role": "user",   "content": content}
         ],
         "max_tokens":         max_tokens,
-        "temperature":        0.7,
+        "temperature":        0.6,
         "repetition_penalty": 1.15,
         "stream":             False
     }
@@ -599,6 +646,8 @@ def ask_cosmos_plain(prompt: str, image_b64: str = None,
         r = requests.post(VLLM_URL, json=payload, timeout=90)
         r.raise_for_status()
         text = r.json()["choices"][0]["message"]["content"].strip()
+        # Strip chain-of-thought reasoning prefix — 2B model leaks "let me think..." style prose
+        text = _strip_thinking(text)
         log.info(f"🧠 Cosmos (plain): {text[:120]}")
         try:
             from logger import log_ai as _log_ai
@@ -649,7 +698,7 @@ def ask_cosmos(prompt: str, image_b64: str = None,
             {"role": "user",   "content": content}
         ],
         "max_tokens":         max_tokens,
-        "temperature":        0.7,
+        "temperature":        0.1,
         "repetition_penalty": 1.15,
         "stream":             stream
     }
