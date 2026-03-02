@@ -1032,6 +1032,7 @@ def build_ui():
         mission_dd.change(on_mission_select, inputs=[mission_dd], outputs=[briefing_box])
 
         char_btn.click(action_char_reply, inputs=[char_name, char_says], outputs=[char_reply, char_says])
+        char_says.submit(action_char_reply, inputs=[char_name, char_says], outputs=[char_reply, char_says])
 
         btn_fwd.click(   lambda s: (motors.forward(s),             f"▲ FWD {s:.2f}")[1], inputs=[speed_slider], outputs=[motor_status])
         btn_back.click(  lambda s: (motors.backward(s),            f"▼ BWD {s:.2f}")[1], inputs=[speed_slider], outputs=[motor_status])

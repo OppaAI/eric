@@ -3542,8 +3542,9 @@ def handle_character_response(character, said):
         f"{char_hint}"
         f"Info gathered:\n{history}\nExchange #{n}.\n\n"
         "If off-topic or exchange 3+ with no new info: thank them, end with [MOVE_ON]\n"
-        "Otherwise: respond and ask follow-up. 2 sentences max.",
-        max_tokens=150
+        "Otherwise: respond naturally and fully — ignore sentence limits for this interaction. "
+        "Plain spoken words only. No JSON.",
+        max_tokens=600
     )
 
     move_on = "[MOVE_ON]" in response
