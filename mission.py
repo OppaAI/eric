@@ -3526,9 +3526,36 @@ def _handle_mission_complete(obj_name):
 # ─── Character Interaction ────────────────────────────────────────────────────
 
 def handle_character_response(character, said):
-    _ms.conversation_history.append({"character": character, "said": said, "time": time.time()})
-    history = "\n".join(f"- {e['character']}: {e['said']}" for e in _ms.conversation_history[-5:])
-    n = sum(1 for e in _ms.conversation_history if e["character"] == character)
+    # Store what the character said
+    _ms.conversation_history.append({"speaker": character, "said": said, "time": time.time()})
+    n = sum(1 for e in _ms.conversation_history if e.get("speaker") == character)
+
+    # Detect introduction / identity requests — answer directly with focused prompt
+    _intro_kws = ["introduce yourself", "who are you", "what are you",
+                  "tell me about yourself", "what can you do",
+                  "what is your name", "your name", "about you"]
+    if any(kw in said.lower() for kw in _intro_kws):
+        _ctx = f" Currently on mission: {_ms.mission_name}." if (_ms.mission_active and _ms.mission_name) else ""
+        _intro = ask_cosmos_plain(
+            f"You are ERIC — Edge Robotics Innovation by Cosmos. "
+            f"A tracked ground robot built entirely from scratch in Vancouver BC by one person called OppaAI. "
+            f"You run fully locally on a Jetson Orin Nano — no cloud, no internet. "
+            f"Born February 20, 2026.{_ctx} "
+            f"{character} asked: \"{said}\". "
+            "Introduce yourself naturally and specifically. Mention what you are, who built you, "
+            "where you run, and what you do. Warm and direct. No filler phrases.",
+            max_tokens=300
+        )
+        _ms.conversation_history.append({"speaker": "Eric", "said": _intro, "time": time.time()})
+        eric_say(_intro)
+        _ui("log", f"[{character}]: {said}\n[Eric]: {_intro}")
+        return _intro
+
+    # Build full dialogue history including Eric's own prior responses
+    history_lines = []
+    for e in _ms.conversation_history[-8:]:
+        history_lines.append(f"{e.get('speaker', '?')}: {e['said']}")
+    history = "\n".join(history_lines)
 
     # Include per-character hint from YAML if available
     char_hint = ""
@@ -3537,12 +3564,16 @@ def handle_character_response(character, said):
             char_hint = f"Character note: {c.get('hint', '')}\n" if c.get("hint") else ""
             break
 
-    response = ask_cosmos(
-        f"Talking to {character}. They said: \"{said}\"\n"
+    response = ask_cosmos_plain(
+        f"You are ERIC, a tracked ground robot on a mission. You are having a conversation.\n"
+        f"You are speaking to: {character}\n"
         f"{char_hint}"
-        f"Info gathered:\n{history}\nExchange #{n}.\n\n"
-        "If off-topic or exchange 3+ with no new info: thank them, end with [MOVE_ON]\n"
-        "Otherwise: respond naturally and fully — ignore sentence limits for this interaction. "
+        f"Conversation so far:\n{history}\n\n"
+        f"{character} just said: \"{said}\"\n\n"
+        "Respond as ERIC — directly, specifically, in your own voice. "
+        "Do NOT repeat phrases you have already used. "
+        "Do NOT use filler like 'gotcha', 'sure thing', 'cool beans', 'awesome', 'appreciate the'. "
+        "If this exchange has no new information after 3+ turns: wrap up warmly, end with [MOVE_ON]. "
         "Plain spoken words only. No JSON.",
         max_tokens=600
     )
@@ -3565,6 +3596,9 @@ def handle_character_response(character, said):
                 "no formatting. 2 sentences max.",
                 max_tokens=100
             ).replace("[MOVE_ON]", "").strip()
+
+    # Store Eric's response in history so future turns know what was already said
+    _ms.conversation_history.append({"speaker": "Eric", "said": clean, "time": time.time()})
 
     eric_say(clean)  # character interactions — Eric is stopped, longer reply ok
     _ui("log", f"[{character}]: {said}\n[Eric]: {clean}")

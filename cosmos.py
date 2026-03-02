@@ -638,7 +638,7 @@ def ask_cosmos_plain(prompt: str, image_b64: str = None,
         ],
         "max_tokens":         max_tokens,
         "temperature":        0.6,
-        "repetition_penalty": 1.15,
+        "repetition_penalty": 1.4,
         "stream":             False
     }
 
@@ -646,8 +646,23 @@ def ask_cosmos_plain(prompt: str, image_b64: str = None,
         r = requests.post(VLLM_URL, json=payload, timeout=90)
         r.raise_for_status()
         text = r.json()["choices"][0]["message"]["content"].strip()
-        # Strip chain-of-thought reasoning prefix — 2B model leaks "let me think..." style prose
+        # Strip all code fences — model sometimes wraps plain text in ``` blocks
+        import re as _re
+        text = _re.sub(r"```[a-zA-Z]*\n?", "", text).strip()
+        text = _re.sub(r"```", "", text).strip()
+        # Strip chain-of-thought reasoning prefix
         text = _strip_thinking(text)
+        # Strip filler phrases the 2B model falls back to
+        filler = [
+            r"^(Alright|Got it|Sure|Great call|Cool beans|Awesome)[!,.]?\s*",
+            r"Appreciate the (reminder|support|encouragement|vibes|input|check.in|chat|help)[—\-–,.]?\s*",
+            r"(Gotcha|Gotchu)[!,.]?\s*",
+        ]
+        for pat in filler:
+            text = _re.sub(pat, "", text, flags=_re.IGNORECASE).strip()
+        # Capitalise first letter after stripping
+        if text:
+            text = text[0].upper() + text[1:]
         log.info(f"🧠 Cosmos (plain): {text[:120]}")
         try:
             from logger import log_ai as _log_ai
