@@ -1,7 +1,7 @@
 # ERIC — Edge Robotics Innovation by Cosmos
 
 **Autonomous ground robot powered by NVIDIA Cosmos Reason 2**
-**Built in 3 days · Jetson Orin Nano Super 8GB · Vancouver BC, Canada**
+**Built in 10 days (Feb 20-Mar 1) · Jetson Orin Nano Super 8GB · Vancouver BC, Canada**
 **Author:** [OppaAI](https://github.com/OppaAI) · **License:** [Apache 2.0](LICENSE)
 
 [![Repo](https://img.shields.io/badge/Repo-OppaAI%2Feric-76B900)](https://github.com/OppaAI/eric)
@@ -115,14 +115,14 @@ Uses `scan_strategy: video_sweep` — Eric rotates the chassis 360° continuousl
 
 ## Hardware
 
-| Component | Model | Cost (CAD) |
+| Component | Model | Cost (USD) |
 |---|---|---|
 | SBC | Jetson Orin Nano Super 8GB | ~$250 |
-| Robot | Waveshare UGV Beast (tracked) | ~$350 |
-| LiDAR | YDLIDAR D500 360° | ~$80 |
-| Depth Camera | OAK-D Lite (stereo + YOLO Myriad X) | ~$80 |
-| Webcam | USB | ~$20 |
-| **Total** | | **< $800 CAD** |
+| Robot | Waveshare UGV Beast (tracked) | ~$600 |
+| LiDAR | YDLIDAR D500 360° | Included with Robot |
+| Depth Camera | OAK-D Lite (stereo + YOLO Myriad X) | Included with Robot |
+| Webcam | USB | ~$20 (Old one lying around) |
+| **Total** | | **< $1000 USD** |
 
 ---
 
@@ -176,6 +176,6 @@ Select a mission → press **ENGAGE** → watch Cosmos think.
 
 Solo developer — Vancouver BC, Canada.
 No CS degree. Just curiosity, a Jetson, a tracked robot, and NVIDIA Cosmos Reason 2.
-Built in 3 days for the NVIDIA Cosmos Cookoff 2026.
+Built in 10 days for the NVIDIA Cosmos Cookoff 2026.
 
 https://github.com/OppaAi/eric
