@@ -100,9 +100,9 @@ The operator lies on the floor as the casualty. Eric navigates the room autonomo
 - Based on the captured frames of the victim, Cosmos Reason 2 chose the one with the least blurriness and victim centred in the frame. Then Cosmos use this frame to conduct candidate verification to confirm it is indeed a victim. (Due to 2B model is prone to hallucination, the detection confidence has been significantly to reduce false positive. This is where model training and fine-tuning is critical.)
 - Without confirmation, Eric approaches victim step by step while conducting navigation scan with 5 move clips at the same time.
 - After 5 consecutive empty scans, Eric tries to circumnavigate the obstacle before committing to a full 360 scan.
-- Once Casualty confirmed — siren fires, red LED strobe, TTS emergency broadcast
-- Dual-cam photos with blur check and auto-centre pan nudge saved to missions/photos/ directory (Will change to notify emergency assistance in real situation)
-- Eric stays beside the casualty and repeats the location broadcast every 15 seconds until the operator ends the mission
+- Once Casualty confirmed — siren fires, red LED strobe, TTS emergency broadcast.
+- Dual-cam photos with blur check and auto-centre pan nudge saved to missions/photos/ directory (Will need to notify emergency assistance in real situation.)
+- Eric stays beside the casualty and repeats the location broadcast every 15 seconds until the operator ends the mission.
 
 **Recording:** Screen-record the Gradio GUI — dual cameras, telemetry, and reasoning log all in one frame. 
 **Note:** Due to YOLO (OAK-D Myriad X) is also not trained on person lying on the floor, this demo is mostly based on Cosmos Reason 2
