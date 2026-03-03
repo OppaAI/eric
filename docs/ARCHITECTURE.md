@@ -8,7 +8,7 @@
 
 ```mermaid
 flowchart TD
-    COSMOS["🟢 NVIDIA COSMOS REASON 2\nMission Brain · Navigation · Avoidance · Conversations\nembedl/Cosmos-Reason2-2B-W4A16 via vLLM"]
+    COSMOS["🟢 NVIDIA COSMOS REASON 2\nMission Brain · Navigation · Avoidance · Conversations\nembedl/Cosmos-Reason2-2B-W4A16-Edge2 via vLLM"]
     style COSMOS fill:#76b900,color:#000,stroke:#4a7a00,stroke-width:3px
 
     subgraph SENSORS["Sensor Inputs"]
