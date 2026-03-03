@@ -104,7 +104,7 @@ The operator lies on the floor as the casualty. Eric navigates the room autonomo
 - Dual-cam photos with blur check and auto-centre pan nudge saved to missions/photos/ directory (Will change to notify emergency assistance in real situation)
 - Eric stays beside the casualty and repeats the location broadcast every 15 seconds until the operator ends the mission
 
-**Recording:** Screen-record the Gradio GUI — dual cameras, telemetry, and reasoning log all in one frame.
+**Recording:** Screen-record the Gradio GUI — dual cameras, telemetry, and reasoning log all in one frame. 
 **Note:** Due to YOLO (OAK-D Myriad X) is also not trained on person lying on the floor, this demo is mostly based on Cosmos Reason 2
 
 ---
