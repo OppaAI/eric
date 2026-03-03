@@ -136,12 +136,9 @@ Only needed if `USE_LIDAR=true` or `USE_NAV2=true`:
 
 ```bash
 # Terminal 1 — LiDAR
-ros2 launch ugv_tools lidar.launch.py
+launch/lidar.sh
 
-# Terminal 2 — Nav2 + SLAM
-ros2 launch ugv_tools navigation.launch.py
-
-# Verify LiDAR is publishing
+# Terminal 2 — Verify LiDAR is publishing
 ros2 topic hz /scan           # should show ~10 Hz
 ros2 topic echo /scan --once  # should show ranges array
 ```
@@ -176,7 +173,7 @@ INFO eric.cosmos: 📹 Frame buffer started: camera 0 @ 1.0 fps
 ## Step 7 — Open the GUI
 
 ```
-http://JETSON_IP:7860
+http://<JETSON_IP>:7860
 ```
 
 Three columns:
