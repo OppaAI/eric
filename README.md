@@ -86,16 +86,16 @@ flowchart TD
 - ~6.8 GB VRAM · Zero cloud · Zero network latency
 ---
 
-**Cosmos plays 10 distinct roles in every mission:**
+**Cosmos plays 10 distinct roles in every mission** —  see [How ERIC Uses Cosmos](docs/COSMOS.md) for full details, JSON examples, and prompt internals:
 
 ① **Mission Parsing** — reads plain-English briefing, extracts ordered mission steps  
 ② **Navigation Reasoning/Decision** — async video frames while moving → forward / stop / turn  
-③ **Target Search/Identification** — 360° sweep, `target_hunt` (async per-position) or `video_sweep`  
+③ **Target Scan/Search** — 360° sweep, `target_hunt` (async per-position) or `video_sweep`  
 ④ **Obstacle Avoidance** — camera + sensors → exact `turn_sec` to clear obstacle  
 ⑤ **Eye-contact Gate** — confirms target is close and facing camera before approach  
-⑥ **Target Confirmation** — description match + face sweep + eye contact check  
+⑥ **Target Identification** — description match + face sweep + eye contact check  
 ⑦ **Human Interraction** — extracts info, decides to follow up or move on (`[MOVE_ON]`)  
-⑧ **False-Positive Check** — real find or hallucination?  
+⑧ **Candidate Confirmation** — real find or hallucination?  
 ⑨ **Photo Check** — checks framing, nudges pan for best shot  
 ⑩ **Announcement** — generates completion statement in mission voice  
 
@@ -104,6 +104,8 @@ flowchart TD
 ## Demo
 
 ### Search and Rescue Demo (Indoor · Real Casualty)
+
+*Mission file: [`search_and_rescue.yaml`](missions/search_and_rescue.yaml) — see [Missions](docs/MISSIONS.md) for all missions and YAML schema.*
 
 The operator lies on the floor as the casualty. Eric navigates the room autonomously, finds the person, and executes the full SAR protocol — no staging, no props, no simulation.
 
@@ -120,9 +122,6 @@ The operator lies on the floor as the casualty. Eric navigates the room autonomo
 
 **Recording:** Screen-record the Gradio GUI — dual cameras, telemetry, and reasoning log all in one frame. 
 **Note:** Due to YOLO (OAK-D Myriad X) is also not trained on person lying on the floor, this demo is mostly based on Cosmos Reason 2
-
----
-
 
 ---
 
