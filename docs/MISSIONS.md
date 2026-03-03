@@ -13,9 +13,10 @@ Missions are YAML files in the `missions/` folder. Drop a new `.yaml` file in, c
 When you press ENGAGE:
 
 1. **Cosmos parses the briefing** into an ordered list of `MissionStep` objects — targets, sequencing, and action types extracted from natural language
-2. **Eric executes steps sequentially** — advancing only when each one is confirmed complete
-3. The **`alarm_type` field** controls what fires on a find — LED pattern, audio tone, TTS prefix, follow-on behaviour
-4. At mission end, **`_mission_report()`** delivers a summary of all finds
+2. **KV cache warm-up** fires a tiny pre-fill request so all subsequent Cosmos calls this mission pay only the incremental token cost
+3. **Eric executes steps sequentially** — advancing only when each one is confirmed complete
+4. The **`alarm_type` field** controls what fires on a find — LED pattern, audio tone, TTS prefix, follow-on behaviour
+5. At mission end, **`_mission_report()`** delivers a summary of all finds
 
 ### Multi-Step Example
 
@@ -54,16 +55,43 @@ target_objects:
   - robot
 
 # Behaviour on find
-photo_on_find:     false  # save timestamped photo to missions/photos/
-announce_location: false  # TTS location announcement
+photo_on_find:     false  # save timestamped photo to missions/photos/ (dual-cam, blur-checked)
+announce_location: false  # TTS location announcement (nature missions: respects wildlife)
 stay_with_target:  false  # SAR: stay and repeat broadcast every 15s
 back_away_on_find: false  # security: back 3m + turn 180°
 generate_report:   false  # mission end: summary of all finds
+
+# 360° scan strategy — controls which scan mode Eric uses
+scan_strategy: target_hunt   # target_hunt (default) | video_sweep
+# target_hunt: async per-position pan-tilt sweep, early-exit on first confirmed target
+#              Best for: search & rescue, find missions, security
+# video_sweep: continuous chassis rotation + single panoramic video inference, no early-exit
+#              Best for: nature explorer, inspection, patrol, survey
+
+# Approach behaviour
+approach_distance: 0.65   # metres — OAK-D/YOLO distance threshold for "arrived" (default 0.65m)
+approach_on_detect: true  # YOLO: approach on detection (false = report only, stay in place)
+detect_distance: 2.0      # metres — YOLO distance above which Eric steers toward (not stops)
+
+# Obstacle circumnavigation (experimental)
+circumnavigate_on_empty: false   # peek around blocking obstacle before doing full 360
+circum_step_sec: 1.8             # seconds to side-step (tune for room size)
+circum_dist_m: 0.4               # estimated step distance in metres
+circum_forward_sec: 0.0          # optional forward nudge before side-stepping
+
+# Narrative mission behaviour
+wait_for_dismiss: false   # stay in place after greeting until operator presses STOP
 
 # Characters (played by operator in GUI)
 characters:
   - name: "R2-D2"
     hint: "Speaks in beeps. Knows where Luke is. Will help if asked nicely."
+
+# Stage-by-stage goals — Cosmos sees the current stage goal during that step
+mission_stages:
+  - goal: "Find R2-D2 and ask him where Luke is hiding"
+  - goal: "Find Luke and brief him on the mission"
+  - goal: "Locate Princess Leia using Luke's directions"
 
 # Terrain Eric will encounter (affects speed)
 terrain:
@@ -83,10 +111,10 @@ notes: |
 | Action | What happens |
 |---|---|
 | `find_and_approach` | Navigate to target, mark done on arrival |
-| `deliver_message` | Speak `message` to target, wait for acknowledgement |
-| `speak_to` | Greet + initiate conversation, wait for operator to type reply |
-| `wait_for_response` | Stop and wait — operator types character reply in GUI |
-| `photograph` | Capture sharp frames, save to `missions/photos/` |
+| `deliver_message` | Speak `message` to target, wait `wait_sec` seconds, advance |
+| `speak_to` | Greet + initiate conversation, wait `wait_sec` seconds for operator to type reply |
+| `wait_for_response` | Stop and wait `wait_sec` seconds — operator types character reply in GUI |
+| `photograph` | Capture `photo_count` sharp blur-checked photos to `missions/photos/` |
 
 ---
 
@@ -94,34 +122,39 @@ notes: |
 
 | Alarm | LED | Audio | TTS Prefix | Follow-on |
 |---|---|---|---|---|
-| `siren` | Rapid red strobe | Rising oscillating tone | "EMERGENCY! EMERGENCY!" | Stay with target, repeat every 15s |
-| `hazard` | Slow amber pulse | Triple warning beep | "WARNING! HAZARD DETECTED!" | Log severity, continue patrol |
-| `suspicious` | Medium red strobe | Urgent staccato beeps | "ALERT! SUSPICIOUS OBJECT!" | Back away 3m, turn 180°, hold |
+| `siren` | Rapid red strobe | Rising oscillating tone | "EMERGENCY! EMERGENCY!" | Stay with target, repeat every 15s (if `stay_with_target: true`) |
+| `hazard` | Slow amber pulse | Triple warning beep | "WARNING! HAZARD DETECTED!" | Log severity (CRITICAL/WARNING/ADVISORY), continue patrol |
+| `suspicious` | Medium red strobe | Urgent staccato beeps | "ALERT! SUSPICIOUS OBJECT!" | Back away 3m, turn 180°, hold (if `back_away_on_find: true`) |
 | `nature` | Gentle green pulse | None | *(no prefix — just narration)* | Photograph, narrate, continue |
-| `none` | None | None | None | Standard find-and-approach |
+| `none` | None | None | None | Find-and-approach → confirm description → eye contact → greet → photograph |
 
 > All alarm tones are generated mathematically at runtime (raw PCM via `struct.pack`) — no audio files, no internet required.
 
 ---
 
+## Narrative Missions (`alarm_type: none`)
+
+With `alarm_type: none`, Eric runs the full target confirmation pipeline on arrival:
+
+1. Cosmos checks if the person matches the description in the `characters` hints
+2. If description doesn't match: Eric asks the stranger for directions, then resumes search
+3. If it matches: tilt sweep to find face → eye contact gate → greet → dual-cam photos
+4. If `wait_for_dismiss: true`: Eric stays in place after greeting until operator presses STOP
+
+The `characters` list provides Cosmos with description hints for identity checking. The `owner` keyword in a character name triggers the description-match logic (e.g. `name: "Creator / Owner"`).
+
+---
+
 ## Mission Library
 
-| File | Name | Alarm | Description |
-|---|---|---|---|
-| `template.yaml` | Template | — | Fully commented starting point |
-| `find_leia.yaml` | Operation Find Leia | none | 3-step: find R2 → brief Luke → locate Leia |
-| `jedi_training.yaml` | Operation Chosen One | none | Eric IS Anakin — faces Palpatine's dark side offer |
-| `protect_john_connor.yaml` | Protect John Connor | 🔴 suspicious | You are the T-800 — locate John, identify T-1000 |
-| `fetch_slippers.yaml` | Fetch My Slippers | none | 360° sweep to find slippers on the floor |
-| `find_yellow_pen.yaml` | Find the Yellow Pen | none | Colour-contrast search — yellow on green |
-| `office_mystery.yaml` | Operation Missing Drive | none | Talk to staff, follow leads, find red USB drive |
-| `search_and_rescue.yaml` | Search and Rescue | 🚨 siren | Find casualty, sound siren, stay and broadcast |
-| `disaster_life_search.yaml` | Disaster Life Search | 🚨 siren | Simulated disaster sweep — survivor search |
-| `hazard_patrol.yaml` | Hazard Patrol | ⚠️ hazard | Full-area safety inspection |
-| `room_safety_check.yaml` | Room Safety Check | ⚠️ hazard | Single-room audit — PASS / CONDITIONAL / FAIL |
-| `nature_explorer.yaml` | Nature Explorer | 🌿 nature | Wildlife + plants — poetic narration, photo each find |
-| `security_sweep.yaml` | Security Sweep | 🔴 suspicious | Suspicious objects — automatic back-away protocol |
-| `terrain_assessment.yaml` | Terrain Assessment | ⚠️ hazard | Map traversability, flag hazards, recommend route |
+| File | Name | Alarm | Scan | Description |
+|---|---|---|---|---|
+| `search_and_rescue.yaml` | Search and Rescue | 🚨 siren | target_hunt | Find injured person, sound siren, stay and broadcast |
+| `greet_owner.yaml` | Greet the Owner | none | target_hunt | Find creator by description, wait for eye contact, greet |
+| `room_safety_check.yaml` | Room Safety Check | ⚠️ hazard | video_sweep | Full-room audit — PASS / CONDITIONAL PASS / FAIL |
+| `nature_exploring.yaml` | Nature Exploring | 🌿 nature | video_sweep | Wildlife + plants — poetic narration, photo each find |
+| `msg_for_R2D2.yaml` | Vader's Messenger | none | target_hunt | Deliver Vader's dark side invitation to R2-D2 |
+| `find_SD_card.yaml` | Operation Lost Card | none | target_hunt | Systematic office sweep to find a missing SD card |
 
 ---
 
@@ -130,5 +163,14 @@ notes: |
 1. Copy `missions/template.yaml`
 2. Write your `briefing` in plain English — Cosmos reads it as-is
 3. Set `alarm_type` to match what Eric should do on a find
-4. Add `characters` with `hint` so you know what to type during the demo
-5. Click ↺ refresh in the GUI — your mission appears in the dropdown immediately
+4. Set `scan_strategy: video_sweep` if this is an observation/patrol mission; leave default for find missions
+5. Add `characters` with `hint` so you know what to type during the demo
+6. Add `mission_stages` if you want Cosmos to have a focused sub-goal per step
+7. Click ↺ refresh in the GUI — your mission appears in the dropdown immediately
+
+### Tips
+
+- **Multi-step missions:** write the briefing in sequence ("First find X. Then find Y. Finally..."). Cosmos will parse the steps automatically.
+- **Find-and-greet (`alarm_type: none`):** add a character with `name: "Creator / Owner"` and a physical description in `hint`. Eric will check the description before greeting.
+- **Observation missions:** set `scan_strategy: video_sweep` — Eric sweeps the whole room in one continuous rotation and sends the panoramic video to Cosmos.
+- **Circumnavigation:** add `circumnavigate_on_empty: true` if your target might be hidden behind a box. Eric will peek around obstacles before doing a full 360.

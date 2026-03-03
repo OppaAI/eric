@@ -1,56 +1,97 @@
 ```mermaid
 flowchart TD
 
-    START(["🤖 ERIC"])
+    START(["🤖 ERIC
+    search_and_rescue.yaml · alarm_type: siren"])
 
-    subgraph SEARCH ["🔍 SEARCH"]
-        SWEEP[["🟩 COSMOS REASON2
-        Initial 360° sweep"]]
-        MOVE["🚗 Move forward
-        LiDAR guard · YOLO poll 100ms"]
-        QUICK[["🟩 COSMOS REASON2
-        Quick scan — stopped
-        every 3 move clips"]]
-        SCAN_360[["🟩 COSMOS REASON2
-        Full 360° scan
-        every 6 quick scans or 3 empty scans"]]
-        REJECT[["🟩 COSMOS REASON2
-        Wall-E rejected
-        ✗ boxy · ✗ no ears · ✗ no red cheeks"]]
+    INIT[["🟢 COSMOS REASON2
+    Initial quick scan
+    _quick_scan() — stopped · pan-tilt 0° / -5°"]]
+
+    subgraph CLIP ["🚗 MOVE CLIP  (up to 6s)"]
+        direction TB
+        FORWARD["🚗 Move forward
+        Layer 1: LiDAR hard stop < 0.30m · OAK-D depth"]
+        POLL["Poll every 100ms
+        YOLO callback · LiDAR · mission state"]
+        ASYNC[["🟢 COSMOS REASON2
+        Async nav check every 6s
+        fire-and-forget · returns last cached result"]]
+        FORWARD --> POLL
+        POLL -- "6s nav interval" --> ASYNC
+        ASYNC -- "action: forward" --> POLL
     end
 
-    subgraph FIND ["🎯 FIND"]
-        CONFIRM[["🟩 COSMOS REASON2
-        Pikachu confirmed
-        ✅ round · yellow · ears · red cheeks"]]
+    MOVE_COUNTER["Move counter +1
+    nav_clips_since_scan"]
+
+    QUICK[["🟢 COSMOS REASON2
+    Quick scan — stopped
+    every 5 move clips"]]
+
+    CIRC["Circumnavigate obstacle
+    peek around · _circumnavigate_obstacle()"]
+
+    SCAN_360[["🟢 COSMOS REASON2
+    Full 360° scan — _best_360_scan()
+    async per-position pan-tilt sweep
+    7 × 30° pan + 180° chassis"]]
+
+    subgraph FIND ["🎯 FIND — any scan or YOLO"]
+        REJECT[["🟢 COSMOS REASON2
+        Person seen — not a casualty
+        ✗ upright · ✗ no distress"]]
+        CONFIRM[["🟢 COSMOS REASON2
+        Casualty confirmed
+        ✅ person on floor · ✅ motionless"]]
         APPROACH["🚗 Approach
-        YOLO steering · LiDAR gate at 0.8m"]
+        YOLO bearing · LiDAR gate 0.65m"]
+        REJECT -- "not casualty" --> FORWARD
+        CONFIRM -- "false positive" --> FORWARD
+        CONFIRM -- "confirmed ✅" --> APPROACH
     end
 
     subgraph RESCUE ["🚨 RESCUE"]
-        SIREN["🚨 Siren · Announce location"]
-        PHOTO[["🟩 COSMOS REASON2
+        SIREN["🚨 Siren · red LED strobe
+        TTS: 'EMERGENCY — casualty located'"]
+        PHOTO[["🟢 COSMOS REASON2
         Dual-cam photo
-        Blur check · Auto-centre both cams"]]
-        STAY["🤖 Stay with Pikachu"]
+        blur check · auto-centre · pan nudge"]]
+        REPORT[["🟢 COSMOS REASON2
+        Condition report
+        conscious · injuries · exact location"]]
+        STAY["🤖 Stay with casualty
+        Repeat broadcast every 15s"]
+        SIREN --> PHOTO --> REPORT --> STAY
     end
 
-    START --> SWEEP
-    SWEEP -- "not found" --> MOVE
-    MOVE --> QUICK
-    QUICK -- "not found" --> MOVE
-    QUICK -- "empty scans threshold" --> SCAN_360
-    SCAN_360 -- "not found" --> MOVE
-    QUICK -- "yellow shape" --> REJECT
-    SCAN_360 -- "yellow shape" --> REJECT
-    REJECT -- "not Pikachu" --> MOVE
-    QUICK -- "candidate" --> CONFIRM
-    SCAN_360 -- "candidate" --> CONFIRM
-    SWEEP -- "candidate" --> CONFIRM
-    CONFIRM -- "false positive" --> MOVE
-    CONFIRM -- "confirmed ✅" --> APPROACH
-    APPROACH --> SIREN --> PHOTO --> STAY
+    START --> INIT
+    INIT -- "no casualty" --> FORWARD
+    INIT -- "casualty / YOLO" --> CONFIRM
+
+    POLL -- "YOLO fires mid-move" --> CONFIRM
+    POLL -- "LiDAR fires mid-move" --> FORWARD
+    ASYNC -- "action: stop / wall_ahead" --> QUICK
+    POLL -- "6s clip complete" --> MOVE_COUNTER
+
+    MOVE_COUNTER -- "< 5 clips" --> FORWARD
+    MOVE_COUNTER -- "5 clips done" --> QUICK
+
+    QUICK -- "candidate" --> REJECT
+    QUICK -- "casualty" --> CONFIRM
+    QUICK -- "empty · count < 5 · scans < 10" --> FORWARD
+    QUICK -- "5 consecutive empty scans" --> CIRC
+    QUICK -- "every 10 quick scans" --> SCAN_360
+
+    CIRC -- "target found" --> CONFIRM
+    CIRC -- "nothing found" --> SCAN_360
+
+    SCAN_360 -- "no casualty" --> FORWARD
+    SCAN_360 -- "candidate" --> REJECT
+    SCAN_360 -- "casualty" --> CONFIRM
+
+    APPROACH --> SIREN
 
     classDef cosmos fill:#76b900,stroke:#76b900,stroke-width:3px,color:#000000
-    class SWEEP,QUICK,SCAN_360,REJECT,CONFIRM,PHOTO cosmos
+    class INIT,ASYNC,QUICK,SCAN_360,REJECT,CONFIRM,PHOTO,REPORT cosmos
 ```

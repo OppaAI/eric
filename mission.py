@@ -4490,19 +4490,31 @@ def _process_scan(scan, from_360=False):
             t_lower = str(obj_name or obj).lower()
             _should_alarm = any(kw.lower() in t_lower
                                 for kw in (_ms.mission_target_objects or [obj]))
+            # Also fire if reasoning describes person as down/unconscious
+            if not _should_alarm and obj == "person":
+                _sar_kws = ["lying", "unconscious", "on the floor", "on the ground",
+                            "fallen", "collapsed", "motionless", "injured", "down"]
+                _should_alarm = any(kw in reason.lower() for kw in _sar_kws)
             _alarm_severity = "CRITICAL"
         elif _ms.mission_alarm_type in (AlarmType.HAZARD, AlarmType.NATURE):
             t_lower = str(obj_name or obj).lower()
             _should_alarm = any(kw.lower() in t_lower
                                 for kw in (_ms.mission_target_objects or [obj]))
-            _alarm_severity = scan.get("severity", "WARNING")
+            # Also fire if reasoning describes person as down/unconscious
+            if not _should_alarm and obj == "person":
+                _sar_kws = ["lying", "unconscious", "on the floor", "on the ground",
+                            "fallen", "collapsed", "motionless", "injured", "down"]
+                _should_alarm = any(kw in reason.lower() for kw in _sar_kws)
+            _alarm_severity = scan.get("severity", "CRITICAL")
 
         if _should_alarm:
+            motors.stop()   # stop immediately — don't approach an injured person
             _trigger_mission_alarm(
                 obj_name or obj,
                 location_hint = reason,
                 severity      = _alarm_severity,
             )
+            return   # alarm handler takes over — don't approach
 
         if direction in ("down", "below"):
             _ui("log", "Target is directly below — already arrived!")
