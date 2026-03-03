@@ -16,16 +16,16 @@
 ---
 
 ERIC is a tracked ground robot that runs **NVIDIA Cosmos Reason 2** fully at the edge — no cloud, no server, not even internet.  
-Since people are coming AI terms everyday,
-I am coining a new term today - **MISSION**. 
- 
+Since people are coming up with new AI terms all the time,
+I am coining a new term right here: **"MISSION"**. 
+   
 ERIC is a **mission-based** AI Autonomous Robot. Give it a mission yaml file in plain English, press ENGAGE, and it navigates, reasons, talks to people, avoids obstacles, and announces what it finds — all powered by a single vision-language model on consumer hardware.  
 In the future, I may program the robot to plan its own mission. After all, it's just a yaml file.
 
 ---
 Before proceeding, please read the following disclaimer:
 
-# ⚠️ Disclaimer & Liability
+## ⚠️ Disclaimer & Liability
 This project is a functional prototype developed for the NVIDIA Cosmos Cookoff.
 
 **Experimental Status:** This software was built to demonstrate the reasoning capabilities of the NVIDIA Cosmos Reason2 2B model in a real robotics context — running on actual hardware with live sensors, not a simulation.  
