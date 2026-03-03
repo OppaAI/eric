@@ -202,13 +202,12 @@ In the GUI -> "Mission Briefing" section, Select a mission → press **ENGAGE** 
 ---
 
 ## Docs
-
 | | |
 |---|---|
-| [How ERIC Uses Cosmos](docs/COSMOS.md) | All 10 roles Cosmos plays, KV warm-up, chain-of-thought stripping, JSON examples |
-| [Architecture](docs/ARCHITECTURE.md) | System diagram, 3-layer detection, MissionState dataclass, camera architecture, state machine |
-| [Missions](docs/MISSIONS.md) | Mission library, YAML schema, scan strategies, narrative missions, alarm types |
-| [Deployment Guide](docs/DEPLOYMENT.md) | Full step-by-step setup, .env config, troubleshooting |
+| [How ERIC Uses Cosmos](docs/COSMOS.md) | All 10 Cosmos roles, KV cache warm-up, mission overlay, chain-of-thought stripping, JSON schema |
+| [Architecture](docs/ARCHITECTURE.md) | System diagram, 3-layer detection, camera architecture, MissionState dataclass, state machine |
+| [Missions](docs/MISSIONS.md) | YAML schema, mission library, scan strategies, alarm types, action types, narrative missions |
+| [Deployment Guide](docs/DEPLOYMENT.md) | Step-by-step setup, full `.env` config, dependencies, troubleshooting |
 
 ---
 
