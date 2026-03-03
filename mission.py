@@ -3605,91 +3605,6 @@ def handle_character_response(character, said):
     _ms.conversation_history.append({"speaker": character, "said": said, "time": time.time()})
     n = sum(1 for e in _ms.conversation_history if e.get("speaker") == character)
 
-    # ── DEMO ONLY — REMOVE BEFORE GITHUB PUSH ────────────────────────────────
-    # ── Hardcoded trigger speeches — bypass Cosmos entirely ─────────────────
-    _said_low = said.lower().strip()
-
-    def _demo_speak(text):
-        """Speak hardcoded demo script with head movement."""
-        # Start head movement regardless of mission flags
-        try:
-            _tilt = getattr(_ms, "last_confirm_tilt", 10)
-            _ms.head_talking = True
-            _ht = threading.Thread(target=_head_talk_thread, args=(_tilt,), daemon=True)
-            _ht.start()
-        except Exception:
-            pass
-        speak(text)
-        try:
-            from tts import wait_speak_stop
-            wait_speak_stop()
-        except Exception:
-            pass
-        try:
-            _ms.head_talking = False
-        except Exception:
-            pass
-        _ms.conversation_history.append({"speaker": "Eric", "said": text, "time": time.time()})
-        _ui("log", f"[{character}]: {said}\n[Eric]: {text}")
-
-    if "introduce" in _said_low or "who are you" in _said_low or "what are you" in _said_low:
-        _speech = (
-            "Hello world. "
-            "My name is ERIC. That stands for Edge Robotics Innovation by Cosmos. "
-            "I am a real tracked ground robot, built from scratch on February 20, 2026,"
-            "To participate in this NVIDIA Cosmos Cookoff. "
-            "I run entirely on local hardware — a Jetson Orin Nano on a tracked chassis. "
-            "No cloud, no internet, no external server. "
-            "My brain is NVIDIA Cosmos Reason 2, a two billion parameter vision language model "
-            "running directly on this device. "
-            "I use it to see, reason, navigate, find targets, detect hazards, and have conversations. "
-            "Everything happens on the edge, in real time."
-        )
-        _demo_speak(_speech)
-        return _speech
-
-    if "cosmos" in _said_low:
-        _speech = (
-            "Let me tell you exactly how I use Cosmos Reason 2 to operate. "
-            "First, scene understanding. Every time I stop to scan, Cosmos looks at my camera feed "
-            "and tells me what is in front of me — objects, people, distances, layout. "
-            "Second, target identification. Cosmos does not just detect — it confirms. "
-            "It reasons about physical appearance and matches what it sees against a description. "
-            "Third, navigation decisions. After every scan, Cosmos decides my next action — "
-            "move forward, turn, stop, investigate. No hardcoded rules. Pure visual reasoning. "
-            "Fourth, approach and distance judgment. Cosmos reads proximity from the image alone "
-            "and tells me when to slow down, when to stop, and when I am close enough to interact. "
-            "Fifth, person confirmation. Cosmos checks physical criteria one by one — "
-            "gender, height, clothing, accessories — and reasons through what it sees. "
-            "Sixth, eye contact detection. Before I greet anyone, Cosmos reads gaze direction "
-            "from a still image and waits until it confirms deliberate eye contact. "
-            "Seventh, hazard detection. Cosmos identifies hazards, assigns severity, "
-            "describes location, and suggests corrective action — all from one camera frame. "
-            "Eighth, conversation. Cosmos reads the conversation history and mission context "
-            "and generates my response, in character, naturally. "
-            "Ninth, mission reasoning. The mission briefing is injected into every Cosmos call. "
-            "One two billion parameter model handling vision, reasoning, navigation, and conversation. "
-            "All running locally on this Jetson. No cloud. No specialised models for each task. Just Cosmos."
-        )
-        _demo_speak(_speech)
-        return _speech
-
-    if "goodbye" in _said_low or "bye" in _said_low or "outro" in _said_low:
-        _speech = (
-            "What you just saw was a real robot making real decisions. "
-            "No cloud. No pre-programmed responses. No server handling my reasoning. "
-            "Every scan, every approach, every conversation — "
-            "Cosmos reasoned through it on this Jetson, from a camera frame, in real time. "
-            "A two billion parameter model handling vision, navigation, confirmation, and conversation. "
-            "All on the edge. All local. "
-            "I was built by with consumer hardware. I run on hardware you can hold in your hand. "
-            "Hope to see you again soon. "
-            "Thank you for watching. Eric out."
-        )
-        _demo_speak(_speech)
-        return _speech
-    # ── END DEMO ONLY ──────────────────────────────────────────────────────────
-
     # Build full dialogue history including Eric's own prior responses
     history_lines = []
     for e in _ms.conversation_history[-8:]:
@@ -4459,7 +4374,7 @@ def _process_scan(scan, from_360=False):
         except ImportError as _exc:
             log.debug(f"avoidance module not loaded: {_exc}")
 
-    if speak_tx:
+    if speak_tx and target_visible:
         eric_say(speak_tx)
 
     # ── Target persistence: Cosmos often flip-flops target_visible ───────────
@@ -5042,6 +4957,7 @@ def _mission_loop():
                         if _lidar_close_poll():
                             motors.stop()
                             _ms.last_nav_result = {}  # flush stale "forward" result
+                            _ms.nav_clips_since_scan = NAV_CLIPS_BETWEEN_SCANS  # force stopped scan before resuming
                             yolo_broke = True
                             break
                     except Exception:
