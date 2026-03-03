@@ -1,6 +1,6 @@
 # ERIC — Edge Robotics Innovation by Cosmos
 
-**Mission-based Autonomous Unmanned Ground Robot powered by NVIDIA Cosmos Reason 2**
+**Mission-based Autonomous Unmanned Ground Robot powered by NVIDIA Cosmos Reason 2** 
 **Built in 10 days (Feb 20-Mar 1) · Jetson Orin Nano Super 8GB · Vancouver BC, Canada**
 **Author:** [OppaAI](https://github.com/OppaAI) · **License:** [Apache 2.0](LICENSE)
 
