@@ -149,20 +149,12 @@ The `characters` list provides Cosmos with description hints for identity checki
 
 | File | Name | Alarm | Scan | Description |
 |---|---|---|---|---|
-| `template.yaml` | Template | — | — | Fully commented starting point |
-| `find_leia.yaml` | Operation Find Leia | none | target_hunt | 3-step: find R2 → brief Luke → locate Leia |
-| `jedi_training.yaml` | Operation Chosen One | none | target_hunt | Eric IS Anakin — faces Palpatine's dark side offer |
-| `protect_john_connor.yaml` | Protect John Connor | 🔴 suspicious | target_hunt | You are the T-800 — locate John, identify T-1000 |
-| `fetch_slippers.yaml` | Fetch My Slippers | none | target_hunt | 360° sweep to find slippers on the floor |
-| `find_yellow_pen.yaml` | Find the Yellow Pen | none | target_hunt | Colour-contrast search — yellow on green |
-| `office_mystery.yaml` | Operation Missing Drive | none | target_hunt | Talk to staff, follow leads, find red USB drive |
-| `search_and_rescue.yaml` | Search and Rescue | 🚨 siren | target_hunt | Find casualty, sound siren, stay and broadcast |
-| `disaster_life_search.yaml` | Disaster Life Search | 🚨 siren | target_hunt | Simulated disaster sweep — survivor search |
-| `hazard_patrol.yaml` | Hazard Patrol | ⚠️ hazard | target_hunt | Full-area safety inspection |
-| `room_safety_check.yaml` | Room Safety Check | ⚠️ hazard | target_hunt | Single-room audit — PASS / CONDITIONAL / FAIL |
-| `nature_explorer.yaml` | Nature Explorer | 🌿 nature | video_sweep | Wildlife + plants — poetic narration, photo each find |
-| `security_sweep.yaml` | Security Sweep | 🔴 suspicious | target_hunt | Suspicious objects — automatic back-away protocol |
-| `terrain_assessment.yaml` | Terrain Assessment | ⚠️ hazard | target_hunt | Map traversability, flag hazards, recommend route |
+| `search_and_rescue.yaml` | Search and Rescue | 🚨 siren | target_hunt | Find injured person, sound siren, stay and broadcast |
+| `greet_owner.yaml` | Greet the Owner | none | target_hunt | Find creator by description, wait for eye contact, greet |
+| `room_safety_check.yaml` | Room Safety Check | ⚠️ hazard | video_sweep | Full-room audit — PASS / CONDITIONAL PASS / FAIL |
+| `nature_exploring.yaml` | Nature Exploring | 🌿 nature | video_sweep | Wildlife + plants — poetic narration, photo each find |
+| `msg_for_R2D2.yaml` | Vader's Messenger | none | target_hunt | Deliver Vader's dark side invitation to R2-D2 |
+| `find_SD_card.yaml` | Operation Lost Card | none | target_hunt | Systematic office sweep to find a missing SD card |
 
 ---
 
