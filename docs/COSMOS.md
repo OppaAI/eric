@@ -10,7 +10,7 @@ Cosmos Reason 2 is not a module Eric calls occasionally. It **is** Eric's brain.
 
 ## The Model
 
-ERIC runs `embedl/Cosmos-Reason2-2B-W4A16` — a 4-bit weight, 16-bit activation quantized version of Cosmos Reason 2 2B — via vLLM on the Jetson Orin Nano Super 8GB. This quantization is what makes running a frontier vision-language model fully at the edge on an 8GB device possible.
+ERIC runs `embedl/Cosmos-Reason2-2B-W4A16-Edge2` — a 4-bit weight, 16-bit activation quantized version of Cosmos Reason 2 2B — via vLLM on the Jetson Orin Nano Super 8GB. This quantization is what makes running a frontier vision-language model fully at the edge on an 8GB device possible.
 
 | Metric | Value |
 |---|---|
