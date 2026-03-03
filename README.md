@@ -56,10 +56,12 @@ Cosmos Reason 2 is not just the object detector or visual data inferencer. It is
 
 ```mermaid
 flowchart TD
-    BRIEFING(["Mission Briefing\n'Search and rescue — find the casualty'\nplain English"])
+    BRIEFING(["Mission Briefing
+'Search and rescue — find the casualty'
+plain English"])
 
     COSMOS["🟢 COSMOS REASON 2
-(vLLM on Jetson)
+vLLM on Jetson
 ① Mission Parsing
 ② Navigation
 ③ Scan & Search
@@ -74,38 +76,51 @@ flowchart TD
     style COSMOS fill:#76b900,color:#000,stroke:#4a7a00,stroke-width:3px
 
     subgraph INPUTS["Inputs to Cosmos"]
-        CAM["Pan-tilt camera\n640×480 · _CameraReader 10fps"]
-        WC["Webcam\nconfirmation only\n_LazyWebcamReader (open-on-demand)"]
-        BUF["Rolling frame buffer\n10 frames · get_buffered_frames()"]
-        LIDAR["LiDAR arcs\nF/L/R/Rear distances"]
-        OAKD["OAK-D depth grid\n3×3 + stereo depth"]
-        OVERLAY["Mission overlay\nalarm-type + character hints + stage goal"]
+        CAM["Pan-tilt camera
+640×480 · 10fps"]
+        WC["Webcam
+confirmation · open-on-demand"]
+        BUF["Rolling frame buffer
+10 frames"]
+        LIDAR["LiDAR arcs
+F/L/R/Rear"]
+        OAKD["OAK-D depth
+3×3 + stereo"]
+        OVERLAY["Mission overlay
+briefing · hints · stage goal"]
     end
 
     subgraph LAYER2["Layer 2 — YOLO (OAK-D Myriad X)"]
-        YOLO["Person/animal detection\nStereo depth + bearing\nCallback → _ms.yolo_person_detected"]
+        YOLO["Person/animal detection
+stereo depth + bearing
+→ yolo_person_detected"]
     end
 
     subgraph OUTPUTS["Cosmos Outputs → Robot Actions"]
-        NAV["forward / stop / turn\n+ terrain + void_ahead"]
-        TARGET["target_visible + direction\n+ physical_reasoning"]
-        ESCAPE["turn_left/right\n+ exact turn_sec"]
-        SPEECH["Eric speaks\nPiper TTS (CPU, zero VRAM)"]
+        NAV["forward / stop / turn"]
+        TARGET["target_visible + direction
++ physical_reasoning"]
+        ESCAPE["turn_left/right + turn_sec"]
+        SPEECH["Piper TTS
+CPU · zero VRAM"]
     end
 
     subgraph SAFETY["Independent Safety Layer"]
-        LIDAR_S["LiDAR hard stop\n< 0.30m"]
-        VOID["Void check\n(disabled for cookoff)"]
+        LIDAR_S["LiDAR hard stop
+< 0.30m"]
+        VOID["Void check
+disabled for cookoff"]
     end
 
     BRIEFING --> COSMOS
     CAM & WC & BUF & LIDAR & OAKD & OVERLAY --> COSMOS
     COSMOS --> NAV & TARGET & ESCAPE & SPEECH
-    YOLO -->|"bearing + distance\n100ms callback"| MOTORS
+    YOLO -->|"bearing · 100ms callback"| MOTORS
     SAFETY -.->|"hardware override"| MOTORS
-
-    NAV & ESCAPE --> MOTORS["ESP32 Motors\nWaveshare UGV Beast UART"]
-    SPEECH --> TTS["tts.py\nnon-blocking queue"]
+    NAV & ESCAPE --> MOTORS["ESP32 Motors
+Waveshare UGV Beast"]
+    SPEECH --> TTS["tts.py
+non-blocking queue"]
 ```
 
 ---
