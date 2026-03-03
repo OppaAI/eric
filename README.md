@@ -1,8 +1,8 @@
 # ERIC — Edge Robotics Innovation by Cosmos
 
 **Mission-based Autonomous Unmanned Ground Robot powered by NVIDIA Cosmos Reason 2**  
-**Built in 10 days (Feb 20-Mar 1) · Jetson Orin Nano Super 8GB · Vancouver BC, Canada**
-**Author:** [OppaAI](https://github.com/OppaAI) · **License:** [Apache 2.0](LICENSE)
+**Built in 10 days (Feb 20-Mar 1) · Jetson Orin Nano Super 8GB**   
+**Author:** [OppaAI](https://github.com/OppaAI) · **Location:** Beautiful British Columbia, Canada · **License:** [Apache 2.0](LICENSE)
 
 [![Repo](https://img.shields.io/badge/Repo-OppaAI%2Feric-76B900)](https://github.com/OppaAI/eric)
 ![Status](https://img.shields.io/badge/Status-experimental-orange.svg)
@@ -195,7 +195,7 @@ Select a mission → press **ENGAGE** → watch Cosmos think.
 
 ## Built by
 
-Solo developer — Vancouver BC, Canada.
+Solo developer — Beautiful Britsh Columbia, Canada.
 No CS degree. Just curiosity, a Jetson, a tracked robot, and NVIDIA Cosmos Reason 2.
 Built in 10 days for the NVIDIA Cosmos Cookoff 2026.
 
