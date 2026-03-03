@@ -14,13 +14,12 @@
 ![CUDA](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia)
 
 ---
-
 ERIC is a **mission-based** autonomous robot that uses **NVIDIA Cosmos Reason 2** to navigate, reason about its environment, identify and confirm targets, escape obstacles, hold in-character conversations, and announce findings — all from live visual data, fully at the edge — no cloud, no server, not even internet.   
    
 Give it a mission YAML file in plain English, press ENGAGE, and it does the rest — all powered by a single vision-language model on consumer hardware.   
    
 Since people are coining new AI terms all the time, I am coining one right here: **MISSION**.   
-A structured plain-English task definition that tells the robot what to do, who to talk to, and how to behave — without writing a single line of code. In the future, I may let my robot planning its own missions. After all, it's just a YAML file.
+A structured plain-English task definition that tells the robot what to do, who to talk to, and how to behave — without writing a single line of code. In the future, I may let my robot plan its own missions. After all, it's just a YAML file.
 
 ---
 Before proceeding, please read the following disclaimer:
@@ -36,12 +35,24 @@ This project is a functional prototype developed for the NVIDIA Cosmos Cookoff.
 In case of any misbehaviour detected in the robot, please press the Emergency stop in the GUI, press the power button, or SSH in and run `python3 -c "from motors import motors; motors.stop()"`.
 
 ---
-
 ## How Cosmos Powers Everything
+**Cosmos plays 10 distinct roles in every mission** —  see [How ERIC Uses Cosmos](docs/COSMOS.md) for full details, JSON examples, and prompt internals:
 
+① **Mission Parsing** — reads plain-English briefing, extracts ordered mission steps   
+② **Navigation** — async video frames while moving → forward / stop / turn   
+③ **Scan & Search** — 360° sweep, `target_hunt` (per-position) or `video_sweep`   
+④ **Obstacle Escape** — camera + sensors → exact `turn_sec` to clear obstacle   
+⑤ **Eye-contact Gate** — confirms target is close and facing before approach   
+⑥ **Target Confirm** — description match + face sweep + eye contact   
+⑦ **Conversation** — extracts info, decides to follow up or move on (`[MOVE_ON]`)   
+⑧ **False-positive Check** — real find or hallucination?   
+⑨ **Photo Framing** — checks framing, nudges pan for best shot   
+⑩ **Announcement** — generates completion statement in mission voice   
+
+---
 → See [Architecture](docs/ARCHITECTURE.md) for how the mission loop, detection layers, and camera system work.
 
-Cosmos Reason 2 is not just the object detector. It **is** the robot's brain — every decision Eric makes flows through it.
+Cosmos Reason 2 is not just the object detector or visual data inferencer. It is the robot's **brain** — every decision Eric makes flows through it.
 
 ```mermaid
 flowchart TD
@@ -87,27 +98,13 @@ flowchart TD
     SPEECH --> TTS["tts.py\nnon-blocking queue"]
 ```
 
+---
 **Performance on Jetson Orin Nano 8GB:**
 - ~16–17 tokens/sec on vision calls
 - ~5–9 seconds per reasoning call
 - ~6.8 GB VRAM · Zero cloud · Zero network latency
----
-
-**Cosmos plays 10 distinct roles in every mission** —  see [How ERIC Uses Cosmos](docs/COSMOS.md) for full details, JSON examples, and prompt internals:
-
-① **Mission Parsing** — reads plain-English briefing, extracts ordered mission steps  
-② **Navigation Reasoning/Decision** — async video frames while moving → forward / stop / turn  
-③ **Target Scan/Search** — 360° sweep, `target_hunt` (async per-position) or `video_sweep`  
-④ **Obstacle Avoidance** — camera + sensors → exact `turn_sec` to clear obstacle  
-⑤ **Eye-contact Gate** — confirms target is close and facing camera before approach  
-⑥ **Target Identification** — description match + face sweep + eye contact check  
-⑦ **Human Interraction** — extracts info, decides to follow up or move on (`[MOVE_ON]`)  
-⑧ **Candidate Confirmation** — real find or hallucination?  
-⑨ **Photo Check** — checks framing, nudges pan for best shot  
-⑩ **Announcement** — generates completion statement in mission voice  
 
 ---
-
 ## Demo
 
 ### Search and Rescue Demo (Indoor · Real Casualty)
