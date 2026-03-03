@@ -68,26 +68,47 @@ flowchart TD
 
 ---
 
-## Smart Avoidance — Cosmos as Escape Director
-
 ```mermaid
 flowchart TD
-    TRIGGER["Obstacle Detected\nLiDAR < 0.30m or Cosmos wall_ahead"]
+    TRIGGER["Obstacle Detected
+LiDAR < 0.30m or Cosmos wall_ahead"]
 
-    L1["LAYER 1 — Instant Hardware\nmotors.stop() + backward 1.5s\nNo Cosmos · No delay · < 100ms"]
-    L2["LAYER 2 — Sensor Arc Scan\nLiDAR: front / left / right / rear arcs\nOAK-D: 3×3 depth grid\npick_clearest_turn() → best direction"]
+    L1["LAYER 1 — Instant Hardware
+motors.stop() + backward 1.5s
+No Cosmos · No delay · < 100ms"]
 
-    COSMOS_AV["🟢 LAYER 3 — COSMOS REASON 2\nINPUT: camera frame + LiDAR arcs + OAK-D grid\nOUTPUT: turn_left | turn_right | turn_back + exact turn_sec\nphysical_reasoning: 'Left arc 0.92m vs 0.18m front'"]
+    L2["LAYER 2 — Sensor Arc Scan
+LiDAR: front / left / right / rear
+OAK-D: 3×3 depth grid
+pick_clearest_turn() → best direction"]
+
+    COSMOS_AV["🟢 LAYER 3 — COSMOS REASON 2
+INPUT: camera frame + LiDAR arcs + OAK-D grid
+OUTPUT: turn_left | turn_right | turn_back + turn_sec
+physical_reasoning: 'Left arc 0.92m vs 0.18m front'"]
+
     style COSMOS_AV fill:#76b900,color:#000,stroke:#4a7a00,stroke-width:3px
 
-    TIMEOUT{"Cosmos replied\nwithin 20s?"}
-    TURN_C["Execute Cosmos direction\nfor Cosmos turn_sec"]
-    TURN_A["Execute arc-based direction\n(escalating turn duration)"]
-    VERIFY["Verify path clear\nLiDAR + OAK-D + quick visual scan"]
+    TIMEOUT{"Cosmos replied
+within 20s?"}
+
+    TURN_C["Execute Cosmos direction
+for Cosmos turn_sec"]
+
+    TURN_A["Execute arc-based direction
+escalating turn duration"]
+
+    VERIFY["Verify path clear
+LiDAR + OAK-D + quick visual scan"]
+
     CLEAR{"Path clear?"}
+
     RESUME["Resume forward motion"]
+
     RETRY["Retry — longer turn · attempt N+1"]
-    FORCE360["Force full 360° scan\nMAX_AVOID_ATTEMPTS reached"]
+
+    FORCE360["Force full 360° scan
+MAX_AVOID_ATTEMPTS reached"]
 
     TRIGGER --> L1 --> L2 --> COSMOS_AV --> TIMEOUT
     TIMEOUT -->|"Yes"| TURN_C --> VERIFY
@@ -259,27 +280,21 @@ Cosmos reports terrain type in every scan result. Eric maps it automatically via
 ---
 
 ## Challenges
-
-**Cosmos inference blocks everything.** 5–9 second calls block Python entirely. Solved with `ThreadPoolExecutor` (2 workers) and persistent `_CameraReader` daemon threads per camera that drain the V4L2 buffer continuously — otherwise V4L2 stalls and produces `select() timeout` errors during every Cosmos call.
-
-**V4L2 camera stalls on JetPack 6.2.** `cv2.VideoCapture` fills its kernel buffer when nobody reads. Fix: `_CameraReader` — one daemon thread per camera in a tight `cap.read()` loop, storing the latest frame in a lock-protected slot. `capture_frame()` just grabs from the slot. GStreamer pipeline (`v4l2src io-mode=2`, `appsink drop=1 max-buffers=1`) is tried first.
-
-**Webcam burning isochronous USB bandwidth.** Keeping the webcam open at 1 fps continuously reserved a USB isochronous slot on Bus 1, competing with pan-tilt, LiDAR, and OAK-D. Fix: `_LazyWebcamReader` — open device, drain warm-up frames, grab one frame, close immediately.
-
-**Void detection was backwards.** Original LiDAR void check treated `999m (no return) = clear`. At a staircase top the laser falls through open air and returns nothing. Fix: count valid returns in the front arc — < 15% ratio = void. (Disabled for cookoff — false positives on flat floors at 15cm mount.)
-
-**Motor direction is inverted.** UGV Beast negative speed = forward. Correction layer in `motors.py` so all callers use natural semantics (`forward()`, `backward()`).
-
-**UART byte corruption on JetPack 6.2.** Commands sent as strings occasionally corrupted at the ESP32 end. Fix: send every command byte-by-byte with 1ms inter-byte delay.
-
-**Wide-angle camera loses small objects.** Lego figures are only a few pixels wide at 640×480. Fix: `multi_zoom_scan()` — one wide frame for context plus 4 digitally cropped and upscaled strips in the same Cosmos call.
-
-**Cosmos JSON output is inconsistent.** Sometimes markdown fences, sometimes explanation text, sometimes a list instead of an object. `_parse_json()` handles all cases: strips fences, finds `{...}`, handles array-wrapped objects (merging flags with OR logic), remaps field aliases (`"reasoning"` → `"physical_reasoning"`, etc.), falls back to safe defaults rather than crashing the mission loop.
-
-**Cosmos 2B leaks chain-of-thought.** The 2B model sometimes outputs internal monologue before the actual answer. Fix: `_strip_thinking()` detects reasoning-preamble patterns (`"Alright, let me think..."`, `"the user asks..."`) and strips them before TTS.
-
-**TTS blocks motor control.** `feed(text).play()` blocks until audio finishes. Fix: dedicated background TTS worker thread and a 1-slot queue. `eric_say()` clears stale items and returns instantly.
-
-**Alarm tones — no internet, no audio files.** All tones generated mathematically at runtime using `struct.pack` to build raw PCM waveforms at 22050 Hz, played via pygame. Zero external files, fully offline.
-
-**State bleeding between missions.** After 3 missions, Cosmos slows down and old mission context leaks into new one. Fix: `stop_mission()` recycles the thread executor, flushes vLLM KV cache, calls `reset_mission_context()`, and forces Python GC.
+   
+**1. Void detection disabled**   
+The fix exists in code but is turned off for the cookoff. If you're demoing on low-texture floors, this is live risk — no floor-drop protection.   
+   
+**2. Wide-angle camera loses small objects**   
+multi_zoom_scan() helps but it's a digital crop of a 640×480 source — you're upscaling pixels, not getting real resolution. Small or partially occluded targets at range are still unreliable.   
+   
+**3. Cosmos JSON inconsistency**   
+_parse_json() handles the known cases but Cosmos can still invent new alias patterns or output structures that haven't been seen before. The fallback to safe defaults means silent failures rather than crashes — but the mission just moves on as if nothing was found.   
+   
+**4. Cosmos 2B chain-of-thought leaking**   
+_strip_thinking() catches known patterns but the 2B model can vary its preamble phrasing. Unstripped monologue going to TTS would sound wrong in the demo video.   
+    
+**5. UART byte corruption**  
+The 1ms inter-byte delay is a workaround, not a fix. Under load on the Jetson (Cosmos inference + camera threads + GUI) the timing can drift. Occasional missed commands are possible.   
+   
+**6. Cosmos inference latency**   
+5–9 seconds is managed but not solved. The async pipeline hides it during navigation but the confirmation pipeline (description check → face sweep → eye contact → photo) is sequential Cosmos calls — that's potentially 30–40 seconds at a target before the siren fires.
