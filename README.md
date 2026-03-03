@@ -225,7 +225,31 @@ In the GUI -> "Mission Briefing" section, Select a mission → press **ENGAGE** 
 | [Deployment Guide](docs/DEPLOYMENT.md) | Step-by-step setup, full `.env` config, dependencies, troubleshooting |
 
 ---
+## Known Limitations
 
+The limitations are mostly due to using Cosmos Reason 2 without training / fine-tuning with custom data and consumer hardware limitations, and could be easily fixed with training Cosmos Reasons 2 with gathered datasets and better hardware configuration/optimization.
+    
+1. **Cosmos sometimes returns unexpected output**   
+The 2B model occasionally invents new field names or wraps the answer in an unexpected format. The parser catches known cases and falls back to safe defaults, but an unseen pattern means Eric silently skips the find and keeps searching.   
+   
+3. **Cosmos sometimes thinks out loud**    
+The 2B model occasionally outputs its internal reasoning before the actual answer. Known patterns are stripped before Eric speaks, but new phrasing variations could slip through and Eric would say the wrong thing out loud.   
+
+4. **Cosmos has long latency to confirm a find**   
+The 2B model detection confidence is low due to hallucination issue. In order to produce more accurate results, each reasoning call may take 5–9 seconds, very critical in real-time phyiscal actions. Once Eric spots a casualty, it runs two back-to-back Cosmos calls to verify before the siren fires. This means 15–20 seconds between "Eric sees you" and "siren goes off." 
+
+5. **No floor-drop protection**   
+The void detection featyre is turned off due to high false positive ratio from hardware limitation.   
+Eric cannot detect stairs or sudden drops. If the demo floor has a step down, Eric will drive off it.   
+   
+6. **Small objects are hard to see**   
+Low resolution visual data as well as tranmission latency due to camera hardware limitation
+Small targets far away are only a few pixels wide. The zoom scan helps but it's just cropping and upscaling the same low-resolution image — no extra detail is added.   
+
+7. **Motor commands occasionally get dropped**
+UART commands to the ESP32 are sent byte-by-byte with a small delay between each to avoid corruption. Under heavy load — Cosmos inference running, cameras streaming, GUI updating — the timing can slip and a command gets missed, causing Eric to briefly ignore a stop or turn instruction.
+
+---
 ## Built by
 
 Solo developer — Beautiful Britsh Columbia, Canada.
