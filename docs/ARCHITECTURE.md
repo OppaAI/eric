@@ -22,7 +22,6 @@ flowchart TD
         L1["Layer 1 — LiDAR + OAK-D\nHardware stop/slow\nNo Cosmos · < 100ms"]
         L2["Layer 2 — YOLO (OAK-D Myriad X)\nPerson/animal detection\nDistance + bearing ground truth"]
         L3["🟢 Layer 3 — Cosmos Vision\nTarget confirmation + navigation\nScene reasoning per frame"]
-        style L2 fill:#0091BD,color:#fff,stroke:#006a8e,stroke-width:2px
         style L3 fill:#76b900,color:#000,stroke:#4a7a00,stroke-width:2px
     end
 
