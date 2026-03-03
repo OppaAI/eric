@@ -84,6 +84,20 @@ flowchart TD
 - ~16–17 tokens/sec on vision calls
 - ~5–9 seconds per reasoning call
 - ~6.8 GB VRAM · Zero cloud · Zero network latency
+---
+
+**Cosmos plays 10 distinct roles in every mission:**
+
+① **Mission Parsing** — reads plain-English briefing, extracts ordered mission steps  
+② **Navigation Reasoning/Decision** — async video frames while moving → forward / stop / turn  
+③ **Target Search/Identification** — 360° sweep, `target_hunt` (async per-position) or `video_sweep`  
+④ **Obstacle Avoidance** — camera + sensors → exact `turn_sec` to clear obstacle  
+⑤ **Eye-contact Gate** — confirms target is close and facing camera before approach  
+⑥ **Target Confirmation** — description match + face sweep + eye contact check  
+⑦ **Human Interraction** — extracts info, decides to follow up or move on (`[MOVE_ON]`)  
+⑧ **False-Positive Check** — real find or hallucination?  
+⑨ **Photo Check** — checks framing, nudges pan for best shot  
+⑩ **Announcement** — generates completion statement in mission voice  
 
 ---
 
