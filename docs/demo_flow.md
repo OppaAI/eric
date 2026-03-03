@@ -1,56 +1,64 @@
 ```mermaid
 flowchart TD
 
-    START(["🤖 ERIC"])
+    START(["🤖 ERIC
+    search_and_rescue.yaml
+    alarm_type: siren"])
 
     subgraph SEARCH ["🔍 SEARCH"]
-        SWEEP[["🟩 COSMOS REASON2
-        Initial 360° sweep"]]
+        SWEEP[["🟢 COSMOS REASON2
+        Initial 360° sweep
+        Call out every 30s"]]
         MOVE["🚗 Move forward
         LiDAR guard · YOLO poll 100ms"]
-        QUICK[["🟩 COSMOS REASON2
+        QUICK[["🟢 COSMOS REASON2
         Quick scan — stopped
         every 3 move clips"]]
-        SCAN_360[["🟩 COSMOS REASON2
+        SCAN_360[["🟢 COSMOS REASON2
         Full 360° scan
         every 6 quick scans or 3 empty scans"]]
-        REJECT[["🟩 COSMOS REASON2
-        Wall-E rejected
-        ✗ boxy · ✗ no ears · ✗ no red cheeks"]]
+        REJECT[["🟢 COSMOS REASON2
+        Person standing — not a casualty
+        ✗ upright · ✗ no distress · ✗ moving normally"]]
     end
 
     subgraph FIND ["🎯 FIND"]
-        CONFIRM[["🟩 COSMOS REASON2
-        Pikachu confirmed
-        ✅ round · yellow · ears · red cheeks"]]
+        CONFIRM[["🟢 COSMOS REASON2
+        Casualty confirmed
+        ✅ person on floor · ✅ motionless · ✅ injured"]]
         APPROACH["🚗 Approach
-        YOLO steering · LiDAR gate at 0.8m"]
+        YOLO steering · LiDAR gate at 0.65m"]
     end
 
     subgraph RESCUE ["🚨 RESCUE"]
-        SIREN["🚨 Siren · Announce location"]
-        PHOTO[["🟩 COSMOS REASON2
+        SIREN["🚨 Siren · LED strobe · TTS broadcast
+        'EMERGENCY — casualty located'"]
+        PHOTO[["🟢 COSMOS REASON2
         Dual-cam photo
         Blur check · Auto-centre both cams"]]
-        STAY["🤖 Stay with Pikachu"]
+        REPORT[["🟢 COSMOS REASON2
+        Condition report
+        conscious/unconscious · injuries · exact location"]]
+        STAY["🤖 Stay with casualty
+        Repeat broadcast every 15s"]
     end
 
     START --> SWEEP
-    SWEEP -- "not found" --> MOVE
+    SWEEP -- "no casualty" --> MOVE
     MOVE --> QUICK
-    QUICK -- "not found" --> MOVE
+    QUICK -- "no casualty" --> MOVE
     QUICK -- "empty scans threshold" --> SCAN_360
-    SCAN_360 -- "not found" --> MOVE
-    QUICK -- "yellow shape" --> REJECT
-    SCAN_360 -- "yellow shape" --> REJECT
-    REJECT -- "not Pikachu" --> MOVE
-    QUICK -- "candidate" --> CONFIRM
-    SCAN_360 -- "candidate" --> CONFIRM
-    SWEEP -- "candidate" --> CONFIRM
+    SCAN_360 -- "no casualty" --> MOVE
+    QUICK -- "person seen" --> REJECT
+    SCAN_360 -- "person seen" --> REJECT
+    REJECT -- "upright / not distressed" --> MOVE
+    QUICK -- "person down" --> CONFIRM
+    SCAN_360 -- "person down" --> CONFIRM
+    SWEEP -- "person down" --> CONFIRM
     CONFIRM -- "false positive" --> MOVE
-    CONFIRM -- "confirmed ✅" --> APPROACH
-    APPROACH --> SIREN --> PHOTO --> STAY
+    CONFIRM -- "casualty confirmed ✅" --> APPROACH
+    APPROACH --> SIREN --> PHOTO --> REPORT --> STAY
 
     classDef cosmos fill:#76b900,stroke:#76b900,stroke-width:3px,color:#000000
-    class SWEEP,QUICK,SCAN_360,REJECT,CONFIRM,PHOTO cosmos
+    class SWEEP,QUICK,SCAN_360,REJECT,CONFIRM,PHOTO,REPORT cosmos
 ```
