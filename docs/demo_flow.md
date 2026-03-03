@@ -1,3 +1,9 @@
+# ERIC — Flow Diagram of the Demo
+
+← [Back to README](../README.md)
+
+---
+
 ```mermaid
 flowchart TD
 
