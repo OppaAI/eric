@@ -15,7 +15,11 @@
 
 ---
 
-ERIC is a tracked ground robot that runs **NVIDIA Cosmos Reason 2** fully at the edge — no cloud, no server, not even internet. Give it a mission in plain English, press ENGAGE, and it navigates, reasons, talks to people, avoids obstacles, and announces what it finds — all powered by a single vision-language model on consumer hardware.
+ERIC is a tracked ground robot that runs **NVIDIA Cosmos Reason 2** fully at the edge — no cloud, no server, not even internet.  
+Since people are coming AI terms everyday,
+I am coining a new term today - MISSON.  
+ERIC is a mission-based robot. Give it a mission yaml file in plain English, press ENGAGE, and it navigates, reasons, talks to people, avoids obstacles, and announces what it finds — all powered by a single vision-language model on consumer hardware.  
+In the future, I may program the robot to make its own mission. After all, it's just a yaml file.
 
 ---
 Before proceeding, please read the following disclaimer:
