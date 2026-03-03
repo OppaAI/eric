@@ -20,7 +20,7 @@ Since people are coming AI terms everyday,
 I am coining a new term today - **MISSION**. 
  
 ERIC is a **mission-based** AI Autonomous Robot. Give it a mission yaml file in plain English, press ENGAGE, and it navigates, reasons, talks to people, avoids obstacles, and announces what it finds — all powered by a single vision-language model on consumer hardware.  
-In the future, I may program the robot to make its own mission. After all, it's just a yaml file.
+In the future, I may program the robot to plan its own mission. After all, it's just a yaml file.
 
 ---
 Before proceeding, please read the following disclaimer:
