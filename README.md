@@ -227,33 +227,31 @@ In the GUI -> "Mission Briefing" section, Select a mission → press **ENGAGE** 
 ---
 ## Known Limitations
 
-The limitations are mostly due to using Cosmos Reason 2 without training / fine-tuning with custom data and consumer hardware limitations, and could be easily fixed with training Cosmos Reasons 2 with gathered datasets and better hardware configuration/optimization.
-    
-1. **Cosmos sometimes returns unexpected output**   
-The 2B model occasionally invents new field names or wraps the answer in an unexpected format. The parser catches known cases and falls back to safe defaults, but an unseen pattern means Eric silently skips the find and keeps searching.   
-   
-3. **Cosmos sometimes thinks out loud**    
-The 2B model occasionally outputs its internal reasoning before the actual answer. Known patterns are stripped before Eric speaks, but new phrasing variations could slip through and Eric would say the wrong thing out loud.   
+The limitations are mostly due to using Cosmos Reason 2 without fine-tuning on custom data and consumer hardware constraints, and could be improved with a purpose-built training dataset and better hardware configuration.
 
-4. **Cosmos has long latency to confirm a find**   
-The 2B model detection confidence is low due to hallucination issue. In order to produce more accurate results, each reasoning call may take 5–9 seconds, very critical in real-time phyiscal actions. Once Eric spots a casualty, it runs two back-to-back Cosmos calls to verify before the siren fires. This means 15–20 seconds between "Eric sees you" and "siren goes off." 
+1. **Cosmos sometimes returns unexpected output**    
+The 2B model occasionally invents new field names or wraps the answer in an unexpected format. The parser catches known cases and falls back to safe defaults, but an unseen pattern means Eric silently skips the find and keeps searching.
 
-5. **No floor-drop protection**   
-The void detection featyre is turned off due to high false positive ratio from hardware limitation.   
-Eric cannot detect stairs or sudden drops. If the demo floor has a step down, Eric will drive off it.   
-   
-6. **Small objects are hard to see**   
-Low resolution visual data as well as tranmission latency due to camera hardware limitation
-Small targets far away are only a few pixels wide. The zoom scan helps but it's just cropping and upscaling the same low-resolution image — no extra detail is added.   
+2. **Cosmos sometimes thinks out loud**   
+The 2B model occasionally outputs its internal reasoning before the actual answer. Known patterns are stripped before Eric speaks, but new phrasing variations could slip through and Eric would say the wrong thing out loud.
 
-7. **Motor commands occasionally get dropped**
-UART commands to the ESP32 are sent byte-by-byte with a small delay between each to avoid corruption. Under heavy load — Cosmos inference running, cameras streaming, GUI updating — the timing can slip and a command gets missed, causing Eric to briefly ignore a stop or turn instruction.
+3. **Cosmos is slow to confirm a find**   
+Each reasoning call takes 5–9 seconds. Without fine-tuning, the model's detection confidence is low enough that two back-to-back verification calls are needed before committing to a find. This means 15–20 seconds between "Eric sees you" and "siren goes off" — not acceptable for a real safety system.
+
+4. **No floor-drop protection**   
+Void detection is disabled due to too many false positives on flat floors at the current camera mount height. Eric cannot detect stairs or sudden drops.
+
+5. **Small objects are difficult to perceive identify**   
+The camera is 640×480 wide-angle with USB transmission latency. Small targets at range are only a few pixels wide. The zoom scan helps but it is just cropping and upscaling the same low-resolution image — no real detail is added.
+
+6. **Motor commands occasionally get dropped**   
+UART commands to the ESP32 are sent byte-by-byte with a small delay to avoid corruption. Under heavy load — Cosmos inference, cameras streaming, and GUI all running simultaneously — timing can slip and a command gets missed, causing Eric to briefly ignore a stop or turn instruction.
 
 ---
 ## Built by
 
-Solo developer — Beautiful Britsh Columbia, Canada.
-No CS degree. Just curiosity, a Jetson, a tracked robot, and NVIDIA Cosmos Reason 2.
-Built in 10 days for the NVIDIA Cosmos Cookoff 2026.
+Solo developer — Beautiful Britsh Columbia, Canada. No CS/ML degree.   
+Just curiosity, a tracked robot that moves about on its own, powered by NVIDIA Cosmos Reason 2 running on a Jetson.   
+Built in 10 days (Feb 20-Mar 1) for the NVIDIA Cosmos Cookoff 2026.
 
 https://github.com/OppaAi/eric
