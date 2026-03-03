@@ -51,7 +51,7 @@ circum_forward_sec:      0.0
 scan_strategy:      target_hunt
 loop_mission:       false
 approach_on_detect: true
-detect_distance:    0.2
+detect_distance:    0.5
 
 characters:
   - name: "Pikachu"
