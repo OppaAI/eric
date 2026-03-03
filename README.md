@@ -109,9 +109,6 @@ The operator lies on the floor as the casualty. Eric navigates the room autonomo
 
 ---
 
-### Nature Explorer (Observation · Video Sweep)
-
-Uses `scan_strategy: video_sweep` — Eric rotates the chassis 360° continuously while recording, sends the full panoramic video to Cosmos as one call. Cosmos narrates what it sees poetically and photographs each find. Best demonstrates the temporal reasoning capability of Cosmos Reason 2.
 
 ---
 
