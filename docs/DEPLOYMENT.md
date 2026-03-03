@@ -48,7 +48,7 @@ SERIAL_PORT=/dev/ttyTHS1
 
 # ── Cosmos (vLLM) ────────────────────────────────────────────
 VLLM_URL=http://localhost:8000/v1/chat/completions
-COSMOS_MODEL=embedl/Cosmos-Reason2-2B-W4A16
+COSMOS_MODEL=embedl/Cosmos-Reason2-2B-W4A16-Edge2
 
 # ── TTS (Piper) ───────────────────────────────────────────────
 PIPER_BINARY=/home/YOUR_USER/piper/piper
@@ -122,7 +122,7 @@ Verify Cosmos is responding:
 curl -s http://localhost:8000/v1/chat/completions \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "embedl/Cosmos-Reason2-2B-W4A16",
+    "model": "embedl/Cosmos-Reason2-2B-W4A16-Edge2",
     "messages": [{"role": "user", "content": "Say: ERIC online"}],
     "max_tokens": 20
   }' | python3 -m json.tool
