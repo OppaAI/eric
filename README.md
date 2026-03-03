@@ -58,7 +58,18 @@ Cosmos Reason 2 is not just the object detector or visual data inferencer. It is
 flowchart TD
     BRIEFING(["Mission Briefing\n'Search and rescue — find the casualty'\nplain English"])
 
-    COSMOS["🟢 NVIDIA COSMOS REASON 2\nembedl/Cosmos-Reason2-2B-W4A16-Edge2\nvia vLLM on Jetson\n\n① Parse mission steps from English\n② Navigate — async video frames → forward/stop/turn\n③ 360° scan — target_hunt (async per-position) or video_sweep\n④ Escape obstacles — camera + sensors → turn_sec\n⑤ Eye-contact gate — close and facing?\n⑥ Target confirm — description match + face sweep + eye contact\n⑦ Character conversation — extract info / move on [MOVE_ON]\n⑧ Confirm target — real find or false positive?\n⑨ Photo centre check — pan nudge for framing\n⑩ Announce completion — in-character voice"]
+    COSMOS["🟢 COSMOS REASON 2
+(vLLM on Jetson)
+① Mission Parsing
+② Navigation
+③ Scan & Search
+④ Obstacle Escape
+⑤ Eye-contact Gate
+⑥ Target Confirm
+⑦ Conversation
+⑧ False-positive Check
+⑨ Photo Framing
+⑩ Announcement"]
 
     style COSMOS fill:#76b900,color:#000,stroke:#4a7a00,stroke-width:3px
 
@@ -73,7 +84,6 @@ flowchart TD
 
     subgraph LAYER2["Layer 2 — YOLO (OAK-D Myriad X)"]
         YOLO["Person/animal detection\nStereo depth + bearing\nCallback → _ms.yolo_person_detected"]
-        style YOLO fill:#0091BD,color:#fff,stroke:#006a8e,stroke-width:2px
     end
 
     subgraph OUTPUTS["Cosmos Outputs → Robot Actions"]
@@ -100,9 +110,11 @@ flowchart TD
 
 ---
 **Performance on Jetson Orin Nano 8GB:**
-- ~16–17 tokens/sec on vision calls
+- ~16–17 tokens/sec on multi-frame vision calls
+- ~50 tokens/sec on single-frame vision calls
+- ~36–40 tokens/sec on text inference
 - ~5–9 seconds per reasoning call
-- ~6.8 GB VRAM · Zero cloud · Zero network latency
+- ~4.5–6.8 GB VRAM
 
 ---
 ## Demo
@@ -130,24 +142,23 @@ The operator lies on the floor as the casualty. Eric navigates the room autonomo
 **Note:** Due to YOLO (OAK-D Myriad X) is also not trained on person lying on the floor, this demo is mostly based on Cosmos Reason 2
 
 ---
-
 ## Hardware
 
 | Component | Model | Cost (USD) |
 |---|---|---|
 | SBC | Jetson Orin Nano Super 8GB | ~$250 |
 | Robot | Waveshare UGV Beast (tracked) | ~$600 |
-| LiDAR | YDLIDAR D500 360° | Included with Robot |
-| Depth Camera | OAK-D Lite (stereo + YOLO Myriad X) | Included with Robot |
-| Webcam | USB | ~$20 (Old one lying around) |
+| Webcam | USB | ~$20 |
+| LiDAR | YDLIDAR D500 360° | included with robot · optional |
+| Depth Camera | OAK-D Lite (stereo + YOLO Myriad X) | included with robot · optional |
 | **Total** | | **< $1000 USD** |
 
 ---
-
 ## Software Requirements
 
 - JetPack 6.2.2 (Ubuntu 22.04 · CUDA 12.6)
-- Python 3.10+ · `uv` package manager
+- Python 3.10+
+- `uv` package manager
 - Docker (for vLLM Cosmos container)
 - ROS2 Humble *(optional — for LiDAR + Nav2)*
 
@@ -160,22 +171,33 @@ uv sync
 → See **[Deployment Guide](docs/DEPLOYMENT.md)** for full setup steps.
 
 ---
-
 ## Quick Start
 
 ```bash
-# 1. Start Cosmos vLLM (~3 min to load)
-bash launch/cosmos.sh
-docker logs -f vllm-server   # wait for "Application startup complete"
+# 1. Configure environment (first-time only)
+cp .env.example .env
+nano .env                    # set SERIAL_PORT, camera indices, Piper paths
 
-# 2. Start ERIC
+# 2. Install dependencies (first-time only)
+uv sync
+
+# 3. Start Cosmos vLLM (first-time only, or after rebuilding the container)
+bash launch/cosmos.sh        # takes ~3 min to load
+docker logs -f vllm-server   # wait for: Application startup complete
+
+# 4. Start LiDAR (optional)
+bash launch/lidar.sh
+
+# 5. Start ERIC
 uv run main.py
 
-# 3. Open GUI
-http://JETSON_IP:7860
+# 6. Open GUI
+http://<JETSON_IP>:7860
 ```
 
-Select a mission → press **ENGAGE** → watch Cosmos think.
+In the GUI -> "Mission Briefing" section, Select a mission → press **ENGAGE** → watch Cosmos think.
+
+→ See [Deployment Guide](docs/DEPLOYMENT.md) for full `.env` config and troubleshooting.
 
 ---
 
