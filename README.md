@@ -39,7 +39,7 @@ In case of any misbehaviour detected in the robot, please press the Emergency st
 
 ## How Cosmos Powers Everything
 
-→ SSee [Architecture](docs/ARCHITECTURE.md) for how the mission loop, detection layers, and camera system work.
+→ See [Architecture](docs/ARCHITECTURE.md) for how the mission loop, detection layers, and camera system work.
 
 Cosmos Reason 2 is not just the object detector. It **is** the robot's brain — every decision Eric makes flows through it.
 
@@ -111,6 +111,8 @@ flowchart TD
 ## Demo
 
 ### Search and Rescue Demo (Indoor · Real Casualty)
+
+→ See [Demo Flow](docs/demo_flow.md) for what roles Cosmos Reason 2 model play in this demo.
 
 *Mission file: [`search_and_rescue.yaml`](missions/search_and_rescue.yaml) — see [Missions](docs/MISSIONS.md) for all missions and YAML schema.*
 
