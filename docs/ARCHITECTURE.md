@@ -281,20 +281,17 @@ Cosmos reports terrain type in every scan result. Eric maps it automatically via
 
 ## Challenges
    
-**1. Void detection disabled**   
-The fix exists in code but is turned off for the cookoff. If you're demoing on low-texture floors, this is live risk — no floor-drop protection.   
+**1. Cosmos inference latency**   
+5–9 seconds is managed but not solved. The async pipeline hides it during navigation but the confirmation pipeline (description check → face sweep → eye contact → photo) is sequential Cosmos calls — that's potentially 30–40 seconds at a target before the siren fires.   
    
-**2. Wide-angle camera loses small objects**   
-multi_zoom_scan() helps but it's a digital crop of a 640×480 source — you're upscaling pixels, not getting real resolution. Small or partially occluded targets at range are still unreliable.   
-   
-**3. Cosmos JSON inconsistency**   
+**2. Cosmos JSON inconsistency**   
 _parse_json() handles the known cases but Cosmos can still invent new alias patterns or output structures that haven't been seen before. The fallback to safe defaults means silent failures rather than crashes — but the mission just moves on as if nothing was found.   
    
-**4. Cosmos 2B chain-of-thought leaking**   
-_strip_thinking() catches known patterns but the 2B model can vary its preamble phrasing. Unstripped monologue going to TTS would sound wrong in the demo video.   
-    
+**3. Void detection disabled**   
+The fix exists in code but is turned off for the cookoff. If you're demoing on low-texture floors, this is live risk — no floor-drop protection.   
+   
+**4. Wide-angle camera loses small objects**   
+multi_zoom_scan() helps but it's a digital crop of a 640×480 source — you're upscaling pixels, not getting real resolution. Small or partially occluded targets at range are still unreliable.   
+   
 **5. UART byte corruption**  
 The 1ms inter-byte delay is a workaround, not a fix. Under load on the Jetson (Cosmos inference + camera threads + GUI) the timing can drift. Occasional missed commands are possible.   
-   
-**6. Cosmos inference latency**   
-5–9 seconds is managed but not solved. The async pipeline hides it during navigation but the confirmation pipeline (description check → face sweep → eye contact → photo) is sequential Cosmos calls — that's potentially 30–40 seconds at a target before the siren fires.
