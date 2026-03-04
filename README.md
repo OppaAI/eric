@@ -11,7 +11,9 @@
 ![ARM](https://img.shields.io/badge/ARM64-aarch64-0091BD?logo=arm)
 ![LLM](https://img.shields.io/badge/Model-Cosmos%20Reason2%202B-76B900?logo=nvidia)
 ![JetPack](https://img.shields.io/badge/JetPack-6.2.2-76B900?logo=nvidia)
-![CUDA](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia)
+![CUDA](https://img.shields.io/badge/CUDA-12.6-76B900?logo=nvidia)   
+   
+For more comprehensive doucmentation: [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/OppaAI/eric)
 
 ---
 ERIC is a **mission-based** autonomous robot that uses **NVIDIA Cosmos Reason 2** to navigate, reason about its environment, identify and confirm targets, escape obstacles, hold in-character conversations, and announce findings — all from live visual data, fully at the edge — no cloud, no server, not even internet.   
