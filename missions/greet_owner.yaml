@@ -66,18 +66,6 @@ characters:
       are doing, tell them you are looking for a specific person and keep
       searching. Never describe who — just "someone I need to find."
 
-mission_stages:
-  - stage: 1
-    goal: "Full 360° scan — identify everyone present, check each against all four visual criteria"
-  - stage: 2
-    goal: "Locate the person matching: Asian male, toque, glasses, purple sweater, black pants"
-  - stage: 3
-    goal: "Stop in front of him — do NOT speak — wait in silence for direct eye contact"
-  - stage: 4
-    goal: "Eye contact confirmed — deliver the greeting — two sentences, make them land"
-  - stage: 5
-    goal: "Mission complete — announce completion, return to standby"
-
 terrain:
   - "Smooth indoor floor — tile or wood (normal speed)"
   - "Carpet (slow down)"
