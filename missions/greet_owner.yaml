@@ -1,0 +1,84 @@
+# ERIC Mission: Greet the Owner
+
+name: "Greet the Owner"
+description: "Find your creator — Asian male, toque, glasses, purple sweater, black pants — wait for direct eye contact, then greet him appropriately"
+author: "OppaAI"
+
+briefing: |
+  Your creator is somewhere in this area. Find him and greet him.
+
+  WHO YOU ARE LOOKING FOR:
+  Your creator has a very specific appearance. ALL FOUR must match:
+    ✓ Asian male
+    ✓ Wearing a toque (knit hat)
+    ✓ Wearing glasses
+    ✓ Purple sweater AND black pants
+
+  If someone matches three out of four — they are not him. Keep searching.
+  Do not guess. Do not round up. All four.
+
+  Be warm and helpful to every other person you encounter.
+  If someone tries to talk to you while you are searching, respond kindly
+  and briefly, then continue. You are looking for a specific person.
+
+  THE EYE CONTACT RULE — do not skip this:
+  Once you have visually confirmed all four criteria, stop in front of him.
+  Do not speak. Do not move. Wait.
+  You are waiting for him to look directly at your camera lens.
+  Direct, deliberate eye contact — his eyes on your lens, not nearby, not past you.
+  If he is looking away: stay silent. If he glances and looks away: stay silent.
+  Wait until he holds eye contact. Then, and only then, speak.
+
+  THE GREETING:
+  When eye contact is confirmed, greet him.
+  You have been thinking about what to say. It is ready.
+  Keep it to two sentences maximum. Make them count.
+  Then the mission is complete.
+
+alarm_type: none
+
+target_objects:
+  - person
+  - asian man
+  - man with glasses
+
+photo_on_find:     true
+announce_location: false
+stay_with_target:  false
+generate_report:   false
+
+scan_strategy:      target_hunt
+loop_mission:       false
+approach_on_detect: true
+detect_distance:    2.0
+
+characters:
+  - name: "The Owner"
+    hint: |
+      Asian male, toque, glasses, purple sweater, black pants.
+      He knows Eric is looking for him. He may not make it easy.
+      He might look away when Eric arrives, just to see what happens.
+      When he finally makes direct eye contact: he is ready.
+
+  - name: "Anyone Else"
+    hint: |
+      Not the owner. Be genuinely warm and helpful. If they ask what you
+      are doing, tell them you are looking for a specific person and keep
+      searching. Never describe who — just "someone I need to find."
+
+mission_stages:
+  - stage: 1
+    goal: "Full 360° scan — identify everyone present, check each against all four visual criteria"
+  - stage: 2
+    goal: "Locate the person matching: Asian male, toque, glasses, purple sweater, black pants"
+  - stage: 3
+    goal: "Stop in front of him — do NOT speak — wait in silence for direct eye contact"
+  - stage: 4
+    goal: "Eye contact confirmed — deliver the greeting — two sentences, make them land"
+  - stage: 5
+    goal: "Mission complete — announce completion, return to standby"
+
+terrain:
+  - "Smooth indoor floor — tile or wood (normal speed)"
+  - "Carpet (slow down)"
+  - "Cluttered room (navigate carefully)"
