@@ -219,7 +219,7 @@ EMPTY_SCAN_LIMIT        = 5    # trigger 360 after 5 consecutive empty scans
 SCANS_BEFORE_360        = 10   # periodic 360 every 10 quick scans
 MAX_AVOID_ATTEMPTS      = 3    # force 360 after this many avoid failures
 TARGET_CONFIRM_NEEDED   = 1    # only needs 1 positive scan to approach
-DETECTION_CONFIDENCE_MIN = 0.0   # DISABLED for cookoff — was 0.55, always 0.0 from Cosmos
+DETECTION_CONFIDENCE_MIN = 0.0   # Cosmos does not emit confidence scores — always 0.0
                                   # below this, sweep detections are treated as hallucinations and skipped
 
 
@@ -311,7 +311,7 @@ def _speed_for_terrain(terrain: str) -> float | None:
 @dataclasses.dataclass
 class MissionStep:
     step_num:    int
-    target:      str          # e.g. "Princess Leia", "R2-D2", "deer"
+    target:      str          # e.g. "person", "robot", "cat"
     action:      str          # see ACTION_TYPES below
     message:     str = ""     # text for deliver_message / speak_to
     photo_count: int = 1      # number of sharp photos to capture
@@ -515,20 +515,20 @@ Valid action types:
 JSON schema per step:
 {{
   "step_num":    1,
-  "target":      "Princess Leia",
+  "target":      "person",
   "action":      "deliver_message",
-  "message":     "Help me Obi-Wan, you're my only hope",
+  "message":     "Package delivered.",
   "photo_count": 1,
   "wait_sec":    20
 }}
 
 Example for multi-step mission:
 [
-  {{"step_num": 1, "target": "Princess Leia", "action": "deliver_message",
-    "message": "Help me Obi-Wan, you're my only hope", "photo_count": 1, "wait_sec": 20}},
-  {{"step_num": 2, "target": "R2-D2", "action": "speak_to",
+  {{"step_num": 1, "target": "person", "action": "deliver_message",
+    "message": "Package delivered.", "photo_count": 1, "wait_sec": 20}},
+  {{"step_num": 2, "target": "robot", "action": "speak_to",
     "message": "", "photo_count": 1, "wait_sec": 30}},
-  {{"step_num": 3, "target": "deer", "action": "photograph",
+  {{"step_num": 3, "target": "cat", "action": "photograph",
     "message": "", "photo_count": 3, "wait_sec": 10}}
 ]
 
@@ -1028,7 +1028,7 @@ def _sensor_context() -> str:
                 elif d < 0.60:
                     lines.append("⚠️  OAK-D: obstacle within caution range (<0.60m) — slow down")
 
-            # Floor-drop check DISABLED for cookoff — false positives on flat floors
+            # Floor-drop check disabled — false positives on flat floors
             drop = {"void_detected": False}  # get_floor_drop()
             if drop["void_detected"] and drop["confidence"] == "high":
                 edge = drop["floor_edge_m"]
@@ -1106,12 +1106,12 @@ def _sensor_context() -> str:
 
 def _void_check() -> dict:
     """
-    Central void/drop safety gate — DISABLED for cookoff.
+    Central void/drop safety gate — disabled.
     OAK-D void detection causes false positives on low-texture floors at 15cm mount.
-    LiDAR handles all obstacle safety. Re-enable after cookoff with better tuning.
+    LiDAR handles all obstacle safety.
     """
     return {"void": False, "confidence": "low",
-            "reason": "void check disabled for cookoff", "source": "none"}
+            "reason": "void check disabled", "source": "none"}
 
 
 def _move_forward(duration_sec: float = 2.0, distance_m: float = 1.5):
@@ -4880,13 +4880,12 @@ def _handle_yolo_detection() -> bool:
     # ── Check if YOLO label matches the current mission step target ────────────
     # If it does, YOLO hardware has confirmed the target at close range — no
     # need for a Cosmos vision call. Execute the step action directly.
-    # "person" YOLO label matches any human-target step (Leia, John, Alex etc.)
+    # "person" YOLO label matches any human-target step
     _YOLO_TARGET_STEPS = {"person", "robot"}
     step_is_person_target = (step is not None and
                              any(kw in step.target.lower()
                                  for kw in ("person", "man", "woman", "human",
-                                            "leia", "john", "luke", "rey", "alex",
-                                            "jamie", "r2", "droid", "robot")))
+                                            "droid", "robot")))
 
     if approach and step_is_person_target and label in _YOLO_TARGET_STEPS:
         _ui("log", f"✅ YOLO hardware confirms step target '{step.target}' "
@@ -4972,7 +4971,7 @@ def _mission_loop():
     # ── Register YOLO Layer 2 callback ────────────────────────────────────────
     _register_yolo_callback()
 
-    # ── Initial sweep SKIPPED — start moving immediately for cookoff demo ────
+    # ── Initial sweep SKIPPED — start moving immediately ────
     # Was: 180° chassis sweep + full 360 scan before moving (~60s total).
     # Now: single quick scan then move — much faster startup.
     _ui("log", "🔍 Quick initial scan...")
