@@ -546,19 +546,24 @@ def _strip_thinking(text: str) -> str:
     import re
     # Hard patterns — definitive thinking leak indicators
     thinking_patterns = [
-        r"^(Alright|Okay|Well|Let me|Let's see|So,|Right,|Hmm)[,.]",
+        r"^(Alright|Okay|Well|Let me|Let's see|So,|Right,|Hmm|Now,|First,|Sure,)[,.]",
         r"\bthe user (asks?|wants?|said|is asking)\b",
         r"\bUser asks?\b",
-        r"\bI (should|need to|must|will) (respond|reply|say|think|consider)\b",
+        r"\bI (should|need to|must|will) (respond|reply|say|think|consider|deliver|check|scan|find|start)\b",
         r"\blet me think\b",
         r"\bmy response\b",
-        r"\bI need to (deliver|say|greet|speak|respond|acknowledge)\b",
+        r"\bI need to (deliver|say|greet|speak|respond|acknowledge|find|scan|locate|check)\b",
+        r"\bI('ll| will| should) start (scanning|searching|looking|moving)\b",
+        r"\bdeliver(ing)? (a|the|my) greeting\b",
+        r"\bscanning (the area|for|to locate)\b",
+        r"\bcheck(ing)? for (the specific|all four|the criteria)\b",
+        r"\b(so|now) (let me|i need to|i should|i will|i'll)\b",
         r"\bThe mission (steps?|says?|requires?|briefing)\b",
         r"\bmission steps? say\b",
         r"\bafter confirming eye contact\b",
         r"\bfirst,? (i should|i need|let me|i will)\b",
         r"\bkey points? (are|is)\b",
-        r"\backnowledge (the|this|my) (input|mission|briefing)\b",
+        r"\backnowledge (the|this|my) (input|mission|briefing|parameters)\b",
     ]
     paragraphs = re.split(r'\n\s*\n', text.strip())
     if len(paragraphs) > 1:

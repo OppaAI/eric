@@ -4625,14 +4625,22 @@ def _process_scan(scan, from_360=False):
                     _ms.target_spotted_count = max(_ms.target_spotted_count, 1)
                     _approach_target()
                     return
-                greeting = ask_cosmos(
+                greeting = ask_cosmos_plain(
                     f"You see {name} {'ahead' if in_path else 'nearby'} ({dist_str} away). "
-                    "Greet them and ask about your mission. 1-2 sentences.",
-                    max_tokens=80
+                    "Greet them briefly and ask if they can help with your mission. 1-2 sentences.",
+                    max_tokens=80,
+                    temperature=0.7
                 )
+                if not greeting or greeting.strip().startswith("{"):
+                    greeting = "Hello there. I am ERIC. Can you help me with my mission?"
                 eric_say(greeting)
                 log_mission_event("person_greeted_scan", name)
                 _ui("status", f"TALKING — {name}")
+                # Resume searching after greeting — don't freeze
+                time.sleep(1.0)
+                _ms.mission_state = State.SEARCHING
+                if _safe_to_fwd():
+                    motors.forward(MOTOR_SPEED_SLOW)
             return
         else:
             _ui("log", f"Person ({obj_name or 'unknown'}) visible but {dist_str} — continuing")
