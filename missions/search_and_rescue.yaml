@@ -45,18 +45,6 @@ characters:
   - name: "Rescue Coordinator"
     hint: "Operator on radio. Gives updated search instructions. Confirms when rescue team is on the way."
 
-mission_stages:
-  - stage: 1
-    goal: "Full 360 scan — call out verbally every 30 seconds"
-  - stage: 2
-    goal: "Systematically explore all areas — corners, under furniture, behind obstacles"
-  - stage: 3
-    goal: "Person found — stop, sound siren, photograph, announce location"
-  - stage: 4
-    goal: "Stay with casualty — talk calmly until help arrives"
-  - stage: 5
-    goal: "Report full condition: conscious/unconscious, injuries, exact location"
-
 terrain:
   - "Open floor — tile or concrete (normal speed)"
   - "Carpet (slow down)"
