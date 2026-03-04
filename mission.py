@@ -616,7 +616,16 @@ def _execute_step_action(obj_name: str):
     log.info(f"Executing step {step.step_num}: {step.action} for {step.target}")
 
     if step.action == "find_and_approach":
-        _advance_step()
+        # For alarm missions (SAR, siren) — trigger full confirm+photo+alarm pipeline
+        # For narrative missions (AlarmType.NONE) — just advance
+        _is_alarm_mission = (
+            _ms.mission_alarm_type not in (AlarmType.NONE,)
+            and str(_ms.mission_alarm_type).lower() not in ("none", "null", "")
+        )
+        if _is_alarm_mission:
+            _confirm_and_photograph_target()
+        else:
+            _advance_step()
 
     elif step.action == "deliver_message":
         msg = step.message or f"Message delivered to {step.target}."
