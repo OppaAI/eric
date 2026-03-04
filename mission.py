@@ -486,6 +486,18 @@ def _parse_mission_steps(briefing: str) -> list[MissionStep]:
     Ask Cosmos to parse the mission briefing into an ordered list of MissionStep objects.
     Falls back to a single find_and_approach step if parsing fails.
     """
+    # ── Simple mission: skip Cosmos entirely — no KV cache bleed risk ────────
+    # If the briefing has no explicit step markers, it's a simple find mission.
+    # Build a single step directly from target_objects — no Cosmos call needed.
+    _step_markers = ["step 1:", "step 2:", "step1.", "step2.", "deliver_message",
+                     "find_and_approach", "speak_to", "step_num"]
+    _is_multistep = any(m in briefing.lower() for m in _step_markers)
+    if not _is_multistep:
+        _tgt = (_ms.mission_target_objects[0]
+                if _ms.mission_target_objects else "target")
+        log.info(f"Simple mission — building single step: find_and_approach {_tgt!r}")
+        return [MissionStep(step_num=1, target=_tgt, action="find_and_approach")]
+
     prompt = f"""You are parsing a robot mission briefing into structured, ordered steps.
 
 BRIEFING:
