@@ -3925,22 +3925,9 @@ def _confirm_and_photograph_target():
         _ui("log", "Eye contact timeout — proceeding")
         log_mission_event("eye_contact_timeout", "proceeding")
 
-    # ── Step 4: Greet ─────────────────────────────────────────────────────
-    greeting = ask_cosmos_plain(
-        "You have found your creator and confirmed eye contact. "
-        "Deliver your greeting now — two sentences, spoken out loud. "
-        "Be specific, dry, and direct. No internal monologue. No JSON.",
-        max_tokens=100,
-        temperature=0.7
-    )
-    eric_say(greeting)
-    log_mission_event("creator_greeted", greeting[:150])
-    time.sleep(1.0)
-
-    # ── Step 5: Dual photos using existing _capture_final_photo ──────────
+    # ── Step 4: Photo FIRST — before greeting so it's never skipped ─────
     _ui("log", "📸 Taking final photos...")
     motors.oled(1, "Smile!")
-    # Keep tilt at face level for photos — store for _capture_final_photo to use
     _ms.last_confirm_tilt = best_tilt
     motors.pantilt(0, best_tilt, 40)
     time.sleep(0.3)
@@ -3951,6 +3938,22 @@ def _confirm_and_photograph_target():
     )
     if saved:
         _ui("log", f"📸 Photos saved: {', '.join(saved)}")
+
+    # ── Step 5: Greet ─────────────────────────────────────────────────────
+    if not _ms.mission_active:
+        return
+    greeting = ask_cosmos_plain(
+        "Greet your creator. Two sentences maximum. "
+        "Speak directly to him — not about him. "
+        "Start with his name or a direct address. "
+        "Example: 'OppaAI. I found you.' or 'Hello. I have been looking for you.' "
+        "No thinking. No planning. No JSON. Just the greeting.",
+        max_tokens=60,
+        temperature=0.5
+    )
+    eric_say(greeting)
+    log_mission_event("creator_greeted", greeting[:150])
+    time.sleep(1.0)
 
     # Return to low tilt
     motors.pantilt(0, -5, 60)
@@ -4021,7 +4024,13 @@ def _approach_target():
     _NEAR_DISTANCES     = {"close", "near", "nearby", "very_close", "very close",
                            "right there"}
     _TARGET_OBJECTS     = {"slipper", "shoe", "person", "robot"}
-    ARRIVE_DIST_M       = float(_ms.mission_flags.get("approach_distance", 0.65))  # from YAML or default 65cm
+    # Raise arrival distance for person targets — 0.65m is too close, Eric hits them
+    _person_mission = any(
+        kw in str(_ms.mission_target_objects).lower()
+        for kw in ("person", "man", "woman", "human")
+    )
+    _default_arrive = 0.35 if _person_mission else 0.35
+    ARRIVE_DIST_M = float(_ms.mission_flags.get("approach_distance", _default_arrive))
     APPROACH_MOVE_SEC   = 1.5    # shorter clips → more hardware checks per meter
     APPROACH_SCAN_EVERY = 3      # Cosmos scan every N move clips (was every 1)
     APPROACH_MAX_MOVES  = 25     # max total move clips (~37.5 s)
@@ -4046,6 +4055,19 @@ def _approach_target():
             break
 
         # ── Hardware distance gate BEFORE moving ─────────────────────────────
+        # Check LiDAR first — always reliable, no depth failures
+        try:
+            from lidar import min_front_distance
+            _lidar_front = min_front_distance()
+            if _lidar_front is not None and _lidar_front < ARRIVE_DIST_M:
+                _ui("log", f"✅ LiDAR arrival: {_lidar_front:.2f}m — arrived")
+                log_mission_event("hw_arrival_lidar", f"{_lidar_front:.2f}m")
+                motors.stop()
+                _confirm_and_photograph_target()
+                return
+        except Exception as _exc:
+            log.debug(f"lidar unavailable: {_exc}")
+
         # Check OAK-D depth
         try:
             from oakd import get_front_depth, oakd_available
@@ -4111,11 +4133,17 @@ def _approach_target():
         try:
             from lidar import min_front_distance, set_safety_active
             _front = min_front_distance()
-            if 0.15 < _front < 0.55:
-                # Target-sized object close ahead — suppress LIDAR for this clip only
+            # Only suppress LiDAR for very small objects (toys, slippers <30cm away)
+            # Never suppress for person-sized targets — use hardware arrival instead
+            _is_person_target = any(
+                kw in str(getattr(_ms, "mission_target_objects", [])).lower()
+                for kw in ("person", "man", "woman", "human")
+            )
+            if 0.15 < _front < 0.35 and not _is_person_target:
+                # Small object close ahead — suppress LIDAR for this clip only
                 set_safety_active(False)
                 _lidar_suppressed = True
-                log.info(f"Approach: LIDAR safety suppressed for close-target clip "
+                log.info(f"Approach: LIDAR safety suppressed for small-target clip "
                          f"(front={_front:.2f}m)")
         except Exception:
             pass
