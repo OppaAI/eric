@@ -232,19 +232,16 @@ The limitations are mostly due to using Cosmos Reason 2 without fine-tuning on c
 1. **Cosmos sometimes returns unexpected output**    
 The 2B model occasionally invents new field names or wraps the answer in an unexpected format. The parser catches known cases and falls back to safe defaults, but an unseen pattern means Eric silently skips the find and keeps searching.
 
-2. **Cosmos sometimes thinks out loud**   
-The 2B model occasionally outputs its internal reasoning before the actual answer. Known patterns are stripped before Eric speaks, but new phrasing variations could slip through and Eric would say the wrong thing out loud.
-
-3. **Cosmos is slow to confirm a find**   
+2. **Cosmos is slow to confirm a find**   
 Each reasoning call takes 5–9 seconds. Without fine-tuning, the model's detection confidence is low enough that two back-to-back verification calls are needed before committing to a find. This means 15–20 seconds between "Eric sees you" and "siren goes off" — not acceptable for a real safety system.
 
-4. **No floor-drop protection**   
+3. **No floor-drop protection**   
 Void detection is disabled due to too many false positives on flat floors at the current camera mount height. Eric cannot detect stairs or sudden drops.
 
-5. **Small objects are difficult to perceive identify**   
+4. **Small objects are difficult to perceive identify**   
 The camera is 640×480 wide-angle with USB transmission latency. Small targets at range are only a few pixels wide. The zoom scan helps but it is just cropping and upscaling the same low-resolution image — no real detail is added.
 
-6. **Motor commands occasionally get dropped**   
+5. **Motor commands occasionally get dropped**   
 UART commands to the ESP32 are sent byte-by-byte with a small delay to avoid corruption. Under heavy load — Cosmos inference, cameras streaming, and GUI all running simultaneously — timing can slip and a command gets missed, causing Eric to briefly ignore a stop or turn instruction.
 
 ---
