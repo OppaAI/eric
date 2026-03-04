@@ -305,6 +305,9 @@ Target support matrix:
 - **Raspberry Pi 5 + Hailo** — swap Cosmos container for Hailo-optimised inference
 - **x86 simulation** — mock sensor containers, real mission logic, no hardware needed
 - **DGX Spark** — all containers local, orchestrator + Cosmos on same machine
+- 
+### 7. Change that somewhat less enthusiatic TTS voice
+Tones of better TTS voice or even voice clone out there. I just chose this one to conserve the memory.
 
 ---
 ## Built by
