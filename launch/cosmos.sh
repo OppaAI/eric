@@ -13,7 +13,7 @@ docker run -d \
   -e HF_HOME=/root/.cache/huggingface \
   ghcr.io/nvidia-ai-iot/vllm:latest-jetson-orin \
   vllm serve "embedl/Cosmos-Reason2-2B-W4A16-Edge2" \
-    --max-model-len 2048 \
+    --max-model-len 1920 \
     --gpu-memory-utilization 0.50 \
     --max-num-seqs 1 \
     --mm-processor-kwargs '{"max_pixels":256000}' \
