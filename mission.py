@@ -4568,6 +4568,29 @@ def _process_scan(scan, from_360=False):
         log_mission_event("target_spotted", f"direction={direction} obj={obj} name={obj_name}")
         if direction not in ("front", "ahead", "unknown", ""):
             _face_direction(direction)
+
+        # ── Greet immediately on spot — before approach ───────────────────
+        # For narrative missions (AlarmType.NONE), greet as soon as target confirmed.
+        # Photo happens after approach when closer.
+        _is_narrative_greet = (
+            _ms.mission_alarm_type == AlarmType.NONE
+            or str(_ms.mission_alarm_type).lower() in ("none", "null", "")
+        )
+        if _is_narrative_greet:
+            motors.stop()
+            motors.pantilt(0, 20, 50)   # look up toward face
+            time.sleep(0.3)
+            _greeting = ask_cosmos_plain(
+                "You just spotted your target. Greet them now in one sentence. "
+                "Speak directly to them. No thinking. No JSON.",
+                max_tokens=40,
+                temperature=0.5
+            )
+            if not _greeting or _greeting.strip().startswith("{"):
+                _greeting = "I found you. I am on my way."
+            eric_say(_greeting)
+            log_mission_event("target_greeted_on_spot", _greeting[:100])
+
         _approach_target()
         return
 
