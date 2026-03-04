@@ -48,6 +48,7 @@ flowchart TD
     MOTORS["ESP32 Motors — Waveshare UGV Beast\nSerial UART 115200 · JSON protocol"]
     LOGGER["logger.py\nActivity buffer · AI JSONL · Mission JSONL"]
     BUF["Rolling Frame Buffer\nstart_frame_buffer() → 10-frame deque\nget_buffered_frames() → instant async nav"]
+    MISSION["mission.py — Mission Loop\nReads Cosmos decisions · executes actions\nState machine · step engine"]
 
     CAM1 & CAM2 --> COSMOS
     CAM2 --> BUF --> COSMOS
@@ -55,10 +56,11 @@ flowchart TD
     OAKD --> L2 & AV2
     CAM2 --> AV3
 
-    COSMOS -->|"nav decision + direction"| MOTORS
+    COSMOS -->|"nav decisions + reasoning"| MISSION
     COSMOS -->|"triggers avoidance"| AVOIDANCE
     COSMOS -->|"target confirmed"| ALARM
-    L2 -->|"YOLO callback: bearing + distance"| MOTORS
+    MISSION -->|"motor commands"| MOTORS
+    L2 -->|"YOLO callback: bearing + distance"| MISSION
     AV3 -->|"escape turn"| MOTORS
     LIDAR_MON -->|"hard stop / slow"| MOTORS
     ALARM -->|"TTS + LED + audio tone"| MOTORS
@@ -294,4 +296,4 @@ The fix exists in code but is turned off for the cookoff. If you're demoing on l
 multi_zoom_scan() helps but it's a digital crop of a 640×480 source — you're upscaling pixels, not getting real resolution. Small or partially occluded targets at range are still unreliable.   
    
 **5. UART byte corruption**  
-The 1ms inter-byte delay is a workaround, not a fix. Under load on the Jetson (Cosmos inference + camera threads + GUI) the timing can drift. Occasional missed commands are possible.   
+The 1ms inter-byte delay is a workaround, not a fix. Under load on the Jetson (Cosmos inference + camera threads + GUI) the timing can drift. Occasional missed commands are possible.
