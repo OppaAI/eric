@@ -46,14 +46,6 @@ characters:
   - name: "Character Two"
     hint: "How they behave and what they know"
 
-mission_stages:
-  - stage: 1
-    goal: "First thing Eric should do"
-  - stage: 2
-    goal: "Second goal"
-  - stage: 3
-    goal: "Final objective"
-
 terrain:
   - "Smooth floor (normal speed)"
   - "Carpet or rug (slow down)"
