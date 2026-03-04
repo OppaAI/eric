@@ -45,7 +45,7 @@ target_objects:
 photo_on_find:     true
 announce_location: false
 stay_with_target:  false
-generate_report:   false
+generate_report:   true
 
 scan_strategy:      target_hunt
 loop_mission:       false
