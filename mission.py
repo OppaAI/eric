@@ -3718,7 +3718,43 @@ def _confirm_and_photograph_target():
     _ms.mission_state = State.INTERACTING
     ts_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
 
-    # ── Step 1: Full body confirm at low tilt ─────────────────────────────
+    # ── Branch: alarm missions (SAR/siren) go straight to alarm on arrival ──
+    _is_alarm_mission = (
+        _ms.mission_alarm_type not in (AlarmType.NONE, None)
+        and str(_ms.mission_alarm_type).lower() not in ("none", "null", "")
+    )
+    if _is_alarm_mission:
+        _ui("log", "🚨 Arrived at target — triggering alarm")
+        motors.pantilt(0, 10, 50)   # face level
+        time.sleep(0.3)
+        f = capture_frame(CAMERA_PANTILT, 640, 480)
+        reason = "Target confirmed at close range"
+        if f:
+            try:
+                r = requests.post(VLLM_URL, json={
+                    "model": COSMOS_MODEL,
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
+                            {"type": "text", "text":
+                                "Describe the person's position and condition in one sentence. "
+                                "Are they conscious? On the floor? Standing? Injured?"}
+                        ]}],
+                    "max_tokens": 60, "temperature": 0.3,
+                }, timeout=15)
+                r.raise_for_status()
+                reason = r.json()["choices"][0]["message"]["content"].strip()
+            except Exception as _ae:
+                log_exception("alarm_confirm", _ae)
+        _trigger_mission_alarm(
+            _ms.mission_target_objects[0] if _ms.mission_target_objects else "victim",
+            location_hint = reason,
+            severity      = "CRITICAL",
+        )
+        return
+
+    # ── Step 1: Full body confirm at low tilt (greet/narrative missions) ──
     motors.pantilt(0, -5, 60)
     time.sleep(0.5)
     _ui("log", "👁️  Arrived — confirming target description...")
@@ -3732,7 +3768,9 @@ def _confirm_and_photograph_target():
             target_desc = ch.get("hint", "")
             break
     if not target_desc:
-        target_desc = "Asian male, glasses, purple sweater, black pants"
+        # Build description from target_objects if no character hint
+        _tgts = _ms.mission_target_objects
+        target_desc = ", ".join(_tgts) if _tgts else "the target person"
 
     confirm_frame = capture_frame(CAMERA_PANTILT, 640, 480)
     description_confirmed = True
@@ -3768,11 +3806,10 @@ def _confirm_and_photograph_target():
         motors.pantilt(0, 15, 50)
         time.sleep(0.5)
 
+        _tgt_desc = ", ".join(_ms.mission_target_objects) if _ms.mission_target_objects else "a specific person"
         ask = ask_cosmos(
-            "You have stopped in front of someone who does not match your owner's description. "
-            "Ask them warmly and naturally if they have seen your owner. "
-            "Say something like: 'Excuse me, have you seen my owner? He is an Asian man, "
-            "not very tall, wearing glasses. I have been looking for him.' "
+            f"You have stopped in front of someone who does not match your target's description. "
+            f"Ask them warmly if they have seen the person you are looking for: {_tgt_desc}. "
             "Keep it to 2 sentences. Plain spoken words only — no JSON.",
             max_tokens=80
         )
@@ -4470,13 +4507,21 @@ def _process_scan(scan, from_360=False):
             _alarm_severity = scan.get("severity", "CRITICAL")
 
         if _should_alarm:
-            motors.stop()   # stop immediately — don't approach an injured person
-            _trigger_mission_alarm(
-                obj_name or obj,
-                location_hint = reason,
-                severity      = _alarm_severity,
-            )
-            return   # alarm handler takes over — don't approach
+            # Approach first if not already close — then alarm on arrival
+            if _ms.mission_flags.get("approach_on_detect", True):
+                _ui("log", "SAR: target found — approaching before alarm")
+                log_mission_event("target_spotted", f"direction={direction} obj={obj} name={obj_name}")
+                if direction not in ("front", "ahead", "unknown", ""):
+                    _face_direction(direction)
+                _approach_target()   # _confirm_and_photograph_target fires on arrival
+            else:
+                motors.stop()
+                _trigger_mission_alarm(
+                    obj_name or obj,
+                    location_hint = reason,
+                    severity      = _alarm_severity,
+                )
+            return
 
         if direction in ("down", "below"):
             _ui("log", "Target is directly below — already arrived!")

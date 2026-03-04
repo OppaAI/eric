@@ -552,6 +552,13 @@ def _strip_thinking(text: str) -> str:
         r"\bI (should|need to|must|will) (respond|reply|say|think|consider)\b",
         r"\blet me think\b",
         r"\bmy response\b",
+        r"\bI need to (deliver|say|greet|speak|respond|acknowledge)\b",
+        r"\bThe mission (steps?|says?|requires?|briefing)\b",
+        r"\bmission steps? say\b",
+        r"\bafter confirming eye contact\b",
+        r"\bfirst,? (i should|i need|let me|i will)\b",
+        r"\bkey points? (are|is)\b",
+        r"\backnowledge (the|this|my) (input|mission|briefing)\b",
     ]
     paragraphs = re.split(r'\n\s*\n', text.strip())
     if len(paragraphs) > 1:
