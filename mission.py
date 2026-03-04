@@ -3790,8 +3790,8 @@ def _confirm_and_photograph_target():
     # Sweep from low to high, asking Cosmos at each angle if face is visible
     _ui("log", "👁️  Sweeping tilt to find face...")
     motors.oled(1, "Finding face...")
-    TILT_ANGLES = [-15, -5, 0, 10, 20, 25]
-    best_tilt = 20   # fallback
+    TILT_ANGLES = [0, 10, 20, 30, 40, 50]  # sweep upward — robot is low, face is high
+    best_tilt = 30   # fallback — better default for standing person
     face_found = False
 
     for tilt in TILT_ANGLES:
@@ -3879,9 +3879,10 @@ def _confirm_and_photograph_target():
     # ── Step 4: Greet ─────────────────────────────────────────────────────
     greeting = ask_cosmos_plain(
         "You have found your creator and confirmed eye contact. "
-        "Deliver your greeting now — two sentences, make them count. "
-        "Plain spoken words only. No JSON. No formatting.",
-        max_tokens=100
+        "Deliver your greeting now — two sentences, spoken out loud. "
+        "Be specific, dry, and direct. No internal monologue. No JSON.",
+        max_tokens=100,
+        temperature=0.7
     )
     eric_say(greeting)
     log_mission_event("creator_greeted", greeting[:150])
@@ -3921,7 +3922,10 @@ def _confirm_and_photograph_target():
 
     # ── Step 6: Complete ──────────────────────────────────────────────────
     log_mission_event("mission_complete", "creator found, confirmed, greeted, photographed")
-    _execute_step_action(None)
+    _ms.mission_steps     = []   # clear any bleed-through steps from KV cache parse
+    _ms.current_step_idx  = 0
+    _ms.mission_active    = False
+    return
 
 
 def _approach_target():
@@ -4237,7 +4241,7 @@ def _approach_target():
                     log_exception("eye_contact_approach", e)
             if greet:
                 _ui("status", f"FOUND — {name}")
-                greeting = ask_cosmos_plain(
+                greeting = ask_cosmos(
                     f"You see {name} nearby. Greet them and ask if they can help with your mission. 1-2 sentences.",
                     max_tokens=80
                 )
@@ -4564,7 +4568,7 @@ def _process_scan(scan, from_360=False):
                     _ms.target_spotted_count = max(_ms.target_spotted_count, 1)
                     _approach_target()
                     return
-                greeting = ask_cosmos_plain(
+                greeting = ask_cosmos(
                     f"You see {name} {'ahead' if in_path else 'nearby'} ({dist_str} away). "
                     "Greet them and ask about your mission. 1-2 sentences.",
                     max_tokens=80
@@ -4849,7 +4853,7 @@ def _handle_yolo_detection() -> bool:
 
         def _greet_and_execute():
             try:
-                greeting = ask_cosmos_plain(_greeting_prompt, max_tokens=60)
+                greeting = ask_cosmos(_greeting_prompt, max_tokens=60)
                 eric_say(greeting)
             except Exception as _ge:
                 log.warning(f"YOLO greeting failed ({_ge}) — skipping greeting")
@@ -4880,7 +4884,7 @@ def _handle_yolo_detection() -> bool:
 
         def _greet_approach():
             try:
-                greeting = ask_cosmos_plain(_greet_prompt, max_tokens=100)
+                greeting = ask_cosmos(_greet_prompt, max_tokens=100)
                 eric_say(greeting)
             except Exception as _ge:
                 log.warning(f"YOLO approach greeting failed ({_ge})")
