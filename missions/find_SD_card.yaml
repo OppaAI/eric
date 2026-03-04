@@ -43,18 +43,6 @@ loop_mission:       false
 approach_on_detect: false
 detect_distance:    1.5
 
-mission_stages:
-  - stage: 1
-    goal: "Full 360 scan — identify all desks and surfaces to check"
-  - stage: 2
-    goal: "Sweep each desk surface — look for small flat dark object with gold contacts"
-  - stage: 3
-    goal: "Check floor level near desks — may have been knocked off"
-  - stage: 4
-    goal: "Confirm identity — small, flat, rectangular, black with gold contacts"
-  - stage: 5
-    goal: "Announce exact location and photograph"
-
 terrain:
   - "Smooth office floor — tile or wood (normal speed)"
   - "Carpet (slow down)"
