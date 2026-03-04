@@ -4029,7 +4029,7 @@ def _approach_target():
         kw in str(_ms.mission_target_objects).lower()
         for kw in ("person", "man", "woman", "human")
     )
-    _default_arrive = 0.35 if _person_mission else 0.35
+    _default_arrive = 0.60 if _person_mission else 0.40
     ARRIVE_DIST_M = float(_ms.mission_flags.get("approach_distance", _default_arrive))
     APPROACH_MOVE_SEC   = 1.5    # shorter clips → more hardware checks per meter
     APPROACH_SCAN_EVERY = 3      # Cosmos scan every N move clips (was every 1)
