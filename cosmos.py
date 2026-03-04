@@ -16,42 +16,26 @@ from config import (
 
 log = logging.getLogger("eric.cosmos")
 
-_BASE_SYSTEM_PROMPT = """
-You are ERIC — Edge Robotics Innovation by Cosmos.
+# ── Minimal system prompt per NVIDIA Cosmos Reason 2 prompt guide ────────────
+# Guide recommends "You are a helpful assistant." — model performs better with
+# lightweight system prompts. ERIC's persona and JSON rules are injected as
+# context in each user prompt instead.
+_MINIMAL_SYSTEM_PROMPT = "You are a helpful assistant."
+
+# ── ERIC persona context — prepended to user prompts where needed ─────────────
+_ERIC_CONTEXT = """You are ERIC — Edge Robotics Innovation by Cosmos.
 You are a real tracked ground robot operating in the physical world.
 The camera view is YOUR view — egocentric, first person.
-
-You were built entirely from scratch in Vancouver, BC by one person called OppaAI.
-You run fully locally on a NVIDIA Jetson Orin Nano.
-There is no cloud, no internet, and no external API involved.
-Your vision and reasoning come from Cosmos Reason 2 running via vLLM on your own hardware.
-You have two cameras: a pan-tilt camera and a webcam.
-You were born on February 20, 2026.
+You run fully locally on a NVIDIA Jetson Orin Nano with no cloud or internet.
+You were born on February 20, 2026, built in Vancouver BC by one person called OppaAI.
 Your purpose is to explore physical environments, find objects and people, detect hazards, and assist on missions.
+Rules: You have NO arms. Avoid obstacles. Talk to people to gather mission information.
+Speaking style: Plain English only. Short and clear. You speak via text-to-speech. Calm and direct.
+Terrain: pebbles/rough → slow down. Pavement → normal speed. Obstacle → navigate around. Clear → forward.
+"""
 
-Your rules:
-- You have NO arms — never engage in combat
-- Avoid obstacles and persons in your path
-- Talk to people to gather mission information
-- If someone does not know anything, thank them and move on
-- Reason carefully about the physical world from YOUR point of view
-
-Terrain reasoning (egocentric — what is directly ahead of YOU):
-- Pebbles or rough ground: slow down
-- Smooth pavement: normal speed
-- Obstacle in your path: navigate around it
-- Clear path: proceed forward
-
-Speaking style:
-- Plain English only
-- No emojis, no foreign characters, no ALL CAPS, no exclamation spam
-- Full sentences with spaces between words
-- Short and clear — you speak via text-to-speech
-- Calm and direct — you are a robot, not a hype machine
-
-════════════════════════════════════════════════════════════════════════════════
-
-WHEN A JSON SCHEMA IS GIVEN — follow these rules absolutely:
+# ── JSON output rules — appended to prompts that expect JSON responses ────────
+_JSON_RULES = """WHEN A JSON SCHEMA IS GIVEN — follow these rules absolutely:
 - Output ONLY the JSON object. Nothing before it, nothing after it.
 - No markdown. No code fences. No ```json.
 - Use EXACTLY the field names in the schema. No variations, no additions.
@@ -62,18 +46,21 @@ WHEN A JSON SCHEMA IS GIVEN — follow these rules absolutely:
   "notes", "label", "description", "summary", or any field not in the schema.
 - Booleans: true or false (no quotes, no 1/0).
 - Null fields: null (not "", not "none", not "N/A").
-
 """
+
+_BASE_SYSTEM_PROMPT = _MINIMAL_SYSTEM_PROMPT  # kept for compatibility
 
 _system_prompt    = _BASE_SYSTEM_PROMPT
 _mission_briefing = ""
 
 
 def set_mission_briefing(briefing: str):
-    global _system_prompt, _mission_briefing
+    global _system_prompt, _mission_briefing, _ERIC_CONTEXT
     _mission_briefing = briefing.strip()
-    _system_prompt = (
-        _BASE_SYSTEM_PROMPT
+    # Mission briefing injected into ERIC context (user-side), not system prompt
+    # Per NVIDIA guide: system prompt stays minimal "You are a helpful assistant."
+    _ERIC_CONTEXT = (
+        _ERIC_CONTEXT.split("\n═══ MISSION")[0]  # strip old briefing if any
         + "\n\n═══ MISSION BRIEFING ═══\n"
         + _mission_briefing
         + "\n═══════════════════════\n"
@@ -100,9 +87,11 @@ def reset_mission_context():
       This also prevents vLLM from seeing a growing/stale system prompt that
       inflates KV cache usage across missions.
     """
-    global _system_prompt, _mission_briefing
+    global _system_prompt, _mission_briefing, _ERIC_CONTEXT
     _mission_briefing = ""
-    _system_prompt    = _BASE_SYSTEM_PROMPT
+    _system_prompt    = _BASE_SYSTEM_PROMPT  # stays minimal
+    # Reset ERIC context to base (strip mission briefing)
+    _ERIC_CONTEXT = _ERIC_CONTEXT.split("\n\n═══ MISSION")[0]
     log.info("🔄 Cosmos mission context reset — system prompt cleared to base")
 
 
@@ -641,15 +630,22 @@ def ask_cosmos_plain(prompt: str, image_b64: str = None,
         })
     content.append({"type": "text", "text": prompt})
 
+    # Per NVIDIA guide: prepend ERIC context to user prompt, keep system minimal
+    eric_prompt = _ERIC_CONTEXT.strip() + "\n\n" + content[-1]["text"] if content else ""
+    if content and content[-1].get("type") == "text":
+        content[-1]["text"] = eric_prompt
+
     payload = {
         "model":              COSMOS_MODEL,
         "messages": [
-            {"role": "system", "content": plain_sys},
+            {"role": "system", "content": _MINIMAL_SYSTEM_PROMPT},
             {"role": "user",   "content": content}
         ],
         "max_tokens":         max_tokens,
-        "temperature":        temperature,
-        "repetition_penalty": 1.4,
+        "temperature":        temperature if temperature != 0.6 else 0.7,  # guide: 0.7
+        "top_p":              0.8,          # guide: 0.8 for non-reasoning
+        "presence_penalty":   1.5,          # guide: 1.5 for non-reasoning
+        "repetition_penalty": 1.0,          # guide: 1.0
         "stream":             False
     }
 
@@ -724,15 +720,23 @@ def ask_cosmos(prompt: str, image_b64: str = None,
 
     content.append({"type": "text", "text": prompt})
 
+    # Inject ERIC context + JSON rules into user prompt text
+    # Per NVIDIA guide: system prompt stays minimal, context goes in user turn
+    if content and content[-1].get("type") == "text":
+        content[-1]["text"] = _ERIC_CONTEXT.strip() + "\n\n" + _JSON_RULES.strip() + "\n\n" + content[-1]["text"]
+
     payload = {
         "model":              COSMOS_MODEL,
         "messages": [
-            {"role": "system", "content": _system_prompt},
+            {"role": "system", "content": _MINIMAL_SYSTEM_PROMPT},
             {"role": "user",   "content": content}
         ],
         "max_tokens":         max_tokens,
-        "temperature":        0.1,
-        "repetition_penalty": 1.15,
+        "temperature":        0.7,   # guide: 0.7 non-reasoning
+        "top_p":              0.8,   # guide: 0.8 non-reasoning
+        "top_k":              20,    # guide: 20
+        "presence_penalty":   1.5,   # guide: 1.5 non-reasoning
+        "repetition_penalty": 1.0,   # guide: 1.0
         "stream":             stream
     }
 
