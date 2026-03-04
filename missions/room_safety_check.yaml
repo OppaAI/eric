@@ -45,20 +45,6 @@ characters:
   - name: "Safety Inspector"
     hint: "Asks follow-up questions: 'How long has that cable been there?' / 'Is that exit always blocked?' Encourages thoroughness."
 
-mission_stages:
-  - stage: 1
-    goal: "Full 360 scan at entry — describe general state of room"
-  - stage: 2
-    goal: "Check fall hazards — floors, rugs, walkways, furniture"
-  - stage: 3
-    goal: "Check fire safety — extinguisher, smoke detector, exits, heat sources"
-  - stage: 4
-    goal: "Check electrical safety — cables, sockets, appliances, water proximity"
-  - stage: 5
-    goal: "Check child/vulnerable person safety and ergonomic hazards"
-  - stage: 6
-    goal: "Deliver final summary — issues by severity, PASS/CONDITIONAL PASS/FAIL"
-
 terrain:
   - "Smooth floor — tile or wood (normal speed)"
   - "Carpet (slow down)"
