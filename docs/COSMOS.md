@@ -4,7 +4,7 @@
 
 ---
 
-Cosmos Reason 2 is not a module Eric calls occasionally. It **is** Eric's brain. Every decision — where to go, what to say, how to escape an obstacle, whether to greet someone — flows through Cosmos. There is no separate navigation algorithm, no rule-based object classifier, no hardcoded route planner. Cosmos sees, reasons, and decides.
+Cosmos Reason 2 is not a module Eric calls occasionally. It **is** Eric's brain. Every decision — where to go, what to say, how to escape an obstacle, whether to greet someone — flows through Cosmos. There is no rule-based object classifier, no separate vision pipeline, no scripted dialogue system. The mission loop provides structure (move, scan, approach), but every decision within it — what Eric sees, whether the path is clear, whether that's the target, what to say — is a Cosmos reasoning output.
 
 ---
 
