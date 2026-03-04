@@ -1731,13 +1731,18 @@ No markdown. No explanation. No extra fields.
     try:
         payload = {
             "model": COSMOS_MODEL,
-            "messages": [{"role": "user", "content": [
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}},
-                {"type": "text", "text": NAV_IMAGE_PROMPT.strip()}
-            ]}],
+            "messages": [
+                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "user", "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{frame}"}},
+                    {"type": "text", "text": NAV_IMAGE_PROMPT.strip()}
+                ]}
+            ],
             "max_tokens": 120,
-            "temperature": 0.1,
-            "repetition_penalty": 1.15,
+            "temperature": 0.7,
+            "top_p": 0.8,
+            "presence_penalty": 1.5,
+            "repetition_penalty": 1.0,
         }
         r = requests.post(VLLM_URL, json=payload, timeout=30)
         r.raise_for_status()
@@ -1786,12 +1791,17 @@ Set close_and_facing=false if the person is far away, looking away, or has their
                 try:
                     ec_payload = {
                         "model": COSMOS_MODEL,
-                        "messages": [{"role": "user", "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
-                            {"type": "text", "text": ec_prompt}
-                        ]}],
+                        "messages": [
+                            {"role": "system", "content": "You are a helpful assistant."},
+                            {"role": "user", "content": [
+                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
+                                {"type": "text", "text": ec_prompt}
+                            ]}
+                        ],
                         "max_tokens": 60,
-                        "temperature": 0.1,
+                        "temperature": 0.7,
+                        "top_p": 0.8,
+                        "presence_penalty": 1.5,
                     }
                     ec_r = requests.post(VLLM_URL, json=ec_payload, timeout=20)
                     ec_r.raise_for_status()
@@ -1904,11 +1914,14 @@ def _nav_check_async() -> dict:
                     try:
                         ec_payload = {
                             "model": COSMOS_MODEL,
-                            "messages": [{"role": "user", "content": [
-                                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
-                                {"type": "text", "text": ec_prompt}
-                            ]}],
-                            "max_tokens": 60, "temperature": 0.1,
+                            "messages": [
+                                {"role": "system", "content": "You are a helpful assistant."},
+                                {"role": "user", "content": [
+                                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
+                                    {"type": "text", "text": ec_prompt}
+                                ]}
+                            ],
+                            "max_tokens": 60, "temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5,
                         }
                         ec_r = requests.post(VLLM_URL, json=ec_payload, timeout=20)
                         ec_r.raise_for_status()
@@ -1983,8 +1996,12 @@ OUTPUT — single JSON, no markdown:
                 content.append({"type": "text", "text": NAV_VIDEO_PROMPT.strip()})
                 payload = {
                     "model": COSMOS_MODEL,
-                    "messages": [{"role": "user", "content": content}],
-                    "max_tokens": 120, "temperature": 0.1, "repetition_penalty": 1.15,
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful assistant."},
+                        {"role": "user", "content": content}
+                    ],
+                    "max_tokens": 120, "temperature": 0.7, "top_p": 0.8,
+                    "presence_penalty": 1.5, "repetition_penalty": 1.0,
                 }
                 r = requests.post(VLLM_URL, json=payload, timeout=30)
                 r.raise_for_status()
@@ -3118,12 +3135,15 @@ def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[st
         try:
             cr = requests.post(VLLM_URL, json={
                 "model": COSMOS_MODEL,
-                "messages": [{"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
-                    {"type": "text", "text": centre_prompt},
-                ]}],
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
+                        {"type": "text", "text": centre_prompt},
+                    ]}
+                ],
                 "max_tokens": 40,
-                "temperature": 0.1,
+                "temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5,
             }, timeout=20)
             cr.raise_for_status()
             craw    = cr.json()["choices"][0]["message"]["content"].strip()
@@ -3206,12 +3226,15 @@ def _capture_final_photo(obj_name: str, ts_str: str, alarm_type: str) -> list[st
         try:
             cr = requests.post(VLLM_URL, json={
                 "model": COSMOS_MODEL,
-                "messages": [{"role": "user", "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
-                    {"type": "text", "text": centre_prompt},
-                ]}],
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": [
+                        {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
+                        {"type": "text", "text": centre_prompt},
+                    ]}
+                ],
                 "max_tokens": 40,
-                "temperature": 0.1,
+                "temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5,
             }, timeout=20)
             cr.raise_for_status()
             craw    = cr.json()["choices"][0]["message"]["content"].strip()
@@ -3705,14 +3728,16 @@ def _confirm_and_photograph_target():
         try:
             r = requests.post(VLLM_URL, json={
                 "model": COSMOS_MODEL,
-                "messages": [{"role": "user", "content": [
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": [
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{confirm_frame}"}},
                     {"type": "text", "text":
                         f"Target description: {target_desc}\n"
                         "Does the person in this image match ALL criteria?\n"
                         'Answer ONLY: {"confirmed": true_or_false, "reasoning": "one sentence"}'}
                 ]}],
-                "max_tokens": 80, "temperature": 0.1,
+                "max_tokens": 80, "temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5,
             }, timeout=20)
             r.raise_for_status()
             res = _parse_json(r.json()["choices"][0]["message"]["content"].strip(),
@@ -3778,14 +3803,16 @@ def _confirm_and_photograph_target():
         try:
             r = requests.post(VLLM_URL, json={
                 "model": COSMOS_MODEL,
-                "messages": [{"role": "user", "content": [
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": [
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{f}"}},
                     {"type": "text", "text":
                         "Can you clearly see the person's FACE (eyes, nose, mouth visible) "
                         "in this image?\n"
                         'Answer ONLY: {"face_visible": true_or_false}'}
                 ]}],
-                "max_tokens": 20, "temperature": 0.1,
+                "max_tokens": 20, "temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5,
             }, timeout=10)
             r.raise_for_status()
             res = _parse_json(r.json()["choices"][0]["message"]["content"].strip(),
@@ -3820,14 +3847,16 @@ def _confirm_and_photograph_target():
         try:
             r = requests.post(VLLM_URL, json={
                 "model": COSMOS_MODEL,
-                "messages": [{"role": "user", "content": [
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": [
                     {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
                     {"type": "text", "text":
                         "Is the person looking DIRECTLY at the camera lens — "
                         "held deliberate eye contact, not glancing, not looking away?\n"
                         'Answer ONLY: {"eye_contact": true_or_false, "reasoning": "one sentence"}'}
                 ]}],
-                "max_tokens": 60, "temperature": 0.1,
+                "max_tokens": 60, "temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5,
             }, timeout=15)
             r.raise_for_status()
             ec = _parse_json(r.json()["choices"][0]["message"]["content"].strip(),
@@ -4185,14 +4214,16 @@ def _approach_target():
                 try:
                     ec_payload = {
                         "model": COSMOS_MODEL,
-                        "messages": [{"role": "user", "content": [
+                        "messages": [
+                            {"role": "system", "content": "You are a helpful assistant."},
+                            {"role": "user", "content": [
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
                             {"type": "text", "text":
                                 '{"close_and_facing": true_or_false, "reasoning": "one sentence"} '
                                 '— Is the person within 1.5m AND facing/looking toward you?'}
                         ]}],
                         "max_tokens": 50,
-                        "temperature": 0.1,
+                        "temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5,
                     }
                     ec_r = requests.post(VLLM_URL, json=ec_payload, timeout=15)
                     ec_r.raise_for_status()
@@ -4493,14 +4524,16 @@ def _process_scan(scan, from_360=False):
                 try:
                     ec_payload = {
                         "model": COSMOS_MODEL,
-                        "messages": [{"role": "user", "content": [
+                        "messages": [
+                            {"role": "system", "content": "You are a helpful assistant."},
+                            {"role": "user", "content": [
                             {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ec_frame}"}},
                             {"type": "text", "text":
                                 '{"close_and_facing": true_or_false, "reasoning": "one sentence"} '
                                 '— Is the person within 1.5m AND facing/looking toward you?'}
                         ]}],
                         "max_tokens": 50,
-                        "temperature": 0.1,
+                        "temperature": 0.7, "top_p": 0.8, "presence_penalty": 1.5,
                     }
                     ec_r = requests.post(VLLM_URL, json=ec_payload, timeout=15)
                     ec_r.raise_for_status()
