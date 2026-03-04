@@ -179,18 +179,6 @@ When all steps are done, Cosmos generates the final announcement — in characte
 
 ---
 
-## Chain-of-Thought Stripping
-
-Cosmos Reason 2 2B occasionally outputs internal monologue before the actual answer in plain-text calls:
-
-```
-"Alright, let me think about this. The user wants... Well, I should respond by..."
-```
-
-`_strip_thinking()` detects these patterns by checking the first paragraph or first sentences for third-person self-reference (`"the user asks"`, `"I should respond"`, `"let me think"`) and strips them before TTS or display. The actual spoken response is extracted from the remaining text.
-
----
-
 ## Summary
 
 | When | Cosmos receives | Cosmos outputs |
