@@ -4029,7 +4029,7 @@ def _approach_target():
         kw in str(_ms.mission_target_objects).lower()
         for kw in ("person", "man", "woman", "human")
     )
-    _default_arrive = 0.60 if _person_mission else 0.40
+    _default_arrive = 0.40 if _person_mission else 0.30
     ARRIVE_DIST_M = float(_ms.mission_flags.get("approach_distance", _default_arrive))
     APPROACH_MOVE_SEC   = 1.5    # shorter clips → more hardware checks per meter
     APPROACH_SCAN_EVERY = 3      # Cosmos scan every N move clips (was every 1)
@@ -4241,13 +4241,25 @@ def _approach_target():
             _execute_step_action(check.get("object_name"))
             return
 
-        # ── Cosmos distance confirmation — back up the hardware gate ──────────
+        # ── Cosmos distance confirmation — only if LiDAR agrees ─────────────
         if check.get("target_visible") and obj in _TARGET_OBJECTS and dist in _NEAR_DISTANCES:
-            _ui("log", f"Cosmos: target close ({dist}) — confirming and photographing")
-            log_mission_event("cosmos_arrival", f"obj={obj} dist={dist}")
-            motors.stop()
-            _confirm_and_photograph_target()
-            return
+            # Verify with LiDAR before acting — Cosmos "near" is often wrong
+            _lidar_ok = False
+            try:
+                from lidar import min_front_distance
+                _lf = min_front_distance()
+                if _lf is not None and _lf < ARRIVE_DIST_M:
+                    _lidar_ok = True
+            except Exception:
+                _lidar_ok = True  # no lidar — trust Cosmos
+            if _lidar_ok:
+                _ui("log", f"Cosmos+LiDAR: target close ({dist}) — arrived")
+                log_mission_event("cosmos_arrival", f"obj={obj} dist={dist}")
+                motors.stop()
+                _confirm_and_photograph_target()
+                return
+            else:
+                _ui("log", f"Cosmos says near but LiDAR disagrees — keep approaching")
 
         if dist in _NEAR_DISTANCES or in_path:
             _ui("log", f"Cosmos: close/in-path ({dist}) — executing step action")
