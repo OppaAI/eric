@@ -96,7 +96,7 @@ stereo depth + bearing
 → yolo_person_detected"]
     end
 
-    subgraph OUTPUTS["Cosmos Outputs → Robot Actions"]
+    subgraph OUTPUTS["Cosmos Decisions"]
         NAV["forward / stop / turn"]
         TARGET["target_visible + direction
 + physical_reasoning"]
@@ -112,12 +112,16 @@ CPU · zero VRAM"]
 disabled for cookoff"]
     end
 
+    MISSION["mission.py — Mission Loop
+reads Cosmos decisions · executes motor commands"]
+
     BRIEFING --> COSMOS
     CAM & WC & BUF & LIDAR & OAKD & OVERLAY --> COSMOS
     COSMOS --> NAV & TARGET & ESCAPE & SPEECH
-    YOLO -->|"bearing · 100ms callback"| MOTORS
+    NAV & TARGET & ESCAPE --> MISSION
+    YOLO -->|"bearing · 100ms callback"| MISSION
     SAFETY -.->|"hardware override"| MOTORS
-    NAV & ESCAPE --> MOTORS["ESP32 Motors
+    MISSION --> MOTORS["ESP32 Motors
 Waveshare UGV Beast"]
     SPEECH --> TTS["tts.py
 non-blocking queue"]
