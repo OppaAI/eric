@@ -3877,10 +3877,10 @@ def _confirm_and_photograph_target():
         log_mission_event("eye_contact_timeout", "proceeding")
 
     # ── Step 4: Greet ─────────────────────────────────────────────────────
-    greeting = ask_cosmos(
+    greeting = ask_cosmos_plain(
         "You have found your creator and confirmed eye contact. "
         "Deliver your greeting now — two sentences, make them count. "
-        "Plain spoken words only — no JSON, no formatting.",
+        "Plain spoken words only. No JSON. No formatting.",
         max_tokens=100
     )
     eric_say(greeting)
@@ -4237,7 +4237,7 @@ def _approach_target():
                     log_exception("eye_contact_approach", e)
             if greet:
                 _ui("status", f"FOUND — {name}")
-                greeting = ask_cosmos(
+                greeting = ask_cosmos_plain(
                     f"You see {name} nearby. Greet them and ask if they can help with your mission. 1-2 sentences.",
                     max_tokens=80
                 )
@@ -4564,7 +4564,7 @@ def _process_scan(scan, from_360=False):
                     _ms.target_spotted_count = max(_ms.target_spotted_count, 1)
                     _approach_target()
                     return
-                greeting = ask_cosmos(
+                greeting = ask_cosmos_plain(
                     f"You see {name} {'ahead' if in_path else 'nearby'} ({dist_str} away). "
                     "Greet them and ask about your mission. 1-2 sentences.",
                     max_tokens=80
@@ -4849,7 +4849,7 @@ def _handle_yolo_detection() -> bool:
 
         def _greet_and_execute():
             try:
-                greeting = ask_cosmos(_greeting_prompt, max_tokens=60)
+                greeting = ask_cosmos_plain(_greeting_prompt, max_tokens=60)
                 eric_say(greeting)
             except Exception as _ge:
                 log.warning(f"YOLO greeting failed ({_ge}) — skipping greeting")
@@ -4880,7 +4880,7 @@ def _handle_yolo_detection() -> bool:
 
         def _greet_approach():
             try:
-                greeting = ask_cosmos(_greet_prompt, max_tokens=100)
+                greeting = ask_cosmos_plain(_greet_prompt, max_tokens=100)
                 eric_say(greeting)
             except Exception as _ge:
                 log.warning(f"YOLO approach greeting failed ({_ge})")
