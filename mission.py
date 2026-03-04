@@ -944,8 +944,17 @@ def _finalize_result(result: dict, fallback: dict, label: str) -> dict:
     _targets  = [t.lower() for t in (_ms.mission_target_objects or [])]
     if _obj_val not in ("", "unknown", "clear") and not result.get("target_visible"):
         # Check if object or object_name matches any target keyword
+        # Match only if object/name is a meaningful part of a target keyword.
+        # Use word-boundary logic: "person" matches "injured person" but
+        # "trap" must NOT match "trapped person" (partial word, not a real match).
+        import re as _re
+        def _word_match(obj, target):
+            # obj word must appear as a whole word in target, or target word in obj
+            obj_words = set(obj.split())
+            tgt_words = set(target.split())
+            return bool(obj_words & tgt_words)  # shared whole words only
         _matched = any(
-            (kw in _obj_val or kw in _name_val or _obj_val in kw)
+            (_word_match(_obj_val, kw) or _word_match(_name_val, kw))
             for kw in _targets
         ) if _targets else False
         if _matched:
