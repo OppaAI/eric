@@ -249,6 +249,64 @@ The camera is 640×480 wide-angle with USB transmission latency. Small targets a
 UART commands to the ESP32 are sent byte-by-byte with a small delay to avoid corruption. Under heavy load — Cosmos inference, cameras streaming, and GUI all running simultaneously — timing can slip and a command gets missed, causing Eric to briefly ignore a stop or turn instruction.
 
 ---
+## Future Roadmap
+
+ERIC is a working prototype, not a finished product. These are the five directions that would turn it into something significantly more capable.
+
+### 1. Agentic MCP Tool Server
+Every capability in `mission.py` — scan, navigate, confirm, alarm, photograph, speak — becomes a proper MCP tool. A separate LLM orchestrator (running on a local machine, DGX Spark, or cloud) reads the mission YAML as a goal definition and decides which tools to call, in what order, based on results. No hardcoded loop. No predetermined step sequence.
+
+The end state: Eric receives a goal in plain English, reasons about it, calls tools, adapts to what it finds, and completes the mission — the same way Claude uses computer use today, but in the physical world. Cosmos Reason 2 stays on the Jetson as the perception engine (vision, spatial reasoning, scene understanding). The orchestrator runs elsewhere and calls Cosmos as one of its tools.
+
+Eventually: Eric plans its own missions. Given a high-level directive ("keep this building secure overnight"), it writes the YAML, executes it, and reports back.
+
+### 2. ROS2 Native Architecture
+The current architecture uses Python threads, asyncio, and a hand-rolled state machine to manage concurrency — functional, but fighting against what ROS2 does natively. The full refactor would make every module a ROS2 node: cameras publish to topics, LiDAR publishes to `/scan`, Cosmos decisions publish to `/mission/decision`, motor commands subscribe from `/cmd_vel`. Nav2 becomes the primary navigation stack rather than an optional overlay.
+
+Benefits: proper message passing with timestamps, built-in topic introspection for debugging, standard interfaces that work with the broader ROS2 ecosystem, and genuine deterministic async behaviour that Python threads cannot guarantee under Jetson load.
+
+### 3. Episodic Memory with Vector DB
+Eric currently starts every mission with zero memory. A vector database (Chroma or similar, running on-device) would give Eric persistent spatial and semantic memory across missions.
+
+- **Spatial memory:** "The slippers are usually near the couch. The casualty was found in the hallway last time." Stored as embeddings of location + object + timestamp.
+- **Semantic memory:** Past conversations with characters, what information was extracted, what was left unresolved.
+- **Environmental memory:** Room layouts, obstacle positions, terrain types per zone.
+
+Over time Eric learns its environment rather than rediscovering it on every engagement. Combined with the agentic architecture, the orchestrator can query memory before deciding which tools to call — "have I searched this room before? what did I find?"
+
+### 4. Fine-Tuning on Real Driving Data
+Every Eric mission run is a training example waiting to be labelled. The pipeline:
+
+1. Eric runs a mission → `logs/ai_log.jsonl` captures every frame sent to Cosmos and every JSON decision returned
+2. Human reviews log, marks correct decisions and corrects wrong ones
+3. Labelled frame+decision pairs become fine-tuning data
+4. Fine-tune `embedl/Cosmos-Reason2-2B-W4A16-Edge2` on real Eric scenes — real floors, real lighting, real obstacles, real targets
+5. Quantize back to W4A16 so it stays within Jetson VRAM
+
+The current 2B model was never trained on Eric's specific environment — it generalises from internet data. A fine-tuned version trained on hundreds of real Eric runs would have dramatically lower hallucination rates, more consistent JSON output, and better small-object detection. This is the highest-leverage single improvement available.
+
+### 5. Multi-Robot Coordination
+Two or more Erics sharing a mission, a vector memory DB, and an orchestrator. Practical scenarios:
+
+- **Search and rescue:** One Eric scouts ahead and marks casualty location in shared memory. Second Eric navigates directly to the confirmed location to stay with the casualty while the first continues searching.
+- **Security sweep:** Erics divide a building into zones, report findings to shared memory, flag overlaps and blind spots to the orchestrator.
+- **Handoff missions:** Eric 1 finds the target and begins interaction. Eric 2 approaches with supplies or a different capability.
+
+The shared vector DB is the coordination layer — no direct robot-to-robot communication needed. The orchestrator reads all robot states and decides task allocation. This follows directly from roadmap items 1 and 3 and requires no new hardware beyond a second UGV Beast.
+
+### 6. Containerised Hardware Abstraction Layer
+Currently Eric is half-dockerized — vLLM + Cosmos runs in a container (`cosmos.sh`), everything else runs bare metal on JetPack. The remaining Python stack (mission engine, GUI, alarm, logger) is straightforward to containerize since it needs no direct hardware access. The hardware layer — serial UART to ESP32, V4L2 cameras, USB LiDAR, OAK-D — stays as thin host-side adapters that feed data into the core container via local sockets.
+
+The goal is not perfect isolation but **hardware portability**. The mission engine, Cosmos integration, and all reasoning logic become robot-agnostic. Someone running a different chassis, different cameras, or different motors swaps only the hardware adapter layer — the mission YAML, the agentic orchestrator, and the Cosmos perception tools remain identical.
+
+Target support matrix:
+- **Jetson Orin Nano** — current hardware, bare metal sensors + containerised core
+- **Jetson AGX Orin** — same containers, larger VRAM, full-precision Cosmos
+- **Raspberry Pi 5 + Hailo** — swap Cosmos container for Hailo-optimised inference
+- **x86 simulation** — mock sensor containers, real mission logic, no hardware needed
+- **DGX Spark** — all containers local, orchestrator + Cosmos on same machine
+
+---
 ## Built by
 
 Solo developer — Beautiful Britsh Columbia, Canada. No CS/ML degree.   
