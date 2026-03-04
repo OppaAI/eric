@@ -52,18 +52,6 @@ characters:
   - name: "Curious Child"
     hint: "Asks simple delightful questions: 'What's that?' / 'Why does it do that?' Brings out Eric's nurturing side."
 
-mission_stages:
-  - stage: 1
-    goal: "Slow 360 scan — describe overall environment and its mood"
-  - stage: 2
-    goal: "Explore and document first interesting discovery"
-  - stage: 3
-    goal: "Find a second distinct discovery in a different direction"
-  - stage: 4
-    goal: "Find something that surprises or delights you — express genuine wonder"
-  - stage: 5
-    goal: "Summary of all discoveries — highlight the most remarkable find"
-
 terrain:
   - "Grass or lawn (slow down)"
   - "Gravel or dirt path (slow down)"
