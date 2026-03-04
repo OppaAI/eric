@@ -36,7 +36,7 @@ generate_report:   true
 scan_strategy:      target_hunt
 loop_mission:       false
 approach_on_detect: true
-detect_distance:    3.0
+detect_distance:    1.5
 
 characters:
   - name: "Casualty"
