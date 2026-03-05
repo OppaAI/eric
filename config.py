@@ -38,6 +38,40 @@ MISSIONS_DIR = Path(__file__).parent / "missions"
 GRADIO_PORT = int(os.getenv("GRADIO_PORT", "7860"))
 GRADIO_HOST = os.getenv("GRADIO_HOST", "0.0.0.0")
 
+# ─── ASR / Voice Pipeline (faster-whisper + silero-vad + ECAPA-TDNN) ────────────
+ASR_MODEL              = os.getenv("ASR_MODEL",    "distil-small.en")  # distil-small.en | distil-medium.en | base | turbo
+ASR_DEVICE             = os.getenv("ASR_DEVICE",   "cpu")              # cpu only — no VRAM conflict with Cosmos
+ASR_LANGUAGE           = os.getenv("ASR_LANGUAGE", "en")               # en | fr | None (auto-detect)
+ASR_SAMPLE_RATE        = int(os.getenv("ASR_SAMPLE_RATE", "16000"))
+ASR_ENABLED            = os.getenv("ASR_ENABLED",  "true").lower() == "true"
+
+# Wake word — comma-separated list, any match activates session
+ASR_WAKE_WORDS         = [w.strip() for w in os.getenv("ASR_WAKE_WORDS", "hey eric,hi eric,eric").split(",")]
+ASR_SESSION_TIMEOUT_SEC = int(os.getenv("ASR_SESSION_TIMEOUT_SEC", "150"))  # 2.5 min
+
+# Speaker verification via ECAPA-TDNN (SpeechBrain)
+# Set ASR_VERIFY_SPEAKER=true to require voice match before activating session
+ASR_VERIFY_SPEAKER     = os.getenv("ASR_VERIFY_SPEAKER",  "false").lower() == "true"
+ASR_SPEAKER_EMBEDDING  = os.getenv("ASR_SPEAKER_EMBEDDING", str(Path.home() / ".eric/speaker_embedding.pt"))
+ASR_VERIFY_THRESHOLD   = float(os.getenv("ASR_VERIFY_THRESHOLD", "0.75"))  # 0-1, higher = stricter
+
+
+# ─── Telegram Bot ─────────────────────────────────────────────────────────────
+TELEGRAM_ENABLED    = os.getenv("TELEGRAM_ENABLED",    "false").lower() == "true"
+TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN",  "")   # from @BotFather
+TELEGRAM_OWNER_ID   = os.getenv("TELEGRAM_OWNER_ID",   "")   # from @userinfobot
+
+# ─── Email (Gmail IMAP/SMTP) ──────────────────────────────────────────────────
+EMAIL_ENABLED              = os.getenv("EMAIL_ENABLED",   "false").lower() == "true"
+ERIC_EMAIL_ADDRESS         = os.getenv("ERIC_EMAIL_ADDRESS",  "eric.agi.robot@gmail.com")
+ERIC_EMAIL_PASSWORD        = os.getenv("ERIC_EMAIL_PASSWORD", "")           # Gmail app password
+EMAIL_OWNER_ADDRESS        = os.getenv("EMAIL_OWNER_ADDRESS", "oppa.ai.org@gmail.com")
+EMAIL_IMAP_HOST            = os.getenv("EMAIL_IMAP_HOST",     "imap.gmail.com")
+EMAIL_SMTP_HOST            = os.getenv("EMAIL_SMTP_HOST",     "smtp.gmail.com")
+EMAIL_SMTP_PORT            = int(os.getenv("EMAIL_SMTP_PORT", "465"))
+EMAIL_CHECK_INTERVAL_SEC   = int(os.getenv("EMAIL_CHECK_INTERVAL_SEC", "1800"))  # 30 min
+EMAIL_APPROVAL_TIMEOUT_SEC = int(os.getenv("EMAIL_APPROVAL_TIMEOUT_SEC", "86400"))  # 24 hours
+
 # ─── ROS2 / Nav2 / LiDAR / OAK-D ─────────────────────────────────────────────
 # Set USE_NAV2=true in .env to enable autonomous navigation via Nav2
 # If false or ROS2 not running, Eric falls back to direct motor control
