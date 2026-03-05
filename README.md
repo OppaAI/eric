@@ -144,8 +144,10 @@ non-blocking queue"]
 ---
 ## Demo
 
-**Mission 1: Greet My Creator (Indoor · Target Identification · Conversation)**
-Mission file: greet_owner.yaml — see Missions for all missions and YAML schema.
+### Mission 1: Greet My Creator (Indoor · Target Identification · Conversation)**  
+
+*Mission file: [`greet_owner.yaml`](missions/greet_owner.yaml) — see [Missions](docs/MISSIONS.md) for all missions and YAML schema.*
+
 The operator is somewhere in the room. Eric has a physical description of his creator in the mission briefing. He has to find the person that fits the description, and greet the person by name — no staging, no markers, no simulation.
 What you see in the recording:
 
@@ -159,24 +161,26 @@ What you see in the recording:
 - Eric greets the operator by name: "OppaAI, I found you."
 - Dual-cam photos saved with blur check and auto-centre pan nudge.
 
-Note: Cosmos described the operator accurately from visual data alone — toque, clothing colour, glasses (vs. sunglasses) — with no prior training on this person. Pure Cosmos Reason 2 visual inference.
+**Note:** Cosmos described the operator accurately from visual data alone — toque, clothing colour, glasses (vs. sunglasses) — with no prior training on this person. Pure Cosmos Reason 2 visual inference.
 
-**Mission 2: Search and Rescue (Indoor · Casualty)**
-Mission file: search_and_rescue.yaml — see Missions for all missions and YAML schema.
+### Mission 2: Search and Rescue (Indoor · Casualty)**
+  
+*Mission file: [`search_and_rescue.yaml`](missions/search_and_rescue.yaml) — see [Missions](docs/MISSIONS.md) for all missions and YAML schema.*  
+   
 The operator lies on the floor as the casualty. Eric navigates the room autonomously, finds the person, and executes the full SAR protocol — no staging, no props, no simulation.
-What you see in the recording:
-
+  
+**What you see in the recording:**
 - Mission engaged — Cosmos parses the SAR briefing, Eric announces the mission objective.
 - Eric performs an immediate quick scan, sending live camera frames to Cosmos for inference.
 - Eric approaches to the defined distance while running continuous navigation scans in parallel.
 - Cosmos reasons over the visual data — identifying a prone figure on the floor.
   (If after consecutive empty scans, Eric commits to a full 360° sweep to locate the casualty.)
 - Once casualty confirmed — siren fires, LED strobe, TTS emergency broadcast.
-- Dual-cam photos with blur check and auto-centre pan nudge saved to missions/photos/.
+- Dual-cam photos with blur check and auto-centre pan nudge saved to ```missions/photos/```.
 - Eric stays at the location of the casualty and repeats the location broadcast every 15 seconds until the operator ends the mission.
 
-Note: Cosmos identified the patient as a child — It is not fault of Eric. This is due to reasoning visually from floor-level perspective with wide-angle lens, apparent shorter stature of the patient who is facing backward from Eric.
-Recording: Screen-record of the Gradio GUI — dual cameras, telemetry, GPU usage and Cosmos reasoning log all demonstrated in the demo.
+**Note:** Cosmos identified the patient as a child — It is not fault of Eric. This is due to reasoning visually from floor-level perspective with wide-angle lens, apparent shorter stature of the patient who is facing backward from Eric.   
+**Recording:** Screen-record of the Gradio GUI — dual cameras, telemetry, GPU usage and Cosmos reasoning log all demonstrated in the demo.
 
 ---
 ## Hardware
