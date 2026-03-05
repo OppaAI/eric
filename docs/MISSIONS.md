@@ -21,12 +21,12 @@ When you press ENGAGE:
 ### Multi-Step Example
 
 ```
-Briefing: "First find R2-D2 and speak to him. Then find Luke and wait for his response.
-           Finally, locate Princess Leia and photograph her."
+Briefing: "First find the security guard and speak to him. Then find the manager and wait for
+           their response. Finally, locate the exit and photograph it."
 
-→ Step 1 of 3: target=R2-D2  action=speak_to
-→ Step 2 of 3: target=Luke   action=wait_for_response
-→ Step 3 of 3: target=Leia   action=photograph
+→ Step 1 of 3: target=security guard  action=speak_to
+→ Step 2 of 3: target=manager         action=wait_for_response
+→ Step 3 of 3: target=exit            action=photograph
 
 Eric will not advance to Step 2 until Step 1 is complete.
 ```
@@ -84,14 +84,14 @@ wait_for_dismiss: false   # stay in place after greeting until operator presses 
 
 # Characters (played by operator in GUI)
 characters:
-  - name: "R2-D2"
-    hint: "Speaks in beeps. Knows where Luke is. Will help if asked nicely."
+  - name: "Security Guard"
+    hint: "Knows the building layout. Will share info if approached politely."
 
 # Stage-by-stage goals — Cosmos sees the current stage goal during that step
 mission_stages:
-  - goal: "Find R2-D2 and ask him where Luke is hiding"
-  - goal: "Find Luke and brief him on the mission"
-  - goal: "Locate Princess Leia using Luke's directions"
+  - goal: "Find the security guard and ask about the building layout"
+  - goal: "Find the manager and deliver the message"
+  - goal: "Locate the exit and confirm it is clear"
 
 # Terrain Eric will encounter (affects speed)
 terrain:
@@ -100,8 +100,8 @@ terrain:
 
 # GM notes — Eric ignores this section entirely
 notes: |
-  Setup: place R2-D2 in the living room, Luke in the kitchen.
-  Character scripts: R2 beeps and says "boo-weep-boop" until asked about Luke.
+  Setup: place the security guard near the entrance, manager in the back office.
+  Character scripts: guard is friendly but cautious until asked directly.
 ```
 
 ---
@@ -153,7 +153,7 @@ The `characters` list provides Cosmos with description hints for identity checki
 | `greet_owner.yaml` | Greet the Owner | none | target_hunt | Find creator by description, wait for eye contact, greet |
 | `room_safety_check.yaml` | Room Safety Check | ⚠️ hazard | video_sweep | Full-room audit — PASS / CONDITIONAL PASS / FAIL |
 | `nature_exploring.yaml` | Nature Exploring | 🌿 nature | video_sweep | Wildlife + plants — poetic narration, photo each find |
-| `msg_for_R2D2.yaml` | Vader's Messenger | none | target_hunt | Deliver Vader's dark side invitation to R2-D2 |
+| `msg_for_contact.yaml` | Deliver Message | none | target_hunt | Find a specific person and deliver a message |
 | `find_SD_card.yaml` | Operation Lost Card | none | target_hunt | Systematic office sweep to find a missing SD card |
 
 ---
