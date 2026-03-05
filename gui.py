@@ -8,7 +8,7 @@ import logging
 
 import gradio as gr
 
-from config import GRADIO_HOST, GRADIO_PORT, CAMERA_WEBCAM, CAMERA_PANTILT, MISSIONS_DIR
+from config import GRADIO_HOST, GRADIO_PORT, CAMERA_WEBCAM, CAMERA_PANTILT, MISSIONS_DIR, ASR_ENABLED
 from cosmos import capture_frame_raw, ask_cosmos
 from motors import motors
 from tts import speak, init_tts, piper_available
@@ -120,6 +120,13 @@ def get_battery_html():
     )
 
 
+# ─── ASR state ────────────────────────────────────────────────────────────────
+_asr_recording   = False
+_asr_mode        = "MISSION"   # "MISSION" fills briefing box | "COMMS" fills char reply
+_asr_last_text   = ""
+_asr_lock        = threading.Lock()
+_voice_state     = "sleeping"  # sleeping | listening | active | processing
+
 # ─── Shared state ─────────────────────────────────────────────────────────────
 _eric_says  = ""
 _status     = "IDLE"
@@ -144,6 +151,27 @@ def _append_log(t):
     global _log_text
     lines = (_log_text + "\n" + str(t)).strip().split("\n")
     _log_text = "\n".join(lines[-60:])
+
+def set_voice_state(state: str):
+    """Called by voice pipeline on state transitions."""
+    global _voice_state
+    _voice_state = state
+
+def get_voice_state_html() -> str:
+    icons = {
+        "sleeping":    ("💤", "#444",    "SLEEPING"),
+        "listening":   ("👂", "#ffff00", "LISTENING"),
+        "active":      ("🎙", "#00ff88", "ACTIVE"),
+        "processing":  ("⚙",  "#ff9900", "PROCESSING"),
+    }
+    icon, color, label = icons.get(_voice_state, ("?", "#444", _voice_state.upper()))
+    return (
+        f'<div style="background:#0a0a0f;border:1px solid {color}44;border-radius:4px;'
+        f'padding:5px 8px;font-family:\'Share Tech Mono\',monospace;font-size:0.75em;'
+        f'letter-spacing:0.08em">'
+        f'<span style="color:{color}">{icon} VOICE: {label}</span>'
+        f'</div>'
+    )
 
 register_ui_callbacks(
     eric_says=_set_eric_says,
@@ -865,6 +893,30 @@ input[type=range] {
 }
 
 /* ── Compact right column spacing ───────────────────────────────────── */
+
+/* ── ASR mic button ──────────────────────────────────────────────────── */
+#asr-mic-btn button {
+    background: #0a0a0f !important;
+    border: 1.5px solid #ff00ff55 !important;
+    color: #ff44ff !important;
+    font-family: 'Share Tech Mono', monospace !important;
+    font-size: 0.85em !important;
+    letter-spacing: 0.1em !important;
+    border-radius: 3px !important;
+    transition: all 0.15s !important;
+}
+#asr-mic-btn button:hover {
+    border-color: #ff00ff !important;
+    box-shadow: 0 0 14px #ff00ff66 !important;
+    background: #1a001a !important;
+}
+#asr-mic-btn.recording button {
+    background: #330011 !important;
+    border-color: #ff0066 !important;
+    color: #ff0066 !important;
+    box-shadow: 0 0 20px #ff006699 !important;
+}
+
 .compact-col {
     margin-top: 0 !important;
     padding-top: 0 !important;
@@ -881,6 +933,65 @@ _HEADER_HTML = """
 """
 
 # ─── Build UI ─────────────────────────────────────────────────────────────────
+
+
+# ─── ASR actions ──────────────────────────────────────────────────────────────
+
+def _asr_status_html(recording: bool, last_text: str = "") -> str:
+    if recording:
+        color, label, dot = "#ff0066", "RECORDING...", "🔴"
+    else:
+        color, label, dot = "#ff44ff", "PRESS & HOLD TO SPEAK", "🎙"
+    text_line = f'<div style="color:#aaa;font-size:0.7em;margin-top:3px;font-style:italic">{last_text[:60]}</div>' if last_text else ""
+    return (
+        f'<div style="background:#0a0a0f;border:1px solid {color}44;border-radius:4px;'
+        f'padding:5px 8px;font-family:\'Share Tech Mono\',monospace;font-size:0.75em;">'
+        f'<span style="color:{color};letter-spacing:0.1em">{dot} {label}</span>'
+        f'{text_line}</div>'
+    )
+
+
+def action_asr_start():
+    """Called on mic button press — start recording."""
+    global _asr_recording
+    if not ASR_ENABLED:
+        return _asr_status_html(False, "ASR disabled in config")
+    try:
+        from asr import init_asr, start_recording, asr_available
+        if not asr_available():
+            init_asr()
+        ok = start_recording()
+        _asr_recording = ok
+        return _asr_status_html(ok, "")
+    except Exception as e:
+        log.error(f"ASR start error: {e}")
+        return _asr_status_html(False, str(e))
+
+
+def action_asr_stop(briefing: str, char_name_val: str, mode: str):
+    """
+    Called on mic button release — stop and transcribe.
+    Returns (updated_briefing, updated_char_says, asr_status_html).
+    mode: "MISSION" fills briefing box | "COMMS" fills char says box.
+    """
+    global _asr_recording, _asr_last_text
+    _asr_recording = False
+    if not ASR_ENABLED:
+        return briefing, "", _asr_status_html(False, "ASR disabled")
+    try:
+        from asr import stop_and_transcribe
+        text = stop_and_transcribe()
+        if not text:
+            return briefing, "", _asr_status_html(False, "(nothing heard)")
+        _asr_last_text = text
+        if mode == "COMMS":
+            return briefing, text, _asr_status_html(False, text)
+        else:
+            return text, "", _asr_status_html(False, text)
+    except Exception as e:
+        log.error(f"ASR stop error: {e}")
+        return briefing, "", _asr_status_html(False, str(e))
+
 
 def build_ui():
     default_text    = _default_mission_text()
@@ -905,6 +1016,7 @@ def build_ui():
 
                 gr.HTML('<div class="panel-head" style="margin-top:2px">◈ MODULE STATUS</div>')
                 module_status = gr.HTML(value=get_module_status_html())
+                voice_status  = gr.HTML(value=get_voice_state_html())
 
                 with gr.Row(equal_height=True):
                     lidar_display = gr.HTML(value=get_lidar_html())
@@ -938,6 +1050,19 @@ def build_ui():
                 with gr.Row():
                     engage_btn    = gr.Button("▶ ENGAGE",    elem_id="engage-btn",    variant="primary",   scale=1)
                     disengage_btn = gr.Button("◼ DISENGAGE", elem_id="disengage-btn", variant="secondary", scale=1)
+
+                gr.HTML('<div class="panel-head">◈ VOICE INPUT</div>')
+                with gr.Row():
+                    asr_mode_dd = gr.Dropdown(
+                        choices=["MISSION", "COMMS"],
+                        value="MISSION",
+                        label="",
+                        show_label=False,
+                        scale=1,
+                        info="MISSION → briefing box · COMMS → character reply"
+                    )
+                    asr_mic_btn = gr.Button("🎙 HOLD TO SPEAK", scale=2, elem_id="asr-mic-btn")
+                asr_status = gr.HTML(value=_asr_status_html(False, ""))
 
                 gr.HTML('<div class="panel-head">◈ ERIC TRANSMISSION</div>')
                 eric_says_box = gr.Textbox(
@@ -1024,6 +1149,16 @@ def build_ui():
                 )
 
         # ── Wire up buttons ───────────────────────────────────────────────
+        # ASR mic — mousedown starts recording, mouseup stops + transcribes
+        asr_mic_btn.click(
+            action_asr_stop,
+            inputs=[briefing_box, char_name, asr_mode_dd],
+            outputs=[briefing_box, char_says, asr_status]
+        )
+        # Note: Gradio doesn't support mousedown/mouseup natively.
+        # The mic button is a toggle — first click starts, second click stops + transcribes.
+        # TODO: replace with JS mousedown/mouseup when Gradio adds pointer event support.
+
         engage_btn.click(action_engage,    inputs=[briefing_box], outputs=[motor_status])
         disengage_btn.click(action_disengage,                     outputs=[motor_status])
         stop_btn.click(action_stop,                               outputs=[motor_status])
@@ -1051,6 +1186,7 @@ def build_ui():
         gr.Timer(1.0).tick(get_lidar_html,       outputs=lidar_display)
         gr.Timer(1.0).tick(get_oakd_html,        outputs=oakd_display)
         gr.Timer(3.0).tick(get_module_status_html, outputs=module_status)
+        gr.Timer(1.0).tick(get_voice_state_html,   outputs=voice_status)
 
     return demo
 
