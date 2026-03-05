@@ -23,6 +23,10 @@ Give it a mission YAML file in plain English, press ENGAGE, and it does the rest
 Since people are coining new AI terms all the time, I am coining one right here: **MISSION**.   
 A structured plain-English task definition that tells the robot what to do, who to talk to, and how to behave — without writing a single line of code. In the future, I may let my robot plan its own missions. After all, it's just a YAML file.
 
+My goal of this project is to develop an autonomous robot that can tread the grassland and forest, exploring nature with me.
+The SAR, hazard inspection and object locating mission files are to test Eric's adaptability and versatility.
+The future integration of MCP and ROS2 into Eric would significantly increase its potential, which is higher than the sky.
+
 ---
 Before proceeding, please read the following disclaimer:
 
@@ -140,27 +144,39 @@ non-blocking queue"]
 ---
 ## Demo
 
-### Search and Rescue Demo (Indoor · Real Casualty)
+**Mission 1: Greet My Creator (Indoor · Target Identification · Conversation)**
+Mission file: greet_owner.yaml — see Missions for all missions and YAML schema.
+The operator is somewhere in the room. Eric has a physical description of his creator in the mission briefing. He has to find the person that fits the description, and greet the person by name — no staging, no markers, no simulation.
+What you see in the recording:
 
-→ See [Demo Flow](docs/demo_flow.md) for what roles Cosmos Reason 2 model play in this demo.
+- Mission engaged — Cosmos parses the briefing and Eric announces the mission objective.
+- Eric performs an immediate quick scan, sending live camera frames to Cosmos for inference.
+- Cosmos reasons over the visual data and returns a target description matching the operator — toque, specific clothing, glasses (vs. sunglasses) — with bearing and direction.
+- Eric approaches autonomously while running continuous navigation scans every 5 move clips.
+- On arrival of the defined distance, Eric performs a tilt sweep through 5 angles — pan-tilt lifts to capture the operator's face with the confirmation webcam.
+- Eye-contact gate fires — Cosmos confirms the person is close and facing before proceeding.
+- Cosmos cross-references the visual with the briefing description and returns target_confirmed: true.
+- Eric greets the operator by name: "OppaAI, I found you."
+- Dual-cam photos saved with blur check and auto-centre pan nudge.
 
-*Mission file: [`search_and_rescue.yaml`](missions/search_and_rescue.yaml) — see [Missions](docs/MISSIONS.md) for all missions and YAML schema.*
+Note: Cosmos described the operator accurately from visual data alone — toque, clothing colour, glasses (vs. sunglasses) — with no prior training on this person. Pure Cosmos Reason 2 visual inference.
 
+**Mission 2: Search and Rescue (Indoor · Casualty)**
+Mission file: search_and_rescue.yaml — see Missions for all missions and YAML schema.
 The operator lies on the floor as the casualty. Eric navigates the room autonomously, finds the person, and executes the full SAR protocol — no staging, no props, no simulation.
+What you see in the recording:
 
-**What you see in the recording:**
-- After mission is engaged, Cosmos Reason 2 parses the mission prompt, and Eric announces what mission briefting.
-- Eric initiates an immediate quick scan of the environment with wide-angle cam and sends the visual data to Cosmos for inference.
-- On visual identification of victim, Eric captures a few frames with normal focal length webcam towards the angle the victim was first noticed.
-- Based on the captured frames of the victim, Cosmos Reason 2 chose the one with the least blurriness and victim centred in the frame. Then Cosmos use this frame to conduct candidate verification to confirm it is indeed a victim. (Due to 2B model is prone to hallucination, the detection confidence has been significantly to reduce false positive. This is where model training and fine-tuning is critical.)
-- Without confirmation, Eric approaches victim step by step while conducting navigation scan with 5 move clips at the same time.
-- After 5 consecutive empty scans, Eric tries to circumnavigate the obstacle before committing to a full 360 scan.
-- Once Casualty confirmed — siren fires, red LED strobe, TTS emergency broadcast.
-- Dual-cam photos with blur check and auto-centre pan nudge saved to missions/photos/ directory (Will need to notify emergency assistance in real situation.)
-- Eric stays beside the casualty and repeats the location broadcast every 15 seconds until the operator ends the mission.
+- Mission engaged — Cosmos parses the SAR briefing, Eric announces the mission objective.
+- Eric performs an immediate quick scan, sending live camera frames to Cosmos for inference.
+- Eric approaches to the defined distance while running continuous navigation scans in parallel.
+- Cosmos reasons over the visual data — identifying a prone figure on the floor.
+  (If after consecutive empty scans, Eric commits to a full 360° sweep to locate the casualty.)
+- Once casualty confirmed — siren fires, LED strobe, TTS emergency broadcast.
+- Dual-cam photos with blur check and auto-centre pan nudge saved to missions/photos/.
+- Eric stays at the location of the casualty and repeats the location broadcast every 15 seconds until the operator ends the mission.
 
-**Recording:** Screen-record the Gradio GUI — dual cameras, telemetry, and reasoning log all in one frame. 
-**Note:** Due to YOLO (OAK-D Myriad X) is also not trained on person lying on the floor, this demo is mostly based on Cosmos Reason 2
+Note: Cosmos identified the patient as a child — It is not fault of Eric. This is due to reasoning visually from floor-level perspective with wide-angle lens, apparent shorter stature of the patient who is facing backward from Eric.
+Recording: Screen-record of the Gradio GUI — dual cameras, telemetry, GPU usage and Cosmos reasoning log all demonstrated in the demo.
 
 ---
 ## Hardware
