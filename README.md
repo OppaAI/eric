@@ -144,6 +144,9 @@ non-blocking queue"]
 ---
 ## Demo
 
+[![ERIC Demo](https://img.youtube.com/vi/UD3itpQ8d6M/maxresdefault.jpg)](https://www.youtube.com/watch?v=UD3itpQ8d6M)
+
+
 → See [Demo Flow](docs/demo_flow.md) for the full Cosmos reasoning pipeline for this demo.
 > 🟢 Green boxes indicate where NVIDIA Cosmos Reason 2 is called for inference.
 
