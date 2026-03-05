@@ -4,7 +4,7 @@
 
 ---
 
-Cosmos Reason 2 is not a module Eric calls occasionally. It **is** Eric's brain. Every decision — where to go, what to say, how to escape an obstacle, whether to greet someone — flows through Cosmos. There is no rule-based object classifier, no separate vision pipeline, no scripted dialogue system. The mission loop provides structure (move, scan, approach), but every decision within it — what Eric sees, whether the path is clear, whether that's the target, what to say — is a Cosmos reasoning output.
+Cosmos Reason 2 is not a module Eric calls occasionally. It **is** Eric's brain. Every decision — where to go, what to say, how to escape an obstacle, whether to greet someone — flows through Cosmos. There is no separate navigation algorithm, no rule-based object classifier, no hardcoded route planner. Cosmos sees, reasons, and decides.
 
 ---
 
@@ -31,7 +31,7 @@ Every single Cosmos call — nav check, scan, character conversation, obstacle e
 system_prompt = BASE_IDENTITY + "\n\nMission briefing:\n" + mission_briefing
 ```
 
-When you select `find_leia.yaml` and press ENGAGE, the briefing becomes Cosmos's identity for the entire mission. Cosmos has no memory between calls — the system prompt provides continuity. Every decision is made with full mission context. Eric never forgets what it is doing.
+When you select a mission and press ENGAGE, the briefing becomes Cosmos's identity for the entire mission. Cosmos has no memory between calls — the system prompt provides continuity. Every decision is made with full mission context. Eric never forgets what it is doing.
 
 The system prompt includes a strict JSON output ruleset that names every valid field, warns against aliases (`"reasoning"` → must be `"physical_reasoning"`), and prohibits markdown fences. `_finalize_result()` still catches Cosmos inventions and remaps them at parse time.
 
@@ -80,10 +80,10 @@ The mission loop reads this JSON and acts on it. No hardcoded routes, no waypoin
 When a mission starts, Cosmos reads the raw briefing text and parses it into an ordered `MissionStep` array:
 
 ```
-"First find R2-D2 and speak to him. Then find Luke and wait for his response."
+"Find the person in the red jacket and speak to them. Then find the exit and wait there."
 
-→ [MissionStep(target="R2-D2", action="speak_to", wait_sec=20),
-   MissionStep(target="Luke",   action="wait_for_response", wait_sec=20)]
+→ [MissionStep(target="person in red jacket", action="speak_to",         wait_sec=20),
+   MissionStep(target="exit",                 action="wait_for_response", wait_sec=20)]
 ```
 
 Eric executes these steps in order, advancing only when each is confirmed complete. No structured mission file required — Cosmos reads English.
