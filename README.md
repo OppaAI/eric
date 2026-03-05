@@ -144,6 +144,9 @@ non-blocking queue"]
 ---
 ## Demo
 
+→ See [Demo Flow](docs/demo_flow.md) for the full Cosmos reasoning pipeline for this demo.
+> 🟢 Green boxes indicate where NVIDIA Cosmos Reason 2 is called for inference.
+
 ### Mission 1: Greet My Creator (Indoor · Target Identification · Conversation)**  
 
 *Mission file: [`greet_owner.yaml`](missions/greet_owner.yaml) — see [Missions](docs/MISSIONS.md) for all missions and YAML schema.*
