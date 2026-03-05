@@ -161,6 +161,53 @@ def main():
             else:
                 log.warning("OAK-D unavailable — no depth perception")
 
+    # ── Voice pipeline init ──────────────────────────────────────────────────
+    from config import ASR_ENABLED
+    if ASR_ENABLED:
+        from voice import init_voice, start_voice_pipeline
+
+        if init_voice():
+            log.info("Voice: models loaded — starting pipeline...")
+
+            def _on_utterance(text: str, is_wake: bool):
+                """
+                Route transcribed utterances to mission system.
+                is_wake=True  → first activation (wake word heard)
+                is_wake=False → active session utterance
+                """
+                if is_wake:
+                    log.info(f"Voice: wake word activated — {text!r}")
+                    return
+                # Pass utterance to mission as if typed in GUI
+                # During active mission: treat as character response
+                # Outside mission: treat as new mission briefing command
+                try:
+                    from mission import get_mission_active, handle_character_response, start_mission
+                    if get_mission_active():
+                        log.info(f"Voice: routing to character comms → {text!r}")
+                        handle_character_response("Operator", text)
+                    else:
+                        log.info(f"Voice: routing as mission command → {text!r}")
+                        start_mission(text)
+                except Exception as e:
+                    log.error(f"Voice: utterance routing error — {e}")
+
+            def _on_state_change(state: str):
+                log.debug(f"Voice state: {state}")
+                # Forward to GUI status if available
+                try:
+                    from gui import set_voice_state
+                    set_voice_state(state)
+                except Exception:
+                    pass
+
+            start_voice_pipeline(
+                on_utterance=_on_utterance,
+                on_state_change=_on_state_change,
+            )
+        else:
+            log.warning("Voice: init failed — voice input unavailable")
+
     # ── Cosmos connectivity test ──────────────────────────────────────────────
     from cosmos import ask_cosmos
     test = ask_cosmos("Say exactly: ERIC online and ready.", max_tokens=20)
