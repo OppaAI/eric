@@ -55,6 +55,18 @@ ASR_VERIFY_SPEAKER     = os.getenv("ASR_VERIFY_SPEAKER",  "false").lower() == "t
 ASR_SPEAKER_EMBEDDING  = os.getenv("ASR_SPEAKER_EMBEDDING", str(Path.home() / ".eric/speaker_embedding.pt"))
 ASR_VERIFY_THRESHOLD   = float(os.getenv("ASR_VERIFY_THRESHOLD", "0.75"))  # 0-1, higher = stricter
 
+
+# ─── Email (Gmail IMAP/SMTP) ──────────────────────────────────────────────────
+EMAIL_ENABLED              = os.getenv("EMAIL_ENABLED",   "false").lower() == "true"
+ERIC_EMAIL_ADDRESS         = os.getenv("ERIC_EMAIL_ADDRESS",  "eric.agi.robot@gmail.com")
+ERIC_EMAIL_PASSWORD        = os.getenv("ERIC_EMAIL_PASSWORD", "")           # Gmail app password
+EMAIL_OWNER_ADDRESS        = os.getenv("EMAIL_OWNER_ADDRESS", "oppa.ai.org@gmail.com")
+EMAIL_IMAP_HOST            = os.getenv("EMAIL_IMAP_HOST",     "imap.gmail.com")
+EMAIL_SMTP_HOST            = os.getenv("EMAIL_SMTP_HOST",     "smtp.gmail.com")
+EMAIL_SMTP_PORT            = int(os.getenv("EMAIL_SMTP_PORT", "465"))
+EMAIL_CHECK_INTERVAL_SEC   = int(os.getenv("EMAIL_CHECK_INTERVAL_SEC", "1800"))  # 30 min
+EMAIL_APPROVAL_TIMEOUT_SEC = int(os.getenv("EMAIL_APPROVAL_TIMEOUT_SEC", "86400"))  # 24 hours
+
 # ─── ROS2 / Nav2 / LiDAR / OAK-D ─────────────────────────────────────────────
 # Set USE_NAV2=true in .env to enable autonomous navigation via Nav2
 # If false or ROS2 not running, Eric falls back to direct motor control
