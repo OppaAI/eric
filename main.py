@@ -182,6 +182,16 @@ def main():
                 # During active mission: treat as character response
                 # Outside mission: treat as new mission briefing command
                 try:
+                    # Check email commands first
+                    from config import EMAIL_ENABLED
+                    if EMAIL_ENABLED:
+                        from email_handler import handle_voice_email_command
+                        email_response = handle_voice_email_command(text)
+                        if email_response:
+                            from tts import speak
+                            speak(email_response)
+                            return
+
                     from mission import get_mission_active, handle_character_response, start_mission
                     if get_mission_active():
                         log.info(f"Voice: routing to character comms → {text!r}")
@@ -207,6 +217,16 @@ def main():
             )
         else:
             log.warning("Voice: init failed — voice input unavailable")
+
+    # ── Email handler init ───────────────────────────────────────────────────
+    from config import EMAIL_ENABLED
+    if EMAIL_ENABLED:
+        from email_handler import init_email, start_email_timer
+        if init_email():
+            start_email_timer()
+            log.info("Email: handler ready — checking every 30 min")
+        else:
+            log.warning("Email: init failed — check ERIC_EMAIL_PASSWORD in .env")
 
     # ── Cosmos connectivity test ──────────────────────────────────────────────
     from cosmos import ask_cosmos
