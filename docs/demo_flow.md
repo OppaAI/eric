@@ -5,6 +5,7 @@
 ---
 
 ## Demo 1 — Greet Owner
+> 🟢 Green boxes indicate where NVIDIA Cosmos Reason 2 is called for inference.
 
 ```mermaid
 flowchart TD
@@ -115,6 +116,7 @@ flowchart TD
 ---
 
 ## Demo 2 — Search and Rescue
+> 🟢 Green boxes indicate where NVIDIA Cosmos Reason 2 is called for inference.
 
 ```mermaid
 flowchart TD
