@@ -6,7 +6,8 @@ Stack:
   - Cosmos Reason 2 (vLLM)       : vision + physical reasoning
   - Piper via RealtimeTTS        : streaming TTS, CPU only, zero VRAM
   - Waveshare UGV Beast          : tracked robot via serial UART → ESP32
-  - Gradio                       : dual camera GUI + mission control
+  - Gradio                       : dual camera GUI + mission control (prevent_thread_lock)
+  - ROS2 Nodes                   : MotorNode, LidarNode, OakdNode, OdomNode, TtsNode, AlarmNode
   - ROS2 Nav2 + SLAM Toolbox     : autonomous path planning + online mapping
   - D500 LiDAR                   : /scan for SLAM + reactive safety layer
   - OAK-D Lite                   : stereo depth + YOLO person detection
@@ -47,7 +48,43 @@ def _graceful_shutdown(signum=None, frame=None):
     """
     Called on SIGINT, SIGTERM, or normal process exit via atexit.
     Shutdown order is the reverse of init order.
+    ROS2 nodes stopped first, then nav2/slam/ros_core.
     """
+    # ── Stop ROS2 nodes (reverse init order) ──────────────────────────────────
+    for mod, fn in [
+        ("oakd",   "stop_oakd_node"),
+        ("lidar",  "stop_lidar_node"),
+        ("odom",   "stop_odom_node"),
+        ("motors", "stop_motor_node"),
+        ("tts",    "stop_tts_node"),
+        ("alarm",  "stop_alarm_node"),
+    ]:
+        try:
+            m = __import__(mod)
+            getattr(m, fn)()
+        except Exception as e:
+            log.debug(f"{fn} skipped ({e})")
+
+    # ── Stop voice + comms ─────────────────────────────────────────────────────
+    try:
+        from voice import stop_voice_pipeline
+        stop_voice_pipeline()
+    except Exception as e:
+        log.debug(f"Voice pipeline shutdown skipped ({e})")
+
+    try:
+        from telegram_handler import stop_telegram_bot
+        stop_telegram_bot()
+    except Exception as e:
+        log.debug(f"Telegram shutdown skipped ({e})")
+
+    try:
+        from email_handler import stop_email_timer
+        stop_email_timer()
+    except Exception as e:
+        log.debug(f"Email timer shutdown skipped ({e})")
+
+    # ── Stop ROS2 nav stack ───────────────────────────────────────────────────
     try:
         from nav2 import shutdown as nav2_shutdown
         nav2_shutdown()
@@ -80,7 +117,29 @@ def main():
 
     # motors.py is always imported — it owns the UART port and must come first
     # so that odom.py can subscribe to its router.
-    from motors import motors  # noqa: F401 — side effect: opens serial port
+    from motors import motors, start_motor_node  # noqa: F401 — side effect: opens serial port
+    if USE_NAV2:
+        # MotorNode subscribes /cmd_vel for Nav2 velocity commands
+        if start_motor_node():
+            log.info("MotorNode: /cmd_vel subscriber active")
+        else:
+            log.warning("MotorNode: failed — Nav2 cmd_vel will not reach motors")
+
+    # ── TTS + Alarm nodes — always started (no ROS2 dependency on hardware) ──
+    try:
+        from tts import init_tts, start_tts_node
+        # init_tts called later in gui.launch — start node for topic interface
+        if start_tts_node():
+            log.info("TtsNode: /tts/speak topic active")
+    except Exception as e:
+        log.warning(f"TtsNode: failed to start — {e}")
+
+    try:
+        from alarm import start_alarm_node
+        if start_alarm_node():
+            log.info("AlarmNode: /alarm/trigger topic active")
+    except Exception as e:
+        log.warning(f"AlarmNode: failed to start — {e}")
 
     # ── ROS2 stack — init order matters ──────────────────────────────────────
     # odom, lidar, slam, nav2 all share the single ros_core node.
@@ -94,6 +153,9 @@ def main():
         init_odom()
         if odom_available():
             log.info("Odometry: /odom publisher active")
+            from odom import start_odom_node
+            if start_odom_node():
+                log.info("OdomNode: /odom/pose_simple + /odom/reset topics active")
         else:
             log.warning("Odometry unavailable — SLAM localisation degraded")
 
@@ -104,6 +166,9 @@ def main():
         init_lidar()
         if lidar_available():
             log.info("LiDAR: /scan publishing — safety monitor active")
+            from lidar import start_lidar_node
+            if start_lidar_node():
+                log.info("LidarNode: /lidar/status + /lidar/safety topics active")
         else:
             log.warning("LiDAR unavailable — SLAM map building disabled")
 
@@ -126,6 +191,9 @@ def main():
             if oakd_available():
                 log.info("OAK-D depth perception active — publishing /oakd/depth")
                 _register_yolo_callback(set_yolo_callback, set_yolo_active, yolo_available)
+                from oakd import start_oakd_node
+                if start_oakd_node():
+                    log.info("OakdNode: /oakd/yolo + /oakd/status topics active")
             else:
                 log.warning("OAK-D unavailable — no depth perception or /oakd/depth")
 
@@ -143,10 +211,11 @@ def main():
         # Non-ROS mode — LiDAR and OAK-D still provide reactive safety
         if USE_LIDAR:
             log.info("LiDAR enabled (safety only, no ROS2)...")
-            from lidar import init_lidar, lidar_available
+            from lidar import init_lidar, lidar_available, start_lidar_node
             init_lidar()
             if lidar_available():
                 log.info("LiDAR safety monitor active")
+                start_lidar_node()
             else:
                 log.warning("LiDAR unavailable — no hardware safety layer")
 
@@ -158,6 +227,8 @@ def main():
             if oakd_available():
                 log.info("OAK-D depth perception active")
                 _register_yolo_callback(set_yolo_callback, set_yolo_active, yolo_available)
+                from oakd import start_oakd_node
+                start_oakd_node()
             else:
                 log.warning("OAK-D unavailable — no depth perception")
 
@@ -177,6 +248,13 @@ def main():
                 """
                 if is_wake:
                     log.info(f"Voice: wake word activated — {text!r}")
+                    try:
+                        from config import TELEGRAM_ENABLED
+                        if TELEGRAM_ENABLED:
+                            from telegram_handler import notify
+                            notify("👂 Voice session activated")
+                    except Exception:
+                        pass
                     return
                 # Pass utterance to mission as if typed in GUI
                 # During active mission: treat as character response
@@ -218,6 +296,23 @@ def main():
         else:
             log.warning("Voice: init failed — voice input unavailable")
 
+    # ── Telegram bot init ────────────────────────────────────────────────────
+    from config import TELEGRAM_ENABLED
+    if TELEGRAM_ENABLED:
+        from telegram_handler import init_telegram, start_telegram_bot, notify
+        if init_telegram():
+            start_telegram_bot()
+            log.info("Telegram: bot started — owner notifications active")
+            # Notify owner Eric is online
+            import threading
+            threading.Timer(3.0, lambda: notify(
+                "🤖 *ERIC online.*
+Edge Robotics Innovation by Cosmos.
+Ready for missions."
+            )).start()
+        else:
+            log.warning("Telegram: init failed — check TELEGRAM_BOT_TOKEN in .env")
+
     # ── Email handler init ───────────────────────────────────────────────────
     from config import EMAIL_ENABLED
     if EMAIL_ENABLED:
@@ -233,7 +328,7 @@ def main():
     test = ask_cosmos("Say exactly: ERIC online and ready.", max_tokens=20)
     log.info(f"Cosmos test: {test}")
 
-    # ── Launch Gradio GUI (blocking) ──────────────────────────────────────────
+    # ── Launch Gradio GUI (non-blocking — prevent_thread_lock=True) ──────────
     try:
         from gui import launch
     except ImportError as e:

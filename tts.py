@@ -171,3 +171,117 @@ def _gtts_speak(text: str):
 
 def piper_available() -> bool:
     return _piper_available
+
+# ─── ROS2 TtsNode ─────────────────────────────────────────────────────────────
+# Thin wrapper that adds ROS2 topic interfaces to tts.py.
+# speak() Python API remains UNCHANGED — mission.py calls it directly.
+#
+# Topics added:
+#   Subscribe  /tts/speak     std_msgs/String   — text to speak
+#   Subscribe  /tts/clear     std_msgs/Empty    — clear queue
+#   Publish    /tts/status    std_msgs/String   — "speaking" | "idle"
+#
+# Usage (from main.py):
+#   from tts import TtsNode, start_tts_node
+#   start_tts_node()
+#   speak("hello")   # still works identically
+
+import threading as _tts_threading
+
+_tts_node        = None
+_tts_node_thread = None
+_tts_node_lock   = _tts_threading.Lock()
+
+
+class TtsNode:
+    """ROS2 node wrapper for TTS. Adds topic interfaces, keeps speak() API intact."""
+
+    def __init__(self):
+        import rclpy
+        from rclpy.node import Node
+        from std_msgs.msg import String, Empty
+
+        rclpy.init(args=None)
+        self._node = Node("eric_tts_node")
+
+        # Subscribe /tts/speak — any node can request speech
+        self._speak_sub = self._node.create_subscription(
+            String, "/tts/speak", self._on_speak, 10
+        )
+
+        # Subscribe /tts/clear — clear the speech queue
+        self._clear_sub = self._node.create_subscription(
+            Empty, "/tts/clear", self._on_clear, 10
+        )
+
+        # Publish /tts/status — "speaking" or "idle"
+        self._status_pub = self._node.create_publisher(String, "/tts/status", 10)
+        self._status_timer = self._node.create_timer(0.5, self._publish_status)
+
+        log.info("TtsNode: ROS2 node ready")
+
+    def _on_speak(self, msg):
+        speak(msg.data)
+
+    def _on_clear(self, msg):
+        """Clear the TTS queue — stops pending speech."""
+        while not _tts_queue.empty():
+            try:
+                _tts_queue.get_nowait()
+                _tts_queue.task_done()
+            except Exception:
+                break
+
+    def _publish_status(self):
+        from std_msgs.msg import String
+        status = "speaking" if not _tts_queue.empty() else "idle"
+        self._status_pub.publish(String(data=status))
+
+    def spin(self):
+        import rclpy
+        try:
+            rclpy.spin(self._node)
+        except Exception as e:
+            log.debug(f"TtsNode spin ended: {e}")
+        finally:
+            self._node.destroy_node()
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+
+    def destroy(self):
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
+def start_tts_node() -> bool:
+    """Launch TtsNode in a background daemon thread."""
+    global _tts_node, _tts_node_thread
+    with _tts_node_lock:
+        if _tts_node is not None:
+            return True
+        try:
+            _tts_node = TtsNode()
+            _tts_node_thread = _tts_threading.Thread(
+                target=_tts_node.spin,
+                daemon=True,
+                name="tts-node-spin"
+            )
+            _tts_node_thread.start()
+            log.info("TtsNode: spinning in background thread")
+            return True
+        except Exception as e:
+            log.error(f"TtsNode: failed to start — {e}")
+            _tts_node = None
+            return False
+
+
+def stop_tts_node():
+    global _tts_node
+    with _tts_node_lock:
+        if _tts_node:
+            _tts_node.destroy()
+            _tts_node = None

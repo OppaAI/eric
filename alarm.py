@@ -281,3 +281,120 @@ def _play_tone(tone_type: str | None, repeat: int = 1):
         log.debug("pygame not available — tone skipped")
     except Exception as e:
         log.warning(f"Tone playback error: {e}")
+
+
+# ─── ROS2 AlarmNode ───────────────────────────────────────────────────────────
+# Thin wrapper that adds ROS2 topic interfaces to alarm.py.
+# sound_alarm() Python API remains UNCHANGED.
+#
+# Topics added:
+#   Subscribe  /alarm/trigger   std_msgs/String  — JSON {"type":"siren","detail":"..."}
+#   Subscribe  /alarm/stop      std_msgs/Empty   — stop active alarm
+#   Publish    /alarm/state     std_msgs/String  — "active" | "idle"
+#
+# Usage (from main.py):
+#   from alarm import AlarmNode, start_alarm_node
+#   start_alarm_node()
+#   sound_alarm(AlarmType.SIREN, "...")  # still works identically
+
+import threading as _alarm_threading
+import json      as _alarm_json
+
+_alarm_node        = None
+_alarm_node_thread = None
+_alarm_node_lock   = _alarm_threading.Lock()
+
+
+class AlarmNode:
+    """ROS2 node wrapper for Alarm. Adds topic interfaces, keeps sound_alarm() intact."""
+
+    def __init__(self):
+        import rclpy
+        from rclpy.node import Node
+        from std_msgs.msg import String, Empty
+
+        rclpy.init(args=None)
+        self._node = Node("eric_alarm_node")
+
+        self._trigger_sub = self._node.create_subscription(
+            String, "/alarm/trigger", self._on_trigger, 10
+        )
+        self._stop_sub = self._node.create_subscription(
+            Empty, "/alarm/stop", self._on_stop, 10
+        )
+        self._state_pub  = self._node.create_publisher(String, "/alarm/state", 10)
+        self._state_timer = self._node.create_timer(1.0, self._publish_state)
+
+        log.info("AlarmNode: ROS2 node ready")
+
+    def _on_trigger(self, msg):
+        """
+        Trigger alarm from ROS2 topic.
+        Message format: JSON string {"type": "siren", "detail": "Person found"}
+        Or plain string alarm type: "siren" | "hazard" | "suspicious" | "nature" | "clear"
+        """
+        try:
+            data   = _alarm_json.loads(msg.data)
+            atype  = data.get("type",   AlarmType.HAZARD)
+            detail = data.get("detail", "")
+        except Exception:
+            atype  = msg.data.strip().lower()
+            detail = ""
+        sound_alarm(atype, detail)
+
+    def _on_stop(self, msg):
+        stop_alarm()
+
+    def _publish_state(self):
+        from std_msgs.msg import String
+        active = _alarm_thread is not None and _alarm_thread.is_alive()
+        self._state_pub.publish(String(data="active" if active else "idle"))
+
+    def spin(self):
+        import rclpy
+        try:
+            rclpy.spin(self._node)
+        except Exception as e:
+            log.debug(f"AlarmNode spin ended: {e}")
+        finally:
+            self._node.destroy_node()
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+
+    def destroy(self):
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
+def start_alarm_node() -> bool:
+    """Launch AlarmNode in a background daemon thread."""
+    global _alarm_node, _alarm_node_thread
+    with _alarm_node_lock:
+        if _alarm_node is not None:
+            return True
+        try:
+            _alarm_node = AlarmNode()
+            _alarm_node_thread = _alarm_threading.Thread(
+                target=_alarm_node.spin,
+                daemon=True,
+                name="alarm-node-spin"
+            )
+            _alarm_node_thread.start()
+            log.info("AlarmNode: spinning in background thread")
+            return True
+        except Exception as e:
+            log.error(f"AlarmNode: failed to start — {e}")
+            _alarm_node = None
+            return False
+
+
+def stop_alarm_node():
+    global _alarm_node
+    with _alarm_node_lock:
+        if _alarm_node:
+            _alarm_node.destroy()
+            _alarm_node = None

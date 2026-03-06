@@ -1060,3 +1060,154 @@ def oakd_status_html() -> str:
             YOLO L2: <span style="color:{yolo_color}">{yolo_str}</span>
         </div>
     </div>"""
+
+# ─── ROS2 OakdNode ────────────────────────────────────────────────────────────
+# Thin wrapper that adds additional ROS2 topic interfaces to oakd.py.
+# The existing /oakd/depth publisher (in _init_depth_publisher) remains UNCHANGED.
+# Python API (get_front_depth, oakd_available, etc.) remains UNCHANGED.
+#
+# Topics added:
+#   Publish    /oakd/yolo      std_msgs/String  — JSON YOLO detection events
+#   Publish    /oakd/status    std_msgs/String  — JSON status dict
+#   Subscribe  /oakd/yolo_enable  std_msgs/Bool — enable/disable YOLO
+#
+# The existing /oakd/depth topic continues to work for Nav2 costmap unchanged.
+#
+# Usage (from main.py):
+#   from oakd import init_oakd, start_oakd_node
+#   init_oakd()        # existing — starts depth pipeline + YOLO
+#   start_oakd_node()  # new — starts YOLO/status topic publishers
+
+import threading as _oakd_threading
+import json      as _oakd_json
+
+_oakd_node        = None
+_oakd_node_thread = None
+_oakd_node_lock   = _oakd_threading.Lock()
+
+# YOLO topic publisher reference — set after node starts
+_yolo_topic_pub = None
+
+
+class OakdNode:
+    """ROS2 node wrapper for OAK-D. Adds YOLO/status topics, keeps Python API intact."""
+
+    def __init__(self):
+        import rclpy
+        from rclpy.node import Node
+        from std_msgs.msg import String, Bool
+
+        rclpy.init(args=None)
+        self._node = Node("eric_oakd_node")
+
+        # Publish /oakd/yolo — YOLO detection events as JSON
+        self._yolo_pub  = self._node.create_publisher(String, "/oakd/yolo", 10)
+
+        # Publish /oakd/status — full OAK-D status as JSON
+        self._status_pub = self._node.create_publisher(String, "/oakd/status", 10)
+
+        # Subscribe /oakd/yolo_enable — remote enable/disable YOLO
+        self._yolo_enable_sub = self._node.create_subscription(
+            Bool, "/oakd/yolo_enable", self._on_yolo_enable, 10
+        )
+
+        # Status at 1 Hz
+        self._status_timer = self._node.create_timer(1.0, self._publish_status)
+
+        # Register ourselves as the YOLO topic publisher
+        global _yolo_topic_pub
+        _yolo_topic_pub = self._yolo_pub
+
+        # Hook into the existing YOLO callback system
+        self._register_yolo_hook()
+
+        log.info("OakdNode: ROS2 YOLO/status topics active")
+
+    def _register_yolo_hook(self):
+        """Register a callback that publishes YOLO detections to /oakd/yolo topic."""
+        try:
+            original_cb = _yolo_callback  # preserve existing callback (mission.py hook)
+        except Exception:
+            original_cb = None
+
+        def _topic_yolo_cb(label: str, dist_m: float,
+                           bearing: str, bearing_deg: float):
+            # Publish to ROS2 topic
+            from std_msgs.msg import String as _Str
+            payload = _oakd_json.dumps({
+                "label":       label,
+                "dist_m":      round(dist_m, 2),
+                "bearing":     bearing,
+                "bearing_deg": round(bearing_deg, 1),
+            })
+            try:
+                self._yolo_pub.publish(_Str(data=payload))
+            except Exception:
+                pass
+            # Also forward to original mission.py callback if set
+            if original_cb:
+                try:
+                    original_cb(label, dist_m, bearing, bearing_deg)
+                except Exception:
+                    pass
+
+        set_yolo_callback(_topic_yolo_cb)
+        log.debug("OakdNode: YOLO topic hook registered")
+
+    def _on_yolo_enable(self, msg):
+        set_yolo_active(msg.data)
+        log.info(f"OakdNode: YOLO {'enabled' if msg.data else 'disabled'} via topic")
+
+    def _publish_status(self):
+        from std_msgs.msg import String
+        s = get_status()
+        self._status_pub.publish(String(data=_oakd_json.dumps(s)))
+
+    def spin(self):
+        import rclpy
+        try:
+            rclpy.spin(self._node)
+        except Exception as e:
+            log.debug(f"OakdNode spin ended: {e}")
+        finally:
+            self._node.destroy_node()
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+
+    def destroy(self):
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
+def start_oakd_node() -> bool:
+    """Launch OakdNode in a background daemon thread."""
+    global _oakd_node, _oakd_node_thread
+    with _oakd_node_lock:
+        if _oakd_node is not None:
+            return True
+        try:
+            _oakd_node = OakdNode()
+            _oakd_node_thread = _oakd_threading.Thread(
+                target=_oakd_node.spin,
+                daemon=True,
+                name="oakd-node-spin"
+            )
+            _oakd_node_thread.start()
+            log.info("OakdNode: spinning in background thread")
+            return True
+        except Exception as e:
+            log.error(f"OakdNode: failed to start — {e}")
+            _oakd_node = None
+            return False
+
+
+def stop_oakd_node():
+    global _oakd_node
+    with _oakd_node_lock:
+        if _oakd_node:
+            _oakd_node.destroy()
+            _oakd_node = None

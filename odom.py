@@ -306,3 +306,110 @@ def get_status() -> dict:
         "y":         pose["y"],
         "theta_deg": round(math.degrees(pose["theta"]), 1),
     }
+
+# ─── ROS2 OdomNode wrapper ────────────────────────────────────────────────────
+# odom.py already publishes /odom and TF via init_odom().
+# This wrapper adds a lifecycle-style start/stop API consistent
+# with the other nodes, and adds /odom/pose status topic.
+#
+# Topics added:
+#   Publish    /odom/pose_simple   std_msgs/String  — JSON {x, y, theta_deg}
+#   Subscribe  /odom/reset         std_msgs/Empty   — reset pose to origin
+#
+# The existing /odom and TF broadcast from init_odom() are UNCHANGED.
+#
+# Usage (from main.py):
+#   from odom import init_odom, start_odom_node
+#   init_odom()        # existing — starts UART subscriber + /odom publisher
+#   start_odom_node()  # new — starts pose/reset topic interfaces
+
+import threading as _odom_node_threading
+
+_odom_node_inst   = None
+_odom_node_thread = None
+_odom_node_lock   = _odom_node_threading.Lock()
+
+
+class OdomNode:
+    """ROS2 node lifecycle wrapper for odom.py. Adds pose/reset topics."""
+
+    def __init__(self):
+        import rclpy
+        from rclpy.node import Node
+        from std_msgs.msg import String, Empty
+
+        rclpy.init(args=None)
+        self._node = Node("eric_odom_node")
+
+        # Publish simplified pose — useful for Telegram/GUI display
+        self._pose_pub = self._node.create_publisher(String, "/odom/pose_simple", 10)
+
+        # Subscribe /odom/reset — zero pose from any node
+        self._reset_sub = self._node.create_subscription(
+            Empty, "/odom/reset", self._on_reset, 10
+        )
+
+        # Publish at 5 Hz
+        self._timer = self._node.create_timer(0.2, self._publish_pose)
+
+        log.info("OdomNode: ROS2 pose/reset topics active")
+
+    def _on_reset(self, msg):
+        reset_pose()
+        log.info("OdomNode: pose reset via /odom/reset topic")
+
+    def _publish_pose(self):
+        from std_msgs.msg import String
+        import json as _j
+        pose = get_pose()
+        pose["theta_deg"] = round(math.degrees(pose["theta"]), 1)
+        self._pose_pub.publish(String(data=_j.dumps(pose)))
+
+    def spin(self):
+        import rclpy
+        try:
+            rclpy.spin(self._node)
+        except Exception as e:
+            log.debug(f"OdomNode spin ended: {e}")
+        finally:
+            self._node.destroy_node()
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+
+    def destroy(self):
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
+def start_odom_node() -> bool:
+    """Launch OdomNode in a background daemon thread."""
+    global _odom_node_inst, _odom_node_thread
+    with _odom_node_lock:
+        if _odom_node_inst is not None:
+            return True
+        try:
+            _odom_node_inst = OdomNode()
+            _odom_node_thread = _odom_node_threading.Thread(
+                target=_odom_node_inst.spin,
+                daemon=True,
+                name="odom-node-spin"
+            )
+            _odom_node_thread.start()
+            log.info("OdomNode: spinning in background thread")
+            return True
+        except Exception as e:
+            log.error(f"OdomNode: failed to start — {e}")
+            _odom_node_inst = None
+            return False
+
+
+def stop_odom_node():
+    global _odom_node_inst
+    with _odom_node_lock:
+        if _odom_node_inst:
+            _odom_node_inst.destroy()
+            _odom_node_inst = None

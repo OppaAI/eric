@@ -506,3 +506,127 @@ def lidar_status_html() -> str:
             &nbsp;|&nbsp; Slow at: {SLOW_DIST}m
         </div>
     </div>"""
+
+# ─── ROS2 LidarNode ───────────────────────────────────────────────────────────
+# Thin wrapper that adds additional ROS2 topic interfaces to lidar.py.
+# The existing /scan publisher (in init_lidar) remains UNCHANGED.
+# Python API (obstacle_close, safe_to_forward, etc.) remains UNCHANGED.
+#
+# Topics added:
+#   Publish    /lidar/status    std_msgs/String  — JSON status dict
+#   Publish    /lidar/safety    std_msgs/String  — "clear"|"near"|"close"|"void"
+#   Subscribe  /lidar/safety_enable  std_msgs/Bool — enable/disable safety layer
+#
+# The existing /scan topic published by init_lidar() continues to work for
+# SLAM Toolbox and Nav2 costmap without any changes.
+#
+# Usage (from main.py):
+#   from lidar import init_lidar, start_lidar_node
+#   init_lidar()        # existing — starts /scan publisher + safety monitor
+#   start_lidar_node()  # new — starts status/safety topic publishers
+
+import threading as _lidar_threading
+import json      as _lidar_json
+
+_lidar_node        = None
+_lidar_node_thread = None
+_lidar_node_lock   = _lidar_threading.Lock()
+
+
+class LidarNode:
+    """ROS2 node wrapper for LiDAR. Adds status/safety topics, keeps Python API intact."""
+
+    def __init__(self):
+        import rclpy
+        from rclpy.node import Node
+        from std_msgs.msg import String, Bool
+
+        rclpy.init(args=None)
+        self._node = Node("eric_lidar_node")
+
+        # Publish /lidar/status — full status dict as JSON
+        self._status_pub = self._node.create_publisher(String, "/lidar/status", 10)
+
+        # Publish /lidar/safety — simple safety state string
+        self._safety_pub = self._node.create_publisher(String, "/lidar/safety", 10)
+
+        # Subscribe /lidar/safety_enable — remote enable/disable safety layer
+        self._safety_enable_sub = self._node.create_subscription(
+            Bool, "/lidar/safety_enable", self._on_safety_enable, 10
+        )
+
+        # Publish at 2 Hz — safety state changes frequently enough
+        self._timer = self._node.create_timer(0.5, self._publish_status)
+
+        log.info("LidarNode: ROS2 status/safety topics active")
+
+    def _on_safety_enable(self, msg):
+        set_safety_active(msg.data)
+        log.info(f"LidarNode: safety {'enabled' if msg.data else 'disabled'} via topic")
+
+    def _publish_status(self):
+        from std_msgs.msg import String
+        s = get_status()
+
+        # Full status JSON
+        self._status_pub.publish(String(data=_lidar_json.dumps(s)))
+
+        # Simple safety string
+        if s.get("void_active"):
+            safety = "void"
+        elif s.get("obstacle_close"):
+            safety = "close"
+        elif s.get("obstacle_near"):
+            safety = "near"
+        else:
+            safety = "clear"
+        self._safety_pub.publish(String(data=safety))
+
+    def spin(self):
+        import rclpy
+        try:
+            rclpy.spin(self._node)
+        except Exception as e:
+            log.debug(f"LidarNode spin ended: {e}")
+        finally:
+            self._node.destroy_node()
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+
+    def destroy(self):
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
+def start_lidar_node() -> bool:
+    """Launch LidarNode in a background daemon thread."""
+    global _lidar_node, _lidar_node_thread
+    with _lidar_node_lock:
+        if _lidar_node is not None:
+            return True
+        try:
+            _lidar_node = LidarNode()
+            _lidar_node_thread = _lidar_threading.Thread(
+                target=_lidar_node.spin,
+                daemon=True,
+                name="lidar-node-spin"
+            )
+            _lidar_node_thread.start()
+            log.info("LidarNode: spinning in background thread")
+            return True
+        except Exception as e:
+            log.error(f"LidarNode: failed to start — {e}")
+            _lidar_node = None
+            return False
+
+
+def stop_lidar_node():
+    global _lidar_node
+    with _lidar_node_lock:
+        if _lidar_node:
+            _lidar_node.destroy()
+            _lidar_node = None

@@ -266,3 +266,177 @@ class Motors:
 
 
 motors = Motors()
+
+# ─── ROS2 MotorNode ───────────────────────────────────────────────────────────
+# Thin wrapper that adds ROS2 topic interfaces to the Motors class.
+# The Python motors API (motors.forward/stop/left/right) remains UNCHANGED —
+# mission.py continues to call it directly with zero modifications.
+#
+# Topics added:
+#   Subscribe  /cmd_vel          geometry_msgs/Twist  — Nav2 velocity commands
+#   Subscribe  /motor/command    std_msgs/String      — "forward/stop/left/right/backward/fast"
+#   Subscribe  /motor/speed      std_msgs/Float32     — override speed m/s
+#   Publish    /motor/state      std_msgs/String      — JSON {direction, left, right}
+#
+# Usage (from main.py):
+#   from motors import motors, MotorNode, start_motor_node
+#   start_motor_node()   # launches node in background thread
+#   motors.forward()     # still works identically
+
+import threading as _threading
+import json as _json_mod
+
+_motor_node        = None
+_motor_node_thread = None
+_motor_node_lock   = _threading.Lock()
+
+
+class MotorNode:
+    """ROS2 node wrapper for Motors. Adds topic interfaces, keeps Python API intact."""
+
+    def __init__(self):
+        import rclpy
+        from rclpy.node import Node
+        from geometry_msgs.msg import Twist
+        from std_msgs.msg import String, Float32
+
+        rclpy.init(args=None)
+        self._node = Node("eric_motor_node")
+
+        # Subscribe /cmd_vel — Nav2 sends Twist messages here
+        self._cmd_vel_sub = self._node.create_subscription(
+            Twist, "/cmd_vel", self._on_cmd_vel, 10
+        )
+
+        # Subscribe /motor/command — simple string commands
+        self._cmd_sub = self._node.create_subscription(
+            String, "/motor/command", self._on_command, 10
+        )
+
+        # Subscribe /motor/speed — runtime speed override
+        self._speed_sub = self._node.create_subscription(
+            Float32, "/motor/speed", self._on_speed, 10
+        )
+
+        # Publish /motor/state — current motor state as JSON string
+        self._state_pub = self._node.create_publisher(String, "/motor/state", 10)
+
+        # Timer — publish state at 10 Hz
+        self._state_timer = self._node.create_timer(0.1, self._publish_state)
+
+        self._override_speed = MOTOR_SPEED_NORMAL
+        log.info("MotorNode: ROS2 node ready")
+
+    def _on_cmd_vel(self, msg):
+        """
+        Handle Nav2 Twist commands on /cmd_vel.
+        linear.x > 0  → forward
+        linear.x < 0  → backward
+        angular.z > 0 → left turn
+        angular.z < 0 → right turn
+        Both zero     → stop
+        Differential drive: L = linear.x - angular.z * WHEEL_BASE/2
+                            R = linear.x + angular.z * WHEEL_BASE/2
+        """
+        lx = msg.linear.x
+        az = msg.angular.z
+        wheel_base = 0.30   # metres — matches odom.py WHEEL_BASE_M
+        half_wb    = wheel_base / 2.0
+
+        if lx == 0.0 and az == 0.0:
+            motors.stop()
+            return
+
+        # Convert Twist to differential wheel speeds
+        left  = -(lx - az * half_wb)   # negate: negative = forward on UGV Beast
+        right = -(lx + az * half_wb)
+
+        motors._send(round(left, 3), round(right, 3))
+
+    def _on_command(self, msg):
+        """Handle simple string motor commands on /motor/command."""
+        cmd = msg.data.strip().lower()
+        s   = self._override_speed
+        dispatch = {
+            "forward":  lambda: motors.forward(s),
+            "backward": lambda: motors.backward(s),
+            "left":     lambda: motors.left(s),
+            "right":    lambda: motors.right(s),
+            "stop":     motors.stop,
+            "fast":     motors.fast,
+        }
+        fn = dispatch.get(cmd)
+        if fn:
+            fn()
+        else:
+            log.warning(f"MotorNode: unknown command {cmd!r}")
+
+    def _on_speed(self, msg):
+        """Update runtime speed override."""
+        self._override_speed = float(msg.data)
+
+    def _publish_state(self):
+        """Publish current motor state as JSON on /motor/state."""
+        from std_msgs.msg import String
+        state = _json_mod.dumps({
+            "direction": "forward" if motors._current_left < 0 else
+                         "backward" if motors._current_left > 0 else "stopped",
+            "left":  round(motors._current_left, 3),
+            "right": round(motors._current_right, 3),
+        })
+        self._state_pub.publish(String(data=state))
+
+    def spin(self):
+        """Block spinning the node. Call from a dedicated thread."""
+        import rclpy
+        try:
+            rclpy.spin(self._node)
+        except Exception as e:
+            log.debug(f"MotorNode spin ended: {e}")
+        finally:
+            self._node.destroy_node()
+            try:
+                rclpy.shutdown()
+            except Exception:
+                pass
+
+    def destroy(self):
+        try:
+            self._node.destroy_node()
+        except Exception:
+            pass
+
+
+def start_motor_node() -> bool:
+    """
+    Launch MotorNode in a background daemon thread.
+    Safe to call multiple times — no-ops if already running.
+    Returns True if node started successfully.
+    """
+    global _motor_node, _motor_node_thread
+    with _motor_node_lock:
+        if _motor_node is not None:
+            return True
+        try:
+            _motor_node = MotorNode()
+            _motor_node_thread = _threading.Thread(
+                target=_motor_node.spin,
+                daemon=True,
+                name="motor-node-spin"
+            )
+            _motor_node_thread.start()
+            log.info("MotorNode: spinning in background thread")
+            return True
+        except Exception as e:
+            log.error(f"MotorNode: failed to start — {e}")
+            _motor_node = None
+            return False
+
+
+def stop_motor_node():
+    """Stop the MotorNode cleanly."""
+    global _motor_node
+    with _motor_node_lock:
+        if _motor_node:
+            _motor_node.destroy()
+            _motor_node = None
