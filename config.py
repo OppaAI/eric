@@ -56,6 +56,11 @@ ASR_SPEAKER_EMBEDDING  = os.getenv("ASR_SPEAKER_EMBEDDING", str(Path.home() / ".
 ASR_VERIFY_THRESHOLD   = float(os.getenv("ASR_VERIFY_THRESHOLD", "0.75"))  # 0-1, higher = stricter
 
 
+# ─── Telegram Bot ─────────────────────────────────────────────────────────────
+TELEGRAM_ENABLED    = os.getenv("TELEGRAM_ENABLED",    "false").lower() == "true"
+TELEGRAM_BOT_TOKEN  = os.getenv("TELEGRAM_BOT_TOKEN",  "")   # from @BotFather
+TELEGRAM_OWNER_ID   = os.getenv("TELEGRAM_OWNER_ID",   "")   # from @userinfobot
+
 # ─── Email (Gmail IMAP/SMTP) ──────────────────────────────────────────────────
 EMAIL_ENABLED              = os.getenv("EMAIL_ENABLED",   "false").lower() == "true"
 ERIC_EMAIL_ADDRESS         = os.getenv("ERIC_EMAIL_ADDRESS",  "eric.agi.robot@gmail.com")
