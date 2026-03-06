@@ -150,7 +150,7 @@ non-blocking queue"]
 → See [Demo Flow](docs/demo_flow.md) for the full Cosmos reasoning pipeline for this demo.
 > 🟢 Green boxes indicate where NVIDIA Cosmos Reason 2 is called for inference.
 
-### Mission 1: Greet My Creator (Indoor · Target Identification · Conversation)**  
+### Mission 1: Greet My Creator (Indoor · Target Identification · Conversation). 
 
 *Mission file: [`greet_owner.yaml`](missions/greet_owner.yaml) — see [Missions](docs/MISSIONS.md) for all missions and YAML schema.*
 
@@ -169,7 +169,7 @@ What you see in the recording:
 
 **Note:** Cosmos described the operator accurately from visual data alone — toque, clothing colour, glasses (vs. sunglasses) — with no prior training on this person. Pure Cosmos Reason 2 visual inference.
 
-### Mission 2: Search and Rescue (Indoor · Casualty)**
+### Mission 2: Search and Rescue (Indoor · Casualty). 
   
 *Mission file: [`search_and_rescue.yaml`](missions/search_and_rescue.yaml) — see [Missions](docs/MISSIONS.md) for all missions and YAML schema.*  
    
