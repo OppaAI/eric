@@ -144,6 +144,8 @@ non-blocking queue"]
 ---
 ## Demo
 
+Click the image below to play the demo video.
+
 [![ERIC Demo](https://img.youtube.com/vi/UD3itpQ8d6M/maxresdefault.jpg)](https://www.youtube.com/watch?v=UD3itpQ8d6M)
 
 
