@@ -146,7 +146,7 @@ non-blocking queue"]
 
 Click the image below to play the demo video.
 
-[![ERIC Demo](https://img.youtube.com/vi/UD3itpQ8d6M/maxresdefault.jpg)](https://www.youtube.com/watch?v=UD3itpQ8d6M)
+[![ERIC Demo](https://www.youtube.com/watch?v=UD3itpQ8d6M)
 
 
 → See [Demo Flow](docs/demo_flow.md) for the full Cosmos reasoning pipeline for this demo.
