@@ -37,6 +37,7 @@ MISSIONS_DIR = Path(__file__).parent / "missions"
 # ─── Gradio ───────────────────────────────────────────────────────────────────
 GRADIO_PORT = int(os.getenv("GRADIO_PORT", "7860"))
 GRADIO_HOST = os.getenv("GRADIO_HOST", "0.0.0.0")
+<<<<<<< HEAD
 
 # ─── ASR / Voice Pipeline (faster-whisper + silero-vad + ECAPA-TDNN) ────────────
 ASR_MODEL              = os.getenv("ASR_MODEL",    "distil-small.en")  # distil-small.en | distil-medium.en | base | turbo
@@ -80,3 +81,5 @@ USE_LIDAR         = os.getenv("USE_LIDAR",   "false").lower() == "true"
 USE_OAKD          = os.getenv("USE_OAKD",    "false").lower() == "true"
 LIDAR_STOP_DIST   = float(os.getenv("LIDAR_STOP_DIST", "0.30"))  # meters
 LIDAR_SLOW_DIST   = float(os.getenv("LIDAR_SLOW_DIST", "0.60"))  # meters
+=======
+>>>>>>> main
