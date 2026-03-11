@@ -1,3 +1,4 @@
+import threading
 """
 ERIC — Edge Robotics Innovation by Cosmos
 ================================================
@@ -111,6 +112,7 @@ signal.signal(signal.SIGTERM, _graceful_shutdown)
 # ── Main ──────────────────────────────────────────────────────────────────────
 
 def main():
+    import threading
     log.info("ERIC starting — Edge Robotics Innovation by Cosmos")
 
     from config import USE_NAV2, USE_LIDAR, USE_OAKD
@@ -232,87 +234,90 @@ def main():
             else:
                 log.warning("OAK-D unavailable — no depth perception")
 
-    # ── Voice pipeline init ──────────────────────────────────────────────────
-    from config import ASR_ENABLED
-    if ASR_ENABLED:
+# ── Voice pipeline init ──────────────────────────────────────────────────
+from config import ASR_ENABLED
+if ASR_ENABLED:
+    def _init_voice_bg():
         from voice import init_voice, start_voice_pipeline
 
-        if init_voice():
-            log.info("Voice: models loaded — starting pipeline...")
+        if not init_voice():
+            log.warning("Voice: init failed — voice input unavailable")
+            return
 
-            def _on_utterance(text: str, is_wake: bool):
-                """
-                Route transcribed utterances to mission system.
-                is_wake=True  → first activation (wake word heard)
-                is_wake=False → active session utterance
-                """
-                if is_wake:
-                    log.info(f"Voice: wake word activated — {text!r}")
-                    try:
-                        from config import TELEGRAM_ENABLED
-                        if TELEGRAM_ENABLED:
-                            from telegram_handler import notify
-                            notify("👂 Voice session activated")
-                    except Exception:
-                        pass
-                    return
-                # Pass utterance to mission as if typed in GUI
-                # During active mission: treat as character response
-                # Outside mission: treat as new mission briefing command
+        log.info("Voice: models loaded — starting pipeline...")
+
+        def _on_utterance(text: str, is_wake: bool):
+            """
+            Route transcribed utterances to mission system.
+            is_wake=True  → first activation (wake word heard)
+            is_wake=False → active session utterance
+            """
+            if is_wake:
+                log.info(f"Voice: wake word activated — {text!r}")
                 try:
-                    # Check email commands first
-                    from config import EMAIL_ENABLED
-                    if EMAIL_ENABLED:
-                        from email_handler import handle_voice_email_command
-                        email_response = handle_voice_email_command(text)
-                        if email_response:
-                            from tts import speak
-                            speak(email_response)
-                            return
-
-                    from mission import get_mission_active, handle_character_response, start_mission
-                    if get_mission_active():
-                        log.info(f"Voice: routing to character comms → {text!r}")
-                        handle_character_response("Operator", text)
-                    else:
-                        log.info(f"Voice: routing as mission command → {text!r}")
-                        start_mission(text)
-                except Exception as e:
-                    log.error(f"Voice: utterance routing error — {e}")
-
-            def _on_state_change(state: str):
-                log.debug(f"Voice state: {state}")
-                # Forward to GUI status if available
-                try:
-                    from gui import set_voice_state
-                    set_voice_state(state)
+                    from config import TELEGRAM_ENABLED
+                    if TELEGRAM_ENABLED:
+                        from telegram_handler import notify
+                        notify("👂 Voice session activated")
                 except Exception:
                     pass
+                return
 
-            start_voice_pipeline(
-                on_utterance=_on_utterance,
-                on_state_change=_on_state_change,
-            )
-        else:
-            log.warning("Voice: init failed — voice input unavailable")
+            # Pass utterance to mission as if typed in GUI
+            # During active mission: treat as character response
+            # Outside mission: treat as new mission briefing command
+            try:
+                # Check email commands first
+                from config import EMAIL_ENABLED
+                if EMAIL_ENABLED:
+                    from email_handler import handle_voice_email_command
+                    email_response = handle_voice_email_command(text)
+                    if email_response:
+                        from tts import speak
+                        speak(email_response)
+                        return
 
-    # ── Telegram bot init ────────────────────────────────────────────────────
-    from config import TELEGRAM_ENABLED
-    if TELEGRAM_ENABLED:
-        from telegram_handler import init_telegram, start_telegram_bot, notify
-        if init_telegram():
-            start_telegram_bot()
-            log.info("Telegram: bot started — owner notifications active")
-            # Notify owner Eric is online
-            import threading
-            threading.Timer(3.0, lambda: notify(
-                "🤖 *ERIC online.*
-Edge Robotics Innovation by Cosmos.
-Ready for missions."
-            )).start()
-        else:
-            log.warning("Telegram: init failed — check TELEGRAM_BOT_TOKEN in .env")
+                from mission import get_mission_active, handle_character_response, start_mission
+                if get_mission_active():
+                    log.info(f"Voice: routing to character comms → {text!r}")
+                    handle_character_response("Operator", text)
+                else:
+                    log.info(f"Voice: routing as mission command → {text!r}")
+                    start_mission(text)
+            except Exception as e:
+                log.error(f"Voice: utterance routing error — {e}")
 
+        def _on_state_change(state: str):
+            log.debug(f"Voice state: {state}")
+            try:
+                from gui import set_voice_state
+                set_voice_state(state)
+            except Exception:
+                pass
+
+        start_voice_pipeline(
+            on_utterance=_on_utterance,
+            on_state_change=_on_state_change,
+        )
+
+    threading.Thread(target=_init_voice_bg, daemon=True, name="voice-init").start()
+
+ # ── Telegram bot init ────────────────────────────────────────────────────
+from config import TELEGRAM_ENABLED
+if TELEGRAM_ENABLED:
+    from telegram_handler import init_telegram, start_telegram_bot, notify
+    if init_telegram():
+        start_telegram_bot()
+        log.info("Telegram: bot started — owner notifications active")
+        # Notify owner Eric is online
+        import threading
+        threading.Timer(3.0, lambda: notify(
+            "🤖 *ERIC online.*\n"
+            "Edge Robotics Innovation by Cosmos.\n"
+            "Ready for missions."
+        )).start()
+    else:
+        log.warning("Telegram: init failed — check TELEGRAM_BOT_TOKEN in .env")
     # ── Email handler init ───────────────────────────────────────────────────
     from config import EMAIL_ENABLED
     if EMAIL_ENABLED:
@@ -323,10 +328,15 @@ Ready for missions."
         else:
             log.warning("Email: init failed — check ERIC_EMAIL_PASSWORD in .env")
 
-    # ── Cosmos connectivity test ──────────────────────────────────────────────
-    from cosmos import ask_cosmos
-    test = ask_cosmos("Say exactly: ERIC online and ready.", max_tokens=20)
-    log.info(f"Cosmos test: {test}")
+    # ── Cosmos connectivity test (non-blocking — runs in background) ─────────
+    def _cosmos_test():
+        try:
+            from cosmos import ask_cosmos
+            test = ask_cosmos("Say exactly: ERIC online and ready.", max_tokens=20)
+            log.info(f"Cosmos test: {test}")
+        except Exception as e:
+            log.warning(f"Cosmos test failed ({e}) — vLLM may not be running")
+    threading.Thread(target=_cosmos_test, daemon=True, name="cosmos-test").start()
 
     # ── Launch Gradio GUI (non-blocking — prevent_thread_lock=True) ──────────
     try:

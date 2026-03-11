@@ -338,7 +338,7 @@ class OdomNode:
         from rclpy.node import Node
         from std_msgs.msg import String, Empty
 
-        rclpy.init(args=None)
+        if not rclpy.ok(): rclpy.init(args=None)
         self._node = Node("eric_odom_node")
 
         # Publish simplified pose — useful for Telegram/GUI display

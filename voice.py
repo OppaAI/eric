@@ -35,7 +35,7 @@ from config import (
     ASR_MODEL, ASR_DEVICE, ASR_LANGUAGE, ASR_SAMPLE_RATE,
     ASR_ENABLED, ASR_VERIFY_SPEAKER, ASR_SPEAKER_EMBEDDING,
     ASR_WAKE_WORDS, ASR_SESSION_TIMEOUT_SEC,
-    ASR_VERIFY_THRESHOLD,
+    ASR_VERIFY_THRESHOLD, ASR_MIC_DEVICE
 )
 
 # ─── Constants ────────────────────────────────────────────────────────────────
@@ -319,6 +319,7 @@ def _audio_capture_thread():
 
         with sd.InputStream(
             samplerate=ASR_SAMPLE_RATE,
+            device=ASR_MIC_DEVICE,
             channels=1,
             dtype="float32",
             blocksize=CHUNK_SAMPLES,

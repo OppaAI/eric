@@ -1097,7 +1097,7 @@ class OakdNode:
         from rclpy.node import Node
         from std_msgs.msg import String, Bool
 
-        rclpy.init(args=None)
+        if not rclpy.ok(): rclpy.init(args=None)
         self._node = Node("eric_oakd_node")
 
         # Publish /oakd/yolo — YOLO detection events as JSON

@@ -201,7 +201,7 @@ class TtsNode:
         from rclpy.node import Node
         from std_msgs.msg import String, Empty
 
-        rclpy.init(args=None)
+        if not rclpy.ok(): rclpy.init(args=None)
         self._node = Node("eric_tts_node")
 
         # Subscribe /tts/speak — any node can request speech

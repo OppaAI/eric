@@ -300,7 +300,7 @@ class MotorNode:
         from geometry_msgs.msg import Twist
         from std_msgs.msg import String, Float32
 
-        rclpy.init(args=None)
+        if not rclpy.ok(): rclpy.init(args=None)
         self._node = Node("eric_motor_node")
 
         # Subscribe /cmd_vel — Nav2 sends Twist messages here

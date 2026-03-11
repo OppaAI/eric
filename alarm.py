@@ -313,7 +313,7 @@ class AlarmNode:
         from rclpy.node import Node
         from std_msgs.msg import String, Empty
 
-        rclpy.init(args=None)
+        if not rclpy.ok(): rclpy.init(args=None)
         self._node = Node("eric_alarm_node")
 
         self._trigger_sub = self._node.create_subscription(

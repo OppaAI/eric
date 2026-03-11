@@ -40,6 +40,7 @@ GRADIO_HOST = os.getenv("GRADIO_HOST", "0.0.0.0")
 
 # ─── ASR / Voice Pipeline (faster-whisper + silero-vad + ECAPA-TDNN) ────────────
 ASR_MODEL              = os.getenv("ASR_MODEL",    "distil-small.en")  # distil-small.en | distil-medium.en | base | turbo
+ASR_MIC_DEVICE = int(os.getenv("ASR_MIC_DEVICE", "2"))
 ASR_DEVICE             = os.getenv("ASR_DEVICE",   "cpu")              # cpu only — no VRAM conflict with Cosmos
 ASR_LANGUAGE           = os.getenv("ASR_LANGUAGE", "en")               # en | fr | None (auto-detect)
 ASR_SAMPLE_RATE        = int(os.getenv("ASR_SAMPLE_RATE", "16000"))
