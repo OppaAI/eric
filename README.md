@@ -1,3 +1,12 @@
+
+>### Status: Archived
+>ERIC was my entry for the NVIDIA Cosmos Cookoff 2026. Built in ~10 days as a solo project, it was one of the few real physical robots running fully quantized Cosmos Reason 2 on a Jetson Orin Nano (no cloud).
+This was a valuable learning experience in edge deployment and VLM-based robot control. Lessons learned have been carried forward into the next project (AGi / Grace).
+The repo will remain public for reference.
+>
+>I will put my main focus on developing an AI framework resembling a human system in my AGi repo:
+https://github.com/OppaAI/AGi
+
 # ERIC — Edge Robotics Innovation by Cosmos
 
 **Mission-based Autonomous Unmanned Ground Robot powered by NVIDIA Cosmos Reason 2**  
